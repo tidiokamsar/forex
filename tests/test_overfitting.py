@@ -7,13 +7,19 @@ from itertools import pairwise
 
 from astra.overfitting import (
     MAX_COMBINATIONS,
+    NULL_TRIAL_VARIANCE,
     OVERFITTING_VERSION,
     PBO_METHOD,
     DeflatedSharpeResult,
     PBOResult,
+    TrialUniverse,
+    cross_sectional_variance,
+    deflated_sharpe_from_moments,
     deflated_sharpe_ratio,
     expected_maximum_sharpe,
     probability_of_backtest_overfitting,
+    resolve_trials,
+    selection_score_metric,
     sharpe_like,
 )
 
@@ -89,8 +95,8 @@ class HandComputedPBOTest(unittest.TestCase):
         self.assertEqual(sorted(set(seen)), [4, 5])
         self.assertEqual(sum(seen), 6 * 2 * 9)
 
-    def test_ties_lowest_index_in_sample_and_average_rank_out_of_sample(self):
-        # Two identical variants: IS tie -> variant 0; OOS tie -> rank 1.5, w = 0.5, lambda = 0 -> overfit.
+    def test_identical_variants_tie_in_and_out_of_sample(self):
+        # Two identical variants: IS tie (either one); OOS tie -> rank 1.5, w = 0.5, lambda = 0 -> overfit.
         rows = [[r[0], r[0]] for r in _noise(3, 16, 1)]
         result = probability_of_backtest_overfitting(rows, n_slices=4)
         self.assertTrue(all(value == 0.0 for value in result.logits))
@@ -227,9 +233,186 @@ class DeflatedSharpeTest(unittest.TestCase):
                 deflated_sharpe_ratio(returns, **kwargs)
 
 
+class SelectionMetricTest(unittest.TestCase):
+    def test_selection_score_matches_hand_computation(self):
+        # Equity 1000 -> 1100 -> 1050 -> 1080; peak 1100, drawdown 50/1100; score = 80 - 1000 * 50 / 1100.
+        metric = selection_score_metric(1000.0)
+        self.assertAlmostEqual(metric([100.0, -50.0, 30.0]), 80.0 - 1000.0 * 50.0 / 1100.0, places=12)
+        # Cash peak-to-trough variant: 80 - 50.
+        self.assertAlmostEqual(selection_score_metric()([100.0, -50.0, 30.0]), 30.0, places=12)
+        # A loss from the start counts against the initial peak.
+        self.assertAlmostEqual(selection_score_metric()([-4.0, 1.0]), -3.0 - 4.0, places=12)
+        with self.assertRaises(ValueError):
+            selection_score_metric(0.0)
+
+    def test_selection_score_equals_validation_selection_score(self):
+        from types import SimpleNamespace
+
+        from astra.validation import _selection_score
+
+        pnl = [120.0, -300.0, 50.0, 400.0, -80.0]
+        equity, peak, worst = 10_000.0, 10_000.0, 0.0
+        for value in pnl:
+            equity += value
+            peak = max(peak, equity)
+            worst = max(worst, (peak - equity) / peak * 100.0)
+        result = SimpleNamespace(initial_equity=10_000.0, net_pnl=sum(pnl), max_drawdown_pct=worst)
+        self.assertAlmostEqual(selection_score_metric(10_000.0)(pnl), _selection_score(result), places=9)
+
+
+class HandComputedSelectionPBOTest(unittest.TestCase):
+    # Two slices of two rows, two variants.
+    #   block 0: X = [-5, 6], Y = [0.5, 0.4]     block 1: X = [1, 1], Y = [-1, 0]
+    # Cash selection score (net - peak-to-trough):
+    #   block 0: X = 1 - 5 = -4, Y = 0.9 - 0 = 0.9     block 1: X = 2, Y = -1 - 1 = -2
+    #   IS=0 -> Y; OOS Y=-2 < X=2 -> rank 1, w = 1/3, lambda = ln(1/2) -> overfit, OOS loss
+    #   IS=1 -> X; OOS X=-4 < Y=0.9 -> rank 1, lambda = ln(1/2) -> overfit, OOS loss
+    #   PBO = 1, probability_oos_loss = 1.
+    # With the mean instead: IS=0 -> X (0.5 > 0.45), OOS X=1 > Y -> rank 2, lambda = ln 2;
+    #   IS=1 -> X, OOS X=0.5 > 0.45 -> lambda = ln 2; PBO = 0. The ranking criterion matters.
+    ROWS = ((-5.0, 0.5), (6.0, 0.4), (1.0, -1.0), (1.0, 0.0))
+
+    def test_selection_metric(self):
+        result = probability_of_backtest_overfitting(self.ROWS, n_slices=2, metric=selection_score_metric())
+        self.assertEqual(result.n_combinations, 2)
+        for value in result.logits:
+            self.assertAlmostEqual(value, math.log(0.5), places=12)
+        self.assertEqual(result.pbo, 1.0)
+        self.assertEqual(result.probability_oos_loss, 1.0)
+        self.assertTrue(result.metric.startswith("astra_selection_score"))
+
+    def test_mean_metric_disagrees(self):
+        result = probability_of_backtest_overfitting(self.ROWS, n_slices=2, metric=statistics.fmean)
+        for value in result.logits:
+            self.assertAlmostEqual(value, math.log(2), places=12)
+        self.assertEqual(result.pbo, 0.0)
+
+
+class ConservativeTieAndEligibilityTest(unittest.TestCase):
+    # block 0: V0 = [1, 1], V1 = [1, 1], V2 = [0, 0]   block 1: V0 = [2, 2], V1 = [-1, -1], V2 = [0, 0]
+    ROWS = ((1.0, 1.0, 0.0), (1.0, 1.0, 0.0), (2.0, -1.0, 0.0), (2.0, -1.0, 0.0))
+
+    def test_in_sample_tie_takes_worst_out_of_sample_variant(self):
+        # IS=0: V0 and V1 tie at 1; V1 is worse OOS (-1) and is taken -> rank 1, w = 1/4, lambda = ln(1/3).
+        # (The former lowest-index rule took V0: rank 3, lambda = ln 3, hiding the tie.)
+        # IS=1: V0 wins (2); OOS V0 = V1 = 1 tie, V2 = 0 -> midrank 2.5, w = 0.625, lambda = ln(5/3).
+        result = probability_of_backtest_overfitting(self.ROWS, n_slices=2, metric=statistics.fmean)
+        self.assertAlmostEqual(result.logits[0], math.log(1 / 3), places=12)
+        self.assertAlmostEqual(result.logits[1], math.log(5 / 3), places=12)
+        self.assertEqual(result.pbo, 0.5)
+
+    def test_ineligible_variants_cannot_be_selected_and_empty_halves_abstain(self):
+        # No variant has an eligible count in block 0 -> that combination abstains.
+        # In block 1 only V1 is eligible: IS=1 selects V1 (score -1) although V0 scores 2;
+        # OOS block 0: V1 = 1 ties V0, V2 = 0 -> midrank 2.5, lambda = ln(5/3).
+        counts = [[0, 0, 0], [0, 0, 0], [0, 1, 0], [0, 0, 0]]
+        result = probability_of_backtest_overfitting(
+            self.ROWS, n_slices=2, metric=statistics.fmean, eligibility=counts, minimum_eligibility=1
+        )
+        self.assertEqual((result.n_combinations, result.n_evaluated, result.n_abstained), (2, 1, 1))
+        self.assertEqual(len(result.logits), 1)
+        self.assertAlmostEqual(result.logits[0], math.log(5 / 3), places=12)
+        self.assertEqual(result.pbo, 0.0)
+
+    def test_all_abstained_raises_and_bad_eligibility_is_rejected(self):
+        zeros = [[0, 0, 0]] * 4
+        with self.assertRaisesRegex(ValueError, "no combination"):
+            probability_of_backtest_overfitting(self.ROWS, n_slices=2, eligibility=zeros, minimum_eligibility=1)
+        with self.assertRaises(ValueError):
+            probability_of_backtest_overfitting(self.ROWS, n_slices=2, eligibility=[[0, 0]] * 4)
+        with self.assertRaises(ValueError):
+            probability_of_backtest_overfitting(self.ROWS, n_slices=2, eligibility=[[0, -1, 0]] * 4)
+
+
+class DeflatedSharpePaperExampleTest(unittest.TestCase):
+    """Bailey and Lopez de Prado (2014), section 'A numerical example'.
+
+    Annualized SR 2.5 on 5 years of daily data (T = 1250, 250 per year), N = 100 trials, annualized
+    V[SR] = 1/2, skewness -3, kurtosis 10 (non-excess). The paper reports SR0 = 0.1132 (non-annualized)
+    and DSR = 0.9004; N = 46 would give 0.9505; with normal returns the 95% level holds up to N = 88.
+    """
+
+    def compute(self, n_trials, skewness=-3.0, kurtosis=10.0):
+        return deflated_sharpe_from_moments(
+            sharpe=2.5 / math.sqrt(250), n_observations=1250, skewness=skewness, kurtosis=kurtosis,
+            n_trials=n_trials, trial_sharpe_variance=0.5 / 250,
+        )
+
+    def test_paper_values(self):
+        sr0, dsr = self.compute(100)
+        self.assertAlmostEqual(sr0, 0.1132, places=4)
+        self.assertAlmostEqual(dsr, 0.9004, places=4)
+        self.assertAlmostEqual(self.compute(46)[1], 0.9505, places=4)
+        self.assertGreater(self.compute(46)[1], 0.95)
+        self.assertLess(self.compute(47)[1], 0.95)
+        self.assertGreater(self.compute(88, 0.0, 3.0)[1], 0.95)
+        self.assertLess(self.compute(89, 0.0, 3.0)[1], 0.95)
+
+    def test_excess_kurtosis_would_be_wrong(self):
+        # Passing excess kurtosis (7) instead of kurtosis (10) understates the standard error.
+        self.assertGreater(self.compute(100, kurtosis=7.0)[1], self.compute(100)[1])
+
+    def test_result_records_variance_and_convention(self):
+        result = deflated_sharpe_ratio(DeflatedSharpeTest.RETURNS, n_trials=3)
+        self.assertAlmostEqual(result.trial_sharpe_variance, 1 / 249, places=15)
+        self.assertEqual(result.trial_sharpe_variance_source, NULL_TRIAL_VARIANCE)
+        self.assertEqual(result.kurtosis_convention, "non-excess (normal = 3)")
+        supplied = deflated_sharpe_ratio(DeflatedSharpeTest.RETURNS, n_trials=3, trial_sharpe_variance=0.01)
+        self.assertEqual((supplied.trial_sharpe_variance, supplied.trial_sharpe_variance_source), (0.01, "supplied"))
+
+
+class ResolveTrialsTest(unittest.TestCase):
+    UNIT = "per_bar"
+
+    def resolve(self, **kwargs):
+        options = {"plan_trials": 7, "plan_trial_sharpes": (), "sample_length": 101, "sharpe_unit": self.UNIT}
+        options.update(kwargs)
+        return resolve_trials(**options)
+
+    def test_plan_only_uses_null_floor(self):
+        resolution = self.resolve(plan_trial_sharpes=(0.1, 0.2))
+        self.assertEqual((resolution.n_trials, resolution.n_trials_plan, resolution.n_trials_source), (7, 7, "plan"))
+        self.assertAlmostEqual(resolution.trial_sharpe_variance, 0.01, places=15)
+        self.assertIn(NULL_TRIAL_VARIANCE, resolution.trial_sharpe_variance_method)
+        self.assertTrue(any("fewer than" in note for note in resolution.notes))
+
+    def test_dispersed_plan_trials_raise_the_variance(self):
+        sharpes = (-0.3, -0.1, 0.0, 0.1, 0.3)
+        expected = cross_sectional_variance(sharpes)
+        self.assertAlmostEqual(expected, 0.05, places=15)
+        self.assertAlmostEqual(self.resolve(plan_trial_sharpes=sharpes).trial_sharpe_variance, 0.05, places=15)
+
+    def test_universe_count_is_used_and_plan_is_a_floor(self):
+        bigger = self.resolve(universe=TrialUniverse(n_trials=250, source="registry"))
+        self.assertEqual((bigger.n_trials, bigger.n_trials_source), (250, "universe:registry"))
+        smaller = self.resolve(universe=TrialUniverse(n_trials=3))
+        self.assertEqual(smaller.n_trials, 7)
+        self.assertTrue(any("below the plan" in note for note in smaller.notes))
+
+    def test_universe_sharpes_only_in_the_same_unit_and_bar_size(self):
+        sharpes = (-0.5, -0.2, 0.0, 0.2, 0.5, 0.4)
+        variance = cross_sectional_variance(sharpes)
+        same = self.resolve(bar_seconds=900, universe=TrialUniverse(20, sharpes, self.UNIT, 900))
+        self.assertAlmostEqual(same.trial_sharpe_variance, variance, places=15)
+        other_unit = self.resolve(bar_seconds=900, universe=TrialUniverse(20, sharpes, "annualized", 900))
+        other_bars = self.resolve(bar_seconds=900, universe=TrialUniverse(20, sharpes, self.UNIT, 3600))
+        for resolution in (other_unit, other_bars):
+            self.assertAlmostEqual(resolution.trial_sharpe_variance, 0.01, places=15)
+            self.assertTrue(any("ignored" in note for note in resolution.notes))
+            self.assertEqual(resolution.n_trials, 20)
+
+    def test_invalid_universe(self):
+        with self.assertRaises(ValueError):
+            TrialUniverse(n_trials=0)
+        with self.assertRaises(ValueError):
+            TrialUniverse(n_trials=2, trial_sharpes=(math.nan,))
+        with self.assertRaises(TypeError):
+            self.resolve(universe={"n_trials": 9})
+
+
 class SerializationTest(unittest.TestCase):
     def test_to_dict_is_json_serializable_and_versioned(self):
-        self.assertEqual(OVERFITTING_VERSION, "astra-overfitting-1.0.0")
+        self.assertEqual(OVERFITTING_VERSION, "astra-overfitting-1.1.0")
         pbo = probability_of_backtest_overfitting(_noise(8, 32, 3), n_slices=4)
         dsr = deflated_sharpe_ratio(DeflatedSharpeTest.RETURNS, n_trials=4)
         self.assertIsInstance(pbo, PBOResult)

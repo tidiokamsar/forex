@@ -106,8 +106,10 @@ class RecordingTests(StoreCase):
         stats = trial_statistics_for_protocol(self.database, report.plan_sha256)
         self.assertEqual(stats.count, report.variants_tested)
         # The store-wide Sharpe dispersion is the one the walk-forward already uses for the DSR.
-        if report.overfitting.trial_sharpe_variance is not None:
-            self.assertAlmostEqual(stats.trial_sharpe_variance, report.overfitting.trial_sharpe_variance)
+        # Registry Sharpes are in the DSR unit (per-bar mark-to-market), equal to the plan's own trial Sharpes.
+        for recorded, planned in zip(sorted(stats.trial_sharpes), sorted(report.overfitting.trial_sharpes), strict=True):
+            self.assertAlmostEqual(recorded, planned)
+        if len(stats.trial_sharpes) >= 2:
             self.assertAlmostEqual(statistics.variance(stats.trial_sharpes), stats.trial_sharpe_variance)
         self.assertTrue(verify_attempt_chain(self.database).ok)
 
