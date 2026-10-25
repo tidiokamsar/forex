@@ -17,6 +17,9 @@
 - Execution boundary: every adapter's `submit_order` requires an HMAC execution permit that only the gateway issues after its checks (process-local random key, 30-second validity, single-use, bound to client id, instrument, side, size, order type, stop-loss, purpose and mode; a reused permit is refused with `permit_already_used`). Subclasses cannot override `submit_order`; the check resolves through the MRO, so a mixin cannot replace it either. A refusal ends the order `BROKER_REJECTED` with `execution_refused:<reason>`. Without a valid permit, or when the adapter's own environment guard refuses, `ExecutionRefused` is raised and nothing is sent (C-01, tests in `test_ctrader.ExecutionBoundaryTests`).
 - cTrader adapter guard: refuses unless the provider reported `isLive: false`, DEMO is in `EXECUTABLE_MODES`, the adapter was explicitly built with `allow_demo_orders=True` and it is `CONNECTED`. None of these is enabled for orders in this build.
 - Read-only check review (2026-10-25): `ctrader-check` builds the adapter with `allow_demo_orders=False`, never calls `submit_order` or `_send_order` (a test fails if either is reached), and counts any `ProtoOANewOrderReq`/`ProtoOAClosePositionReq` sent (must be 0). It is safe to run against a demo account.
+- Structured logs (`logs.py`) replace the values of fields whose names look like secrets (`secret`, `token`, `password`, `passwd`, `api_key`, `authorization`, `credential`) with `****`, recursively. Redaction is by field name only; a secret passed inside a free-text message would not be caught, so code must not log secrets as messages.
+- `backup restore` requires `HUMAN_ADMIN` or `HUMAN_OPERATOR` (`Action.RESTORE_BACKUP`) and a reason, verifies the backup's SHA-256 and integrity before replacing anything, keeps the previous database, and freezes every account with orders until a consistent reconciliation.
+- cTrader token refresh is refused unless the caller passes a `TokenStore`; none is bundled, so rotated tokens are never written to an unchosen location.
 - Limitation of the permit: it stops accidental, strategy and LLM bypasses inside ASTRA. Code that deliberately imports the private permit authority could forge one; that requires a reviewed code change.
 
 ## Known gaps
@@ -24,7 +27,7 @@
 - No user authentication, authorization, dashboard TLS, network access controls, secret store, external or human-signed order authorization, or multi-user isolation. (The internal HMAC execution permit proves only that the gateway's checks ran in this process; it is not a human signature.) The service must remain on loopback.
 - Roles are asserted by the calling code or the local CLI user, not authenticated.
 - The importer limits total bytes, rows, columns, field length, and stored issue count; a size-limit error rejects the import before data is parsed.
-- Reconciliation is implemented and tested against the simulated broker only. No backups, restore evidence, dependency scanner, SBOM, or service supervisor has been implemented.
+- Reconciliation is implemented and tested against the simulated broker only. Backup and restore are tested locally with the simulator only; backups are unencrypted copies of the database and must be protected like it. No dependency scanner, SBOM, secure token store, or external service supervisor has been implemented.
 - The local SQLite audit trail is not tamper-proof or externally replicated.
 
 ## Reporting a security issue

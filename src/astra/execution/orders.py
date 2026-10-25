@@ -339,6 +339,13 @@ class ExecutionStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def account_refs(self) -> list[str]:
+        """Every account that has at least one order, without any row limit."""
+
+        with self._connect() as db:
+            rows = db.execute("SELECT DISTINCT account_ref FROM orders ORDER BY account_ref").fetchall()
+        return [row["account_ref"] for row in rows]
+
     def expected_net_units(self, account_ref: str) -> dict[str, float]:
         """Signed filled units per instrument according to ASTRA's own records."""
 

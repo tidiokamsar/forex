@@ -60,6 +60,23 @@ BrokerAdapter.submit_order (not overridable, checked through the MRO)
 - `BrokerRequestError` (provider refused a request) is handled without a connection freeze: on submit the order ends `BROKER_REJECTED` with `broker_request_error:<code>`; during reconciliation the result is `FAILED` and `reconciliation_required` is kept. `BrokerUnavailable` (link, auth, session; cTrader `CTraderConnectionError`) still freezes entries (`connection_lost`) and requires reconciliation.
 - `execution.resolution` lets a human resolve an `UNKNOWN` or `SUBMITTED` order with evidence; it never lifts freezes, reconciliation does.
 
+## Operating foundations (F-01 to F-04)
+
+```text
+TradingService.tick (one account, one adapter)
+   check_connection -> lost: connection_lost + reconciliation_required freezes -> adapter.reconnect()
+   reconcile if a reconciliation-owned freeze is active (and at start, every 15 bars)
+   process_events (per-account cursor) -> quote -> BarBuilder (bar emitted after close)
+   bar close: stop management -> decision on closed bars -> ExecutionCommand (deterministic intent id)
+              -> OrderGateway (all checks above) -> persist last bar / stop in service_state
+   5 consecutive tick errors -> service_degraded freeze (human clears)
+```
+
+- `service.py` never builds a broker; the caller chooses the adapter. The CLI wires only `SimulatedBroker` and `SyntheticQuoteFeed`.
+- `logs.py`: JSON lines with correlation id and secret-field redaction; silent (`NullHandler`) until the CLI configures it.
+- `backup.py`: SQLite online backup with manifest; restore verified, human-only, followed by per-account `reconciliation_required` freezes.
+- `brokers/ctrader.py`: reconnect with capped backoff, permanent versus transient errors, client rate limiter, single read-only `retryAfter` retry, token expiry check and store-gated refresh.
+
 ## Structural options considered
 
 | Option | Benefits | Costs and risks | Decision |
@@ -74,7 +91,7 @@ The choice is intentionally local and reversible. The custom `RiskEngine`, data 
 
 - The only executable mode is `SIMULATION`. Configuration defaults to it and rejects `DEMO`/`LIVE` plus any live-enable environment flag; the gateway also re-verifies mode against the adapter on every command.
 - A backtest run is immutable after persistence; run metadata contains source type, source name, SHA-256, assumptions, metrics, and risk rejections.
-- SQLite stores research records and audit events, not credentials or broker state.
+- SQLite stores research records and audit events, not credentials. The `service_state` table holds operational state (service heartbeats, last processed bar, active stop price, broker event cursor per account); it is not audited.
 - The dashboard accepts GET only. POST, PUT, and DELETE receive HTTP 405.
 - The service binds only to loopback. It has no authentication, TLS, CORS allowance, or remote-access claim.
 - Durable idempotency comes from the gateway's `orders` table (intent id primary key, derived client order id unique). The RiskEngine's in-memory set is a second line of defence only.

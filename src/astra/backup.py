@@ -141,7 +141,7 @@ def restore_backup(backup: str | Path, database: str | Path, *, actor: Actor, re
     store.initialize()
     # Freeze every account the restored store knows about; each one's gateway
     # lifts its own freeze with a consistent reconciliation.
-    accounts = sorted({order.account_ref for order in store.list_orders(limit=500)})
+    accounts = store.account_refs()
     for account_ref in accounts:
         TradingControls(store, scope=account_ref).freeze(
             FreezeReason.RECONCILIATION_REQUIRED, actor=actor.actor_id, context="restored_from_backup"

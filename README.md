@@ -33,11 +33,18 @@ Open `http://127.0.0.1:8765`. All bundled data is **synthetic** (`data/synthetic
 | `paper-replay [--csv ...] [--strategy sma\|momentum\|breakout]` | Replays bars through Order Gateway + RiskEngine + simulated broker, then reconciles |
 | `orders`, `models` | Inspect stored orders, model versions and experiments |
 | `orders --resolve INTENT_ID --outcome FILLED\|NOT_EXECUTED --evidence "..." --operator <name> [--filled-units N --price P]` | Human resolution of an `UNKNOWN` or `SUBMITTED` order; never lifts freezes (see [OPERATIONS.md](OPERATIONS.md)) |
-| `controls show\|kill\|release` | Emergency stop and entry freezes (see [OPERATIONS.md](OPERATIONS.md)) |
+| `controls show\|kill\|release\|clear-freeze` | Emergency stop and entry freezes (see [OPERATIONS.md](OPERATIONS.md)) |
+| `service run [--strategy ...] [--timeframe N] [--realtime] [--max-ticks N]` | Continuous trading loop on the simulated broker with a `SYNTHETIC` feed (see [OPERATIONS.md](OPERATIONS.md)) |
+| `service status` | Last heartbeat per service account (`alive`, age) |
+| `backup create [--dir ...] [--keep N]` | Consistent, integrity-checked SQLite backup with SHA-256 manifest (`ASTRA_BACKUP_DIR`, default `var/backups`) |
+| `backup verify PATH` | Check a backup's hash, integrity and row counts against its manifest |
+| `backup restore PATH --operator <name> --reason "..."` | Human restore (stop the service first; not enforced); every account with orders frozen until a consistent reconciliation |
 | `serve` | Read-only loopback dashboard |
 | `ctrader-check --operator <name>` | Read-only cTrader DEMO connection check; sends no order (see [BROKERS.md](BROKERS.md)) |
 
 CSV columns are `timestamp,instrument,open,high,low,close`; `volume`, `bid`, `ask` are optional. Timestamps need a UTC offset. Label sources honestly (`HISTORICAL`, `DELAYED`, `LIVE`, `SIMULATED`, `SYNTHETIC`).
+
+Logs are JSON lines on stderr: `ASTRA_LOG_LEVEL` (default `WARNING`), `ASTRA_LOG_DIR` for a rotating `astra.jsonl`. Secret-like fields are redacted.
 
 ## Modules
 
@@ -58,6 +65,9 @@ CSV columns are `timestamp,instrument,open,high,low,close`; `volume`, `bid`, `as
 | `execution.resolution` | Human resolution of undetermined orders with evidence |
 | `governance` | Roles, permission guard, secret access, two-person risk change, LLM output validation |
 | `engine` | Paper replay end-to-end path |
+| `logs` | Structured JSON logging, correlation ids, secret-field redaction |
+| `backup` | SQLite backup, verification and human restore that forces reconciliation |
+| `service` | Continuous trading loop, bar builder, heartbeat, degraded mode |
 | `web`, `cli` | Dashboard and command line |
 
 ## Verify
@@ -77,7 +87,9 @@ Latest recorded result: see [ACCEPTANCE_REPORT.md](ACCEPTANCE_REPORT.md).
 ## Limits
 
 - Synthetic data only; no result here is evidence about real markets. Historical performance does not guarantee future results, and nothing here is financial advice.
-- The cTrader demo adapter is tested offline only; its read-only `ctrader-check` has not been run against a real demo account, and DEMO order execution is disabled. No authentication, dashboard TLS, backups/restore proof, service supervisor or alert delivery.
+- The cTrader demo adapter is tested offline only; its read-only `ctrader-check` has not been run against a real demo account, and DEMO order execution is disabled. Its reconnection, rate limiting and token handling are also tested offline only.
+- Backup/restore and the continuous service exist and are tested locally with the simulator only; the service CLI runs on the simulated broker and a synthetic feed. No restore drill against a real broker account.
+- Missing: external service supervision (restart, start at boot), alert delivery, authentication, dashboard TLS.
 - Instrument specifications and costs are illustrative; no swaps or financing are modelled.
 - The kill switch is global to a store; entry freezes and daily-loss state are per account. The SQLite audit trail is mutable by its owner.
 - The dashboard binds to loopback only; do not expose it.

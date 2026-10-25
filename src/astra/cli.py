@@ -111,6 +111,13 @@ def build_parser() -> argparse.ArgumentParser:
     release = control_actions.add_parser("release", help="Lever l'arrêt d'urgence (humain)")
     release.add_argument("--reason", required=True)
     release.add_argument("--operator", required=True, help="Identifiant de l'opérateur humain")
+    clear = control_actions.add_parser(
+        "clear-freeze",
+        help="Lever un gel non lié à la réconciliation (operator, service_degraded...) ; humain",
+    )
+    clear.add_argument("--freeze", required=True, help="Code du gel, par exemple service_degraded")
+    clear.add_argument("--account", help="Compte concerné (défaut : gel global)")
+    clear.add_argument("--operator", required=True, help="Identifiant de l'opérateur humain")
     backtest = commands.add_parser("backtest", help="Backtester un fichier CSV local")
     backtest.add_argument("--csv", required=True, type=Path, help="Fichier OHLC CSV UTF-8")
     backtest.add_argument("--source-type", required=True, choices=SOURCE_TYPES)
@@ -680,6 +687,11 @@ def _operations_command(args: argparse.Namespace, config: AppConfig) -> int:
         # The CLI runs locally under the operator's own account; the role is
         # asserted, not authenticated. Remote use requires real authentication.
         controls.release_kill_switch(Actor(f"cli:{args.operator}", Role.HUMAN_OPERATOR), args.reason)
+    elif args.control_action == "clear-freeze":
+        # Reconciliation-owned freezes (connection_lost, ...) are refused here:
+        # only a consistent reconciliation may lift them.
+        controls = TradingControls(execution_store, scope=args.account)
+        controls.clear_freeze(args.freeze, Actor(f"cli:{args.operator}", Role.HUMAN_OPERATOR))
     _write_json(
         {
             "kill_switch_active": controls.kill_switch_active(),

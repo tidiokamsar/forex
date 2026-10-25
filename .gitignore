@@ -19,3 +19,6 @@ venv/
 *.p12
 backups/
 logs/
+
+# Agent worktrees and local tool state
+.claude/

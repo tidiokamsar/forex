@@ -1,5 +1,15 @@
 # Changelog
 
+## Foundations (F-01 to F-04) · branch `feat/fondations-exploitation` · 2026-10-25
+
+- F-01: `logs.py`, structured JSON logs on stderr (level `ASTRA_LOG_LEVEL`, default `WARNING` in the CLI) and optionally a rotating `astra.jsonl` in `ASTRA_LOG_DIR`. Correlation id from the order command; secret-like field names redacted recursively. Events for order results, reconciliation, connection loss, freezes, kill switch, cTrader, service and backup.
+- F-04: `backup.py` and CLI `backup create|verify|restore`. Online SQLite backup, integrity check, SHA-256 manifest, retention (`--keep`, default 14), default folder `ASTRA_BACKUP_DIR` or `var/backups`. Restore is human-only (`Action.RESTORE_BACKUP`) with a reason, verifies before replacing, keeps the previous file as `*.pre-restore-*`, and freezes every account with orders with `reconciliation_required`. A stale backup is caught by the next reconciliation (`DIVERGENT`).
+- F-03: cTrader `reconnect` with capped exponential backoff (5 attempts, 1 s doubling to 30 s), permanent errors raised without retry, client rate limiter (40 requests/s), one `retryAfter` retry for read-only requests only (orders never retried), access-token expiry check (expired refused before any message, warning under 3 days), `refresh_access_token` only with an explicit `TokenStore` (none bundled). Reconnecting lifts no freeze.
+- F-02: `service.py` and CLI `service run|status`. `TradingService` loop with a bar builder (bar emitted after close), deterministic intent ids, persisted last bar, stop price and throttled heartbeat (new `service_state` table, not audited), reconciliation at start, every 15 bars and after reconnect, degraded mode after 5 consecutive tick errors (`service_degraded` freeze, cleared by a human), graceful stop on SIGINT/SIGTERM/SIGBREAK. The CLI runs it on the simulated broker with a `SYNTHETIC` feed only.
+- Fix: the broker event cursor is now per account (`broker_event_cursor:<account_ref>`) and stored as operational state instead of an audited control.
+- Not provided: external supervision, alert delivery, a secure token store, a restore drill against a real broker.
+- Verification: see ACCEPTANCE_REPORT.md.
+
 ## Lot 1 corrections · branch `fix/lot1-securite` · 2026-10-25
 
 - C-01: execution permits are verified at `BrokerAdapter.submit_order`, the single execution boundary. The gateway issues an HMAC permit (process-local key, 30 s validity) after its checks; a missing, forged, mismatched or expired permit, or a refusal by the adapter's environment guard, raises `ExecutionRefused` and the order ends `BROKER_REJECTED` with `execution_refused:<reason>`. The cTrader guard requires `isLive: false`, DEMO in `EXECUTABLE_MODES` (not in this build), `allow_demo_orders=True` and a `CONNECTED` adapter.

@@ -45,6 +45,7 @@ The CLI has no adapter attached, so it records the operator's evidence without a
 | Adapter refuses at its execution boundary (permit or environment guard) | Order `BROKER_REJECTED` with `execution_refused:<reason>`; nothing leaves the process |
 | Adapter unreachable, or cTrader authentication/session error | `connection_lost` + `reconciliation_required` freezes |
 | Reconnect | Nothing unfreezes until `reconcile()` finds local and broker orders/positions consistent |
+| 5 consecutive service tick errors | `service_degraded` freeze; cleared by a human, not by reconciliation |
 | Position divergence or foreign order | `position_divergence` freeze; requires investigation |
 | Daily loss limit | Entry rejected, freeze and `alert.risk_daily_loss_limit` audit event |
 | Command created in the future | Rejected and `clock_inconsistent` freeze |
@@ -55,10 +56,60 @@ Orders, transitions, controls, reconciliations, experiments and model versions p
 
 The `SimulatedBroker` is in-memory, so cross-process reconciliation against it is not meaningful; the paper replay creates a new simulated account per run and reconciles at start and end.
 
-## Backup
+## Continuous service (F-02)
 
-Stop the service, then copy the SQLite file (default `var/astra.sqlite3`). A restore procedure and restore test are **not yet implemented or verified**.
+`python -m astra service run` runs `service.TradingService`, a loop that drives one account without a Claude session. In this build the CLI wires it **only** to the in-process `SimulatedBroker` (account `SIM-SERVICE-CLI`) and a `SYNTHETIC` random-walk quote feed; no external connector is wired into the service. The output states `"mode": "SIMULATION"`, `"feed": "SYNTHETIC"`, `"external_orders": false`.
+
+| Option | Default | Effect |
+|---|---|---|
+| `--strategy sma\|momentum\|breakout` | `sma` | Decision function |
+| `--timeframe N` | `60` | Bar length in seconds |
+| `--tick-seconds S` | `5.0` | Synthetic feed step |
+| `--realtime` | off | Wait `--tick-seconds` between ticks; without it the loop runs as fast as possible on the simulated clock |
+| `--max-ticks N` | none | Stop after N ticks; otherwise run until stopped |
+| `--seed N` | `7` | Synthetic feed seed |
+
+Behaviour (from `service.py`):
+- Each tick: connection check (a lost link freezes `connection_lost` and `reconciliation_required`; the adapter's `reconnect` is called if it has one), broker events, quote, bar builder. A bar is emitted only after it closes; the decision sees closed bars only.
+- Reconciliation runs at start, every 15 bars, and while a reconciliation-owned freeze is active (retried at most every 30 s of service clock, and immediately after a successful reconnect). Reconnecting lifts nothing; only a consistent reconciliation does.
+- Intent ids are deterministic (`svc:<account>:<strategy>:<bar time>:<purpose>:<side>:<tag>`), and the last processed bar and the active stop price are persisted. A restart that replays the last bar gets the stored intent back from the gateway instead of a second order.
+- Every order goes through `OrderGateway` with all its checks; the kill switch and freezes apply.
+- Degraded mode: 5 consecutive tick errors freeze entries for the account with `service_degraded` (event `service.degraded`, level CRITICAL) and the heartbeat status becomes `degraded`. This freeze is not reconciliation-owned: a human clears it with `python -m astra controls clear-freeze --freeze service_degraded --account <account_ref> --operator <name>` (role asserted as `HUMAN_OPERATOR`). The same command lifts `operator` freezes; reconciliation-owned freezes (`connection_lost`, `reconciliation_required`, `position_divergence`, `unknown_order_state`) are refused and exit with code 3.
+- Graceful stop: Ctrl+C, SIGINT, SIGTERM or SIGBREAK (where the platform has it) ends the loop after the current tick, writes a final `stopped` heartbeat and logs `service.stopped`.
+
+`python -m astra service status` prints, per account, the last heartbeat (`status`, `heartbeat_at`, simulated time, ticks, bars, errors, mode, last bar, stop price), `heartbeat_age_seconds`, and `alive` (status `running` or `degraded` and a heartbeat at most 120 s old). Heartbeats are written on every status change and otherwise at most every 5 s.
+
+Service heartbeats, last bar, stop price and the broker event cursor live in the `service_state` table: operational state, not controls, so they are not audit events. The event cursor is stored per account (`broker_event_cursor:<account_ref>`).
+
+The `SimulatedBroker` is in memory: a new `service run` starts a new, empty simulated account, so state left in the store by an earlier run will not match it. Use a fresh `ASTRA_DATABASE` for independent runs.
+
+## Structured logs (F-01)
+
+The CLI writes JSON lines to **stderr** (stdout stays the command's JSON result):
+- `ASTRA_LOG_LEVEL` sets the level (default `WARNING` in the CLI; use `INFO` to see order results and reconciliations).
+- `ASTRA_LOG_DIR`, if set, adds a rotating file `astra.jsonl` in that folder (5 MB per file, 5 rotated files).
+
+Each line has `ts` (UTC), `level`, `logger`, `event`, `message`, `correlation_id` when one is set (order commands use the command's `correlation_id`), `fields`, and `exception` when relevant. Field names matching `secret`, `token`, `password`, `passwd`, `api_key`, `authorization` or `credential` (case-insensitive, nested included) are replaced by `****`. Redaction is by field name, not by value.
+
+Events emitted in this build: `order.result`, `order.permission_denied`, `execution.reconciliation`, `execution.connection_lost`, `control.entries_frozen`, `control.kill_switch_activated`, `ctrader.connected`, `ctrader.connect_failed`, `ctrader.session_failed`, `ctrader.reconnect_wait`, `ctrader.reconnected`, `ctrader.rate_limited`, `ctrader.token_expiring`, `ctrader.token_refreshed`, `service.started`, `service.stopped`, `service.tick_failed`, `service.degraded`, `service.reconnect_failed`, `service.quote_unavailable`, `service.reconcile_error`, `backup.created`, `backup.restored`.
+
+Logs are local only: no shipping, no alert delivery.
+
+## Backup and restore (F-04)
+
+```powershell
+python -m astra backup create [--dir <folder>] [--keep 14]
+python -m astra backup verify <backup file>
+python -m astra backup restore <backup file> --operator <name> --reason "<why>"
+```
+
+- `create` uses SQLite's online backup API, runs `PRAGMA integrity_check`, and writes `astra-<UTC timestamp>.sqlite3` plus `<file>.manifest.json` (path, SHA-256, creation time, source, size, integrity result, row count per table). The folder is `--dir`, else `ASTRA_BACKUP_DIR`, else `var/backups`. Only the newest `--keep` backups (default 14) are kept.
+- `verify` recomputes the SHA-256 and the integrity check and compares row counts with the manifest; any mismatch fails.
+- `restore` requires a human role (`HUMAN_ADMIN` or `HUMAN_OPERATOR`; the CLI asserts `HUMAN_OPERATOR`, not authenticated) and a non-empty reason. **Stop the service first**; the code does not check this. The backup is verified before anything is replaced, the current database is kept next to it as `<name>.pre-restore-<UTC timestamp>`, and the copied file is hash-checked (on mismatch the previous database is put back). Every account that has orders in the restored store is frozen with `reconciliation_required`, and a `backup.restored` audit event records actor, reason, backup, hash and frozen accounts.
+- After a restore, entries stay blocked until a reconciliation against the broker is consistent. A backup older than the broker's state is detected at that reconciliation (`DIVERGENT`, for example `position_mismatch`) and the freeze stays.
+
+Evidence: tested locally against the simulator only (`tests/test_backup.py`). No restore drill has been run against a real broker account.
 
 ## Not implemented
 
-Service supervisor, alert delivery (e-mail/messaging), metrics endpoint beyond `/api/health`, log shipping, backup automation and restore test.
+External service supervision (restart on crash, start at boot), alert delivery (e-mail/messaging), metrics endpoint beyond `/api/health`, log shipping, scheduled backups, and a continuous service wired to a real connector.

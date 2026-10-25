@@ -27,6 +27,18 @@ Assumptions to confirm on the first supervised connection (also listed in the ad
 
 Deliberate limits: there is no documented lookup by `clientOrderId`, so `supports_order_lookup_by_client_id` is `False` and an order left `UNKNOWN` after a timeout stays frozen instead of being assumed absent, until a human resolves it with evidence (`python -m astra orders --resolve ...`, see [OPERATIONS.md](OPERATIONS.md)) and a reconciliation is consistent. Cancel/modify and hedged accounts with several positions per symbol are not supported.
 
+### Resilience (F-03, offline fixture only)
+
+- `CTraderAdapter.reconnect(max_attempts=5, base_delay=1.0, max_delay=30.0)`: each attempt stops the old session and opens a new transport; the delay doubles per failed attempt, capped at `max_delay`. It returns the number of attempts or raises `BrokerUnavailable` after the last one.
+- Permanent failures are raised at once, without retry: `LiveAccountRefused`, `CTraderConfigurationError` (account not granted to the token, symbol not offered, missing specification) and `CTraderConnectionError` with `OA_AUTH_TOKEN_EXPIRED`, `CH_ACCESS_TOKEN_INVALID`, `CH_CLIENT_AUTH_FAILURE`, `ACCOUNT_NOT_AUTHORIZED` or `RET_ACCOUNT_DISABLED`. Other connection errors, `BrokerUnavailable`, `BrokerTimeout` and `OSError` are transient and retried.
+- Reconnecting lifts no gateway freeze; a consistent reconciliation is still required.
+- Client rate limiter: token bucket of 40 requests/s (burst 40) per connection, below the documented 50 requests/s.
+- On `BLOCKED_PAYLOAD_TYPE` or `REQUEST_FREQUENCY_EXCEEDED` with a `retryAfter` of at most 10 s, a read-only request (trader, assets, symbols, symbol by id, reconcile, unrealized P&L, account list) is retried once after the wait. Order and close requests are never retried automatically.
+- Token expiry: `CTraderCredentials.access_token_expires_at` is optional. When set, `connect` refuses an expired token before any message is sent and logs `ctrader.token_expiring` under 3 days left; `token_status()` reports it. The CLI does not set it yet, so `ctrader-check` runs with an unknown expiry.
+- `refresh_access_token(token_store)` sends `ProtoOARefreshTokenReq` (2172, not yet exercised against the provider) and saves the new pair to the store before using it. It refuses without a `TokenStore`, and **none is bundled**: choosing secure durable storage for rotated tokens is a human decision.
+
+All of the above is tested against the scripted fake server only (`tests/test_ctrader_resilience.py`).
+
 **DEMO execution remains disabled.** `execution.mode.EXECUTABLE_MODES` and the RiskEngine accept SIMULATION only. Even with a valid gateway permit, the adapter refuses to send unless the provider reported `isLive: false`, DEMO is in `EXECUTABLE_MODES`, the adapter was built with `allow_demo_orders=True` and its connection is `CONNECTED`. Enabling DEMO orders is a separate reviewed change after the read-only check below passes on your account.
 
 ### Read-only connection check (run by you)

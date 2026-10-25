@@ -16,7 +16,7 @@ The suite is standard-library `unittest`; there are no test dependencies. Ruff i
 
 ## Evidence boundary
 
-Passing local tests prove only the functions exercised with local code and fixtures. Synthetic data is not market evidence. Execution tests run against the in-process `SimulatedBroker` with scripted faults: timeouts before and after acceptance, rejection, partial fills, disconnects, reversed event delivery, injected external positions and false environment reports. The cTrader adapter is tested against a scripted fake cTrader server (`tests/ctrader_fixture.py`, labelled as not recorded provider traffic) and the WebSocket client against a loopback WebSocket server; both are local and offline, and no test reaches the real cTrader service. There is no broker connection, external account test, demo execution, production database, deployment, performance claim, or backup/restore proof in this delivery. The dashboard was viewed once in a desktop browser pane; no device testing was done.
+Passing local tests prove only the functions exercised with local code and fixtures. Synthetic data is not market evidence. Execution tests run against the in-process `SimulatedBroker` with scripted faults: timeouts before and after acceptance, rejection, partial fills, disconnects, reversed event delivery, injected external positions and false environment reports. The cTrader adapter is tested against a scripted fake cTrader server (`tests/ctrader_fixture.py`, labelled as not recorded provider traffic) and the WebSocket client against a loopback WebSocket server; both are local and offline, and no test reaches the real cTrader service. The foundations tests are also local: `test_logs` (in-memory streams and a temporary log folder), `test_backup` (temporary SQLite files and the simulator), `test_ctrader_resilience` (the same fake cTrader server with scripted one-shot errors, injected sleep and clock) and `test_service` (simulator with the `SYNTHETIC` quote feed). There is no broker connection, external account test, demo execution, production database, deployment, supervised long-running service, performance claim, or restore drill against a real broker in this delivery. The dashboard was viewed once in a desktop browser pane; no device testing was done.
 
 ## Mandatory negative tests (spec 15.2)
 
@@ -46,5 +46,14 @@ No-lookahead coverage: `test_features`, `test_regimes`, `test_strategies` and `t
 | C-04 single event from cTrader `lookup_order` | `test_lot1_fixes.LookupEventTests` |
 | C-05 per-account freezes and daily-loss state | `test_lot1_fixes.AccountScopedControlTests` |
 | C-07 request errors versus connection loss | `test_lot1_fixes.ErrorClassificationTests` |
+
+## Foundations evidence (F-01 to F-04)
+
+| Item | Tests |
+|---|---|
+| F-01 structured logs, correlation id, redaction, gateway events | `test_logs.JsonLoggingTests`, `test_logs.GatewayLoggingTests` |
+| F-02 continuous service, bar builder, restart idempotency, reconnect, degraded mode | `test_service.ServiceRunTests`, `test_service.BarBuilderTests`, `test_cli_operations.test_service_run_and_status_on_simulator` |
+| F-03 cTrader reconnect, permanent errors, rate limit, token handling | `test_ctrader_resilience.ResilienceTests`, `test_ctrader_resilience.RateLimiterTests` |
+| F-04 backup, verify, restore, stale backup, human-only restore | `test_backup.BackupRestoreTests` |
 
 Record the exact command, exit code, and observed summary in `ACCEPTANCE_REPORT.md`. A skipped, interrupted, or unavailable check is not a pass.

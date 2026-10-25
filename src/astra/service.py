@@ -6,8 +6,9 @@ One ``TradingService`` drives one account through one broker adapter:
           -> broker events -> quote -> bar builder
     bar close: strategy decision (bars 0..i only) -> stop management
                -> ExecutionCommand -> OrderGateway (all safety checks)
-    always: reconcile at start, every N bars, and on every bar while a
-            reconciliation-owned freeze is active; heartbeat persisted
+    always: reconcile at start, every N bars, right after a reconnect, and
+            while a reconciliation-owned freeze is active (at most every
+            ``reconcile_retry_seconds`` of service time); heartbeat persisted
 
 Intent ids are derived from (account, strategy, bar, side, purpose), so a
 restart that replays the last bar cannot create a second order: the gateway

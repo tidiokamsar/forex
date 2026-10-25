@@ -23,8 +23,8 @@ Statuses: **DONE** = implemented and verified by tests run in this checkout; **P
 | ASTRA-009c | Enable DEMO order execution | BLOCKED | After a passing `ctrader-check`, confirm the assumptions in BROKERS.md, then a reviewed change to `EXECUTABLE_MODES` and RiskEngine mode support, plus a supervised one-minimum-size demo order test |
 | ASTRA-010 | Durable order state, idempotency, reconciliation, kill switch, freezes | DONE | `test_execution` (29) |
 | ASTRA-018 | Permission guard, secret access, two-person limit change, LLM validation | DONE | `test_governance` (8) |
-| ASTRA-019 | End-to-end paper replay through the gateway | DONE | `test_engine` (6), `test_cli_operations` (4) |
-| ASTRA-011 | Authentication, remote deployment, backup/restore, supervision, alert delivery | TODO | Next lot; restore test required before any claim |
+| ASTRA-019 | End-to-end paper replay through the gateway | DONE | `test_engine` (6), `test_cli_operations` (5) |
+| ASTRA-011 | Authentication, remote deployment, backup/restore, supervision, alert delivery | PARTIAL | Backup/restore done locally with the simulator (F-04). Authentication, remote deployment, external supervision and alert delivery not implemented |
 | ASTRA-020 | Drift detection and automatic strategy disable | TODO | Needs live or replayed observation stream |
 | ASTRA-021 | Autonomous improvement loop (candidate generation in sandbox) | TODO | Registry and gates exist; generation loop not built |
 | ASTRA-022 | Real-mode readiness dossier | TODO | Only after DEMO evidence; no automatic activation |
@@ -43,5 +43,16 @@ Statuses: **DONE** = implemented and verified by tests run in this checkout; **P
 | C-06 | Bound RiskEngine in-memory idempotency set | TODO | Low priority; durable idempotency is in the gateway |
 | C-07 | Provider request errors vs connection loss | DONE | `BrokerRequestError`, `CTraderConnectionError`; `test_lot1_fixes.ErrorClassificationTests` (5) |
 | C-08 | Project ruff configuration, relevant findings fixed | DONE | `pyproject.toml [tool.ruff]`; `ruff check src tests` passes |
+
+## Foundations (branch `feat/fondations-exploitation`)
+
+DONE here means implemented and tested locally with the simulator, the scripted fake cTrader server or the synthetic feed only.
+
+| ID | Scope | Status | Evidence |
+|---|---|---|---|
+| F-01 | Structured JSON logs: stderr, optional rotating `astra.jsonl`, correlation id, secret-field redaction, events for orders, reconciliation, freezes, kill switch, cTrader, service, backup | DONE (local) | `logs.py`; `test_logs.JsonLoggingTests` (4), `test_logs.GatewayLoggingTests` (2) |
+| F-02 | Continuous trading service: loop, bar builder, deterministic intent ids, persisted state and heartbeat, reconciliation at start/periodic/after reconnect, degraded mode, graceful stop, CLI `service run\|status`; broker event cursor per account | DONE (simulator only) | `service.py`; `test_service.ServiceRunTests` (7), `test_service.BarBuilderTests` (1), `test_cli_operations.test_service_run_and_status_on_simulator`. Not wired to a real connector; no external supervisor |
+| F-03 | cTrader reconnect with capped backoff, permanent vs transient errors, rate limiter, read-only `retryAfter` retry, token expiry check, store-gated refresh | DONE (offline fixture only) | `brokers/ctrader.py`; `test_ctrader_resilience.ResilienceTests` (11), `test_ctrader_resilience.RateLimiterTests` (1). No secure `TokenStore` bundled (human decision) |
+| F-04 | Backup create/verify/restore with manifest, retention, human-only restore, reconciliation required after restore | DONE (local, simulator) | `backup.py`; `test_backup.BackupRestoreTests` (7). No restore drill against a real broker |
 
 No item is marked DONE from an agent report alone: the coordinator ran the integrated suite (see ACCEPTANCE_REPORT.md).
