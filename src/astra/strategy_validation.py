@@ -286,6 +286,8 @@ class OverfittingAssessment:
     trial_resolution: dict | None = None
     deflated_sharpe_probability_plan_only: float | None = None
     dsr_trade_count: int | None = None
+    # StatisticalPolicy payload and the floors actually applied by this call (Lot 4, P-4).
+    statistical_policy: dict | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -352,6 +354,8 @@ class StrategyHoldoutEvaluation:
     holdout_observations: int
     assumptions: tuple[str, ...]
     evaluation_classification: str
+    # Evidence anchor state when scoring began (``storage.BacktestStore.anchor_holdout_start``, Lot 4, C-4).
+    evidence_anchor: dict | None = None
 
 
 def evaluate_strategy_walk_forward(
@@ -657,6 +661,12 @@ def evaluate_strategy_holdout_once(
     sealed plan. A completed retry returns the stored report (a ``dict``);
     a STARTED or FAILED attempt stays consumed. ``trial_universe`` is passed
     to the deflated Sharpe as in ``evaluate_strategy_walk_forward``.
+
+    Lot 4 round 4: the STARTED holdout attempt records the holdout returns and,
+    with an evidence anchor, is anchored before any number is computed; the
+    terminal attempt event records the SHA-256 of the stored report, the trial
+    universe used and the overfitting payload, so promotion can re-derive the
+    overfitting statistics from the bars and detect an edited report.
     """
 
     history, chosen, cost_model = _prepare(bars, candidates, protocol, initial_equity, cost_model)
@@ -708,38 +718,26 @@ def evaluate_strategy_holdout_once(
     if attempt["status"] == "COMPLETED":
         return attempt["report"]
 
+    dev = verified.overfitting
+    # Taken right before the STARTED event, so promotion can check it against the log (trials before that seq).
+    try:
+        universe = _store_trial_universe(store, report.plan_sha256, dev.bar_seconds, trial_universe)
+    except Exception as exc:
+        store.fail_holdout_evaluation(evaluation_id=attempt["evaluation_id"], error_type=type(exc).__name__)
+        raise
     holdout_attempt = attempts.HoldoutAttempt.start(
         store, protocol_id=report.plan_sha256, plan=report.plan_manifest, candidate_id=verified.selected_candidate_id,
         experiment_id=experiment_id, model_id=model_id, model_version=model_version,
+        holdout_returns=_holdout_returns(history, holdout_start_index),
     )
     try:
-        end = len(history)
+        # External trace of the consumed holdout before any holdout number exists (Lot 4, C-4).
+        anchor_record = store.anchor_holdout_start()
         selected, selected_result, reference, flat, sensitivity = _score_holdout_block(
             history, chosen, verified.selected_candidate_id, protocol, initial_equity, cost_model
         )
-        dev = verified.overfitting
-        universe = _store_trial_universe(store, report.plan_sha256, dev.bar_seconds, trial_universe)
-        holdout_returns = (
-            [value / initial_equity for value in mark_to_market_bar_pnl(history, holdout_start_index, end,
-                                                                         selected_result)]
-            if selected_result
-            else []
-        )
-        overfitting = assess_overfitting(
-            dev.performance_matrix,
-            dev.slice_labels,
-            variants_tested=verified.variants_tested,
-            dsr_returns=(*dev.dsr_returns, *holdout_returns) if selected_result else (),
-            trial_sharpe_variance=None,
-            trade_counts=dev.trade_count_matrix,
-            minimum_candidate_trades=dev.minimum_candidate_trades,
-            initial_equity=dev.initial_equity,
-            trial_sharpes=dev.trial_sharpes,
-            bar_seconds=dev.bar_seconds,
-            trial_universe=universe,
-            dsr_trade_count=(
-                (dev.dsr_trade_count or 0) + selected_result.trade_count if selected_result else None
-            ),
+        holdout_returns, overfitting = _holdout_overfitting(
+            history, verified, holdout_start_index, selected_result, initial_equity, universe
         )
         selected_metrics = _result_metrics(selected_result) if selected_result else None
         evaluation = StrategyHoldoutEvaluation(
@@ -777,10 +775,18 @@ def evaluate_strategy_holdout_once(
                 "Metrics are historical simulation estimates, not a guarantee or a promotion decision.",
             ),
             evaluation_classification="ONE_TIME_HOLDOUT_NOT_PROMOTABLE",
+            evidence_anchor=anchor_record,
         )
-        store.complete_holdout_evaluation(evaluation_id=attempt["evaluation_id"], report=asdict(evaluation))
+        report_sha256 = store.complete_holdout_evaluation(evaluation_id=attempt["evaluation_id"], report=asdict(evaluation))
         holdout_attempt.finish(
-            holdout_evidence(evaluation),
+            {
+                **holdout_evidence(evaluation),
+                "evaluation_id": attempt["evaluation_id"],
+                "report_sha256": report_sha256,
+                "trial_universe": trial_universe_payload(universe),
+                "overfitting": overfitting_payload(overfitting),
+                "evidence_anchor": anchor_record,
+            },
             _sharpe(holdout_returns) if selected_result else None,
         )
         store.anchor_now()
@@ -833,24 +839,102 @@ def _score_holdout_block(history, chosen, selected_id, protocol, initial_equity,
     return selected, selected_result, reference, flat, sensitivity
 
 
+def _holdout_overfitting(history, verified, holdout_start_index, selected_result, initial_equity, universe):
+    """Holdout DSR sample and overfitting assessment; shared by scoring and re-derivation (Lot 4, C-1)."""
+
+    dev = verified.overfitting
+    holdout_returns = (
+        [value / initial_equity for value in mark_to_market_bar_pnl(history, holdout_start_index, len(history),
+                                                                     selected_result)]
+        if selected_result
+        else []
+    )
+    overfitting = assess_overfitting(
+        dev.performance_matrix,
+        dev.slice_labels,
+        variants_tested=verified.variants_tested,
+        dsr_returns=(*dev.dsr_returns, *holdout_returns) if selected_result else (),
+        trial_sharpe_variance=None,
+        trade_counts=dev.trade_count_matrix,
+        minimum_candidate_trades=dev.minimum_candidate_trades,
+        initial_equity=dev.initial_equity,
+        trial_sharpes=dev.trial_sharpes,
+        bar_seconds=dev.bar_seconds,
+        trial_universe=universe,
+        dsr_trade_count=(
+            (dev.dsr_trade_count or 0) + selected_result.trade_count if selected_result else None
+        ),
+    )
+    return holdout_returns, overfitting
+
+
+def trial_universe_payload(universe: Any) -> dict[str, Any]:
+    """The trial universe a holdout scoring used, as recorded in its attempt event."""
+
+    return {
+        "n_trials": int(universe.n_trials),
+        "trial_sharpes": [float(value) for value in universe.trial_sharpes],
+        "sharpe_unit": universe.sharpe_unit,
+        "bar_seconds": universe.bar_seconds,
+        "source": universe.source,
+    }
+
+
+def trial_universe_from_payload(payload: Mapping[str, Any]) -> Any:
+    from .overfitting import TrialUniverse
+
+    return TrialUniverse(
+        n_trials=int(payload["n_trials"]),
+        trial_sharpes=tuple(float(value) for value in payload["trial_sharpes"]),
+        sharpe_unit=str(payload["sharpe_unit"]),
+        bar_seconds=None if payload.get("bar_seconds") is None else int(payload["bar_seconds"]),
+        source=str(payload.get("source", "attempt_registry")),
+    )
+
+
+OVERFITTING_RECORD_FIELDS = (
+    "status", "pbo", "deflated_sharpe_probability", "deflated_sharpe_probability_plan_only", "n_trials_used",
+    "dsr_trade_count", "variants_tested", "statistical_policy",
+)
+
+
+def overfitting_payload(overfitting: OverfittingAssessment | Mapping[str, Any]) -> dict[str, Any]:
+    """The overfitting values recorded in the holdout attempt event and compared at promotion."""
+
+    data = asdict(overfitting) if is_dataclass(overfitting) else dict(overfitting)
+    return {key: _json_safe(data.get(key)) for key in OVERFITTING_RECORD_FIELDS}
+
+
 REDERIVED_FIELDS = (
     "trade_count", "net_pnl", "profit_factor", "max_drawdown_pct", "edge_vs_baseline", "cost_stress_net_pnl"
 )
+REDERIVED_OVERFITTING_FIELDS = ("pbo", "deflated_sharpe_probability", "variants_tested")
 
 
 def _tuples(value: Any) -> Any:
     return tuple(_tuples(item) for item in value) if isinstance(value, list) else value
 
 
-def rederive_holdout_evidence(bars: Iterable[MarketBar], plan_manifest: Mapping[str, Any]) -> dict[str, Any]:
-    """Recompute a sealed plan's holdout result from market bars, without any store.
+def rederive_holdout_evidence(
+    bars: Iterable[MarketBar],
+    plan_manifest: Mapping[str, Any],
+    *,
+    store: Any = None,
+    trial_universe: Any = None,
+) -> dict[str, Any]:
+    """Recompute a sealed plan's holdout result from market bars, once that holdout is consumed.
 
     The plan is rebuilt from the bars (it must hash to the same manifest, so the
     same data, candidates, protocol, costs and code), the candidate is reselected
     on validation windows and the holdout is simulated again. Returns the
     selected candidate id and the ``REDERIVED_FIELDS`` of ``holdout_evidence``.
-    The overfitting statistics are not recomputed: they depend on the store-wide
-    trial count at the time the holdout was scored.
+
+    Lot 4, C-2: ``store`` is required and must hold a COMPLETED or FAILED
+    holdout evaluation of this plan, so this is never a holdout oracle for a
+    sealed, unscored plan. Lot 4, C-1: with ``trial_universe`` (the universe
+    recorded in the holdout attempt, a ``TrialUniverse`` or its payload) the
+    PBO and deflated Sharpe are re-derived too, from the re-derived development
+    matrix and holdout returns, under ``overfitting`` and ``variants_tested``.
     """
 
     plan = dict(plan_manifest)
@@ -875,6 +959,13 @@ def rederive_holdout_evidence(bars: Iterable[MarketBar], plan_manifest: Mapping[
     )
     if verified.plan_sha256 != _sha256(_canonical_json(plan)):
         raise ValueError("these bars do not reproduce the sealed plan")
+    if store is None or not hasattr(store, "holdout_for_protocol"):
+        raise ValueError("re-deriving a holdout needs the store that consumed it")
+    consumed = store.holdout_for_protocol(verified.plan_sha256)
+    if consumed is None or consumed.get("status") not in ("COMPLETED", "FAILED"):
+        raise ValueError(
+            "the holdout of this plan has not been consumed; score it once with evaluate_strategy_holdout_once"
+        )
     _selected, selected_result, reference, flat, sensitivity = _score_holdout_block(
         history, chosen, verified.selected_candidate_id, protocol, initial_equity, cost_model
     )
@@ -884,7 +975,7 @@ def rederive_holdout_evidence(bars: Iterable[MarketBar], plan_manifest: Mapping[
         for item in sensitivity
         if item.cost_multiplier > 1.0 and item.selected_candidate is not None
     ]
-    return {
+    derived = {
         "selected_candidate_id": verified.selected_candidate_id,
         "trade_count": metrics.trade_count if metrics else 0,
         "net_pnl": metrics.net_pnl if metrics else None,
@@ -893,6 +984,14 @@ def rederive_holdout_evidence(bars: Iterable[MarketBar], plan_manifest: Mapping[
         "edge_vs_baseline": metrics.net_pnl - max(flat.net_pnl, reference.net_pnl) if metrics else None,
         "cost_stress_net_pnl": min(stressed) if stressed else None,
     }
+    if trial_universe is not None:
+        universe = trial_universe if hasattr(trial_universe, "n_trials") else trial_universe_from_payload(trial_universe)
+        _returns, overfitting = _holdout_overfitting(
+            history, verified, len(history) - protocol.holdout_bars, selected_result, initial_equity, universe
+        )
+        derived["overfitting"] = overfitting_payload(overfitting)
+        derived["variants_tested"] = max(universe.n_trials, verified.variants_tested)
+    return derived
 
 
 def _distinct_variant_count(matrix) -> int:
@@ -1044,6 +1143,25 @@ def pbo_slice_count(available_slices: int) -> int:
     return count
 
 
+def applied_statistical_policy() -> dict[str, Any]:
+    """The reviewed ``StatisticalPolicy`` and the floors this module applies right now (Lot 4, P-4).
+
+    The module constants are read at call time, so an in-process change to one of
+    them is recorded and fails promotion (``statistical_policy_below_floor``).
+    """
+
+    return {
+        "policy": STATISTICAL_POLICY.payload(),
+        "applied": {
+            "min_dsr_returns": MIN_DSR_RETURNS,
+            "min_dsr_trades": MIN_DSR_TRADES,
+            "min_pbo_nonzero_row_fraction": MIN_PBO_NONZERO_ROW_FRACTION,
+            "min_pbo_slices": MIN_PBO_SLICES,
+            "min_pbo_trades_per_slice": MIN_PBO_TRADES_PER_SLICE,
+        },
+    }
+
+
 def assess_overfitting(
     performance: Iterable[Iterable[float]],
     slice_labels: Iterable[str],
@@ -1064,7 +1182,9 @@ def assess_overfitting(
     PBO: CSCV with the ASTRA selection rule (``selection_score_metric(initial_equity)``)
     in-sample and out-of-sample; with ``trade_counts`` (trades exiting per period and
     variant) only variants with at least ``minimum_candidate_trades`` in-sample trades
-    can be selected. DSR: ``n_trials`` and the trial-Sharpe variance come from
+    can be selected. DSR: published only with ``dsr_trade_count`` (trades in the
+    sample) at least ``MIN_DSR_TRADES``, so a call without trade information is
+    ``LOW_INFORMATION``. ``n_trials`` and the trial-Sharpe variance come from
     ``overfitting.resolve_trials`` (plan count as a floor, optional external
     ``trial_universe``); an explicit ``trial_sharpe_variance`` is one more candidate
     in that conservative maximum. The import is lazy so this module works without
@@ -1095,6 +1215,7 @@ def assess_overfitting(
         "trial_sharpes": sharpes,
         "bar_seconds": bar_seconds,
         "dsr_trade_count": dsr_trade_count,
+        "statistical_policy": applied_statistical_policy(),
     }
     try:
         from .overfitting import (
@@ -1172,7 +1293,8 @@ def assess_overfitting(
     active_returns = sum(1 for value in returns if value != 0.0)
     if len(returns) < MIN_DSR_RETURNS:
         low_information.append(f"deflated_sharpe: {len(returns)} returns (need at least {MIN_DSR_RETURNS})")
-    elif count_matrix and (dsr_trade_count is None or dsr_trade_count < MIN_DSR_TRADES):
+    elif dsr_trade_count is None or dsr_trade_count < MIN_DSR_TRADES:
+        # Without trade information the sample may be one held position (Lot 4, P-8): never published.
         low_information.append(
             f"deflated_sharpe: {dsr_trade_count if dsr_trade_count is not None else 'unknown'} trades in the sample "
             f"(need at least {MIN_DSR_TRADES})"

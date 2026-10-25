@@ -665,11 +665,13 @@ class TrialCountTests(unittest.TestCase):
         matrix = [[rng.gauss(0.0, 1.0) for _ in range(7)] for _ in range(32)]
         returns = [0.002 + 0.01 * rng.gauss(0.0, 1.0) for _ in range(60)]
         labels = [f"p{i}" for i in range(32)]
-        honest = assess_overfitting(matrix, labels, variants_tested=7, dsr_returns=returns, trial_sharpe_variance=None)
+        # Lot 4 round 4 (P-8): the DSR needs trade information; 100 trades keep it computed here.
+        honest = assess_overfitting(matrix, labels, variants_tested=7, dsr_returns=returns, trial_sharpe_variance=None,
+                                    dsr_trade_count=100)
         self.assertIsNotNone(honest.deflated_sharpe_probability)
         try:
             understated = assess_overfitting(matrix, labels, variants_tested=1, dsr_returns=returns,
-                                             trial_sharpe_variance=None)
+                                             trial_sharpe_variance=None, dsr_trade_count=100)
         except ValueError:
             return  # refusing an inconsistent trial count is the secure outcome
         # Lot 4: the matrix width is a floor on N, so an understated count cannot raise the probability.

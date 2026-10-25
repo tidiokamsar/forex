@@ -13,17 +13,21 @@ from pathlib import Path
 from typing import Any
 
 from . import holdout_reuse
+from .anchoring import BINDING_SCHEMA_SQL
 from .attempts import SCHEMA_SQL as ATTEMPT_SCHEMA_SQL
+from .attempts import logged_holdout_returns
 from .models import BacktestResult
 from .research_policy import HOLDOUT_REUSE_POLICY
 
 
-def _reuse_findings(other_id: str, returns: list[float], other_returns: list[float]) -> list[dict]:
+def _reuse_findings(
+    other_id: str, returns: list[float], other_returns: list[float], source: str = "an already sealed plan"
+) -> list[dict]:
     assessment = holdout_reuse.assess_reuse(returns, other_returns)
     if assessment.verdict == holdout_reuse.CONFLICT:
         # Same price path relabelled, shifted, rescaled, inverted, reversed, resampled or nudged.
         raise ValueError(
-            "the holdout price path matches the holdout of an already sealed plan "
+            f"the holdout price path matches the holdout of {source} "
             f"({other_id[:12]}, |correlation| {assessment.max_abs_correlation}); a holdout can be scored only once"
         )
     if assessment.verdict == holdout_reuse.CLEAR:
@@ -154,6 +158,8 @@ class BacktestStore:
             )
             # Append-only, hash-chained attempt registry (see astra.attempts).
             db.executescript(ATTEMPT_SCHEMA_SQL)
+            # Append-only record of the evidence anchor this store is bound to (see astra.anchoring).
+            db.executescript(BINDING_SCHEMA_SQL)
 
     def seal_research_protocol(
         self,
@@ -171,6 +177,12 @@ class BacktestStore:
         when its holdout shares a price path with any sealed holdout, whatever
         the label, dates, scale or quote direction (see ``astra.holdout_reuse``).
         Re-sealing the identical plan is idempotent and needs no returns.
+
+        With an evidence anchor configured, a new plan is sealed only when the
+        store verifies against the anchor; the first seal of an unused store
+        binds it to the anchor, and every new seal is anchored (Lot 4, C-3).
+        Holdouts recorded by the attempt log whose seal rows are gone are
+        compared too (Lot 4, P-10).
         """
 
         plan_json = json.dumps(
@@ -191,10 +203,17 @@ class BacktestStore:
             raise ValueError("protocol manifest must include final holdout boundaries")
 
         returns = [float(value) for value in holdout_returns] if holdout_returns is not None else []
+        new_plan = not self._protocol_exists(protocol_id)
+        if new_plan and self.anchor is not None:
+            # Refuses a restored store or a fresh anchor for a used store; binds an unused store on first use.
+            self.require_anchor_consistency()
+            if self.anchor.latest() is None:
+                self.anchor_now()
         # The similarity search is slow (see astra.holdout_reuse), so it runs before the write lock;
         # plans sealed in between are compared again inside the lock.
         checked, findings = self._assess_against_sealed(protocol_id, dataset_identity_sha256, returns)
         now = _now()
+        inserted = False
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             same = db.execute(
@@ -336,6 +355,12 @@ class BacktestStore:
                         ),
                     ),
                 )
+        if inserted and self.anchor is not None:
+            self.anchor_now()
+
+    def _protocol_exists(self, protocol_id: str) -> bool:
+        with self._connect() as db:
+            return db.execute("SELECT 1 FROM research_protocols WHERE protocol_id = ?", (protocol_id,)).fetchone() is not None
 
     def _assess_against_sealed(
         self, protocol_id: str, dataset_identity_sha256: str, returns: list[float]
@@ -344,6 +369,8 @@ class BacktestStore:
 
         Raises on a ``CONFLICT``; returns the compared protocol ids and the
         ``SUSPECT`` / ``UNDETERMINED`` findings, recorded with the new plan.
+        Holdouts recorded with a holdout attempt in the hash-chained attempt log
+        whose plan is no longer sealed (seal rows deleted) are compared as well.
         """
 
         if not returns:
@@ -357,9 +384,19 @@ class BacktestStore:
                    WHERE p.dataset_sha256 <> ? AND p.protocol_id <> ?""",
                 (dataset_identity_sha256, protocol_id),
             ).fetchall()
+            sealed = {str(row[0]) for row in db.execute("SELECT protocol_id FROM research_protocols")}
+            logged = logged_holdout_returns(db)
         findings: list[dict] = []
         for row in rows:
             findings.extend(_reuse_findings(row["protocol_id"], returns, json.loads(row["returns_json"])))
+        compared: set[str] = set()
+        for other_id, other_returns in logged:
+            if other_id in sealed or other_id == protocol_id or other_id in compared:
+                continue
+            compared.add(other_id)
+            findings.extend(
+                _reuse_findings(other_id, returns, other_returns, "a holdout already scored (attempt log)")
+            )
         return {row["protocol_id"] for row in rows}, findings
 
     def reuse_check(self, protocol_id: str) -> dict[str, Any] | None:
@@ -394,6 +431,34 @@ class BacktestStore:
 
             anchor_store(self.path, self.anchor)
 
+    def anchor_holdout_start(self) -> dict[str, Any]:
+        """Anchor the STARTED holdout attempt before any holdout number is computed (Lot 4, C-4).
+
+        Returns the anchor record kept in the holdout report. Without an anchor the
+        holdout leaves no external trace: it is marked as such and is never
+        promotable (``holdout_scored_without_anchor``).
+        """
+
+        if self.anchor is None:
+            return {
+                "configured": False,
+                "anchored_before_scoring": False,
+                "promotable": False,
+                "note": "scored without an evidence anchor: no external trace, permanently non-promotable",
+            }
+        from .anchoring import anchor_store
+
+        checkpoint = anchor_store(self.path, self.anchor)
+        return {
+            "configured": True,
+            "anchored_before_scoring": True,
+            "kind": self.anchor.kind,
+            "location": self.anchor.location,
+            "production_grade": bool(self.anchor.production_grade),
+            "anchor_id": checkpoint.anchor_id,
+            "checkpoint_sequence": checkpoint.sequence,
+        }
+
     def begin_holdout_evaluation(
         self, *, protocol_id: str, dataset_identity_sha256: str
     ) -> dict[str, Any]:
@@ -412,11 +477,21 @@ class BacktestStore:
             check = db.execute(
                 "SELECT verdict FROM holdout_reuse_checks WHERE protocol_id = ?", (protocol_id,)
             ).fetchone()
-            if check is not None and check["verdict"] in (holdout_reuse.SUSPECT, holdout_reuse.UNDETERMINED):
+            if check is None:
+                signature = db.execute(
+                    "SELECT 1 FROM holdout_signatures WHERE protocol_id = ?", (protocol_id,)
+                ).fetchone()
+                if signature is not None:
+                    # Sealed with returns, so a verdict was written: a missing row was deleted (Lot 4, P-3).
+                    raise ValueError(
+                        "the holdout reuse verdict of this plan is missing; "
+                        "score a new, independent holdout instead"
+                    )
+            elif check["verdict"] != holdout_reuse.CLEAR:
                 # Scoring a holdout that may already be spent would leak it again (Lot 4, s52): only a new,
                 # independent holdout clears the doubt.
                 raise ValueError(
-                    f"holdout reuse is {check['verdict'].lower()} for this plan; "
+                    f"holdout reuse is {str(check['verdict']).lower()} for this plan; "
                     "score a new, independent holdout instead"
                 )
             existing = db.execute(
@@ -470,7 +545,9 @@ class BacktestStore:
 
     def complete_holdout_evaluation(
         self, *, evaluation_id: str, report: dict[str, Any]
-    ) -> None:
+    ) -> str:
+        """Store the report of a STARTED attempt; returns the SHA-256 of the stored ``report_json``."""
+
         completed_at = _now()
         report_json = json.dumps(
             report,
@@ -510,6 +587,7 @@ class BacktestStore:
                     ),
                 ),
             )
+        return hashlib.sha256(report_json.encode("utf-8")).hexdigest()
 
     def fail_holdout_evaluation(self, *, evaluation_id: str, error_type: str) -> None:
         failed_at = _now()

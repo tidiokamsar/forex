@@ -27,7 +27,20 @@ rewritten from scratch, or deleted (a deleted file is reported as
 on separate media.
 
 Configuration: only the ``ASTRA_EVIDENCE_ANCHOR`` environment variable (a file
-path for ``LocalFileAnchor``), read by ``anchor_from_environment``.
+path for ``LocalFileAnchor``, resolved to an absolute path), read by
+``anchor_from_environment``.
+
+Binding (Lot 4, C-3): the first checkpoint of an anchor carries a random
+``anchor_id`` that every later checkpoint repeats. The first anchoring of a
+store records that id, the anchor kind and its location in the store's
+append-only ``evidence_anchor_bindings`` table. A store is then verified only
+against an anchor with the same identity (``anchor_identity_mismatch``), an
+anchor with checkpoints never meets an unbound store
+(``store_not_bound_to_anchor``), and an empty anchor is refused for a store
+that is already bound or already holds sealed plans or holdout evaluations
+(``anchor_empty_for_used_store``): restoring a backup and pointing the store at
+a fresh anchor (another file, or ``ASTRA_EVIDENCE_ANCHOR`` repointed) no longer
+makes a spent holdout look unspent.
 """
 
 from __future__ import annotations
@@ -36,6 +49,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -46,7 +60,8 @@ from typing import Any
 
 from .attempts import GENESIS_HASH, TABLE, _head, _table_exists, _verify, canonical_json
 
-ANCHOR_FORMAT_VERSION = "1.0.0"
+ANCHOR_FORMAT_VERSION = "1.1.0"
+LEGACY_FORMAT_VERSION = "1.0.0"  # checkpoints without anchor_id
 ENVIRONMENT_VARIABLE = "ASTRA_EVIDENCE_ANCHOR"
 CONSUMED_STATUSES = frozenset({"STARTED", "COMPLETED", "FAILED"})
 FINAL_STATUSES = frozenset({"COMPLETED", "FAILED"})
@@ -60,6 +75,26 @@ ATTEMPT_LOG_TAMPERED = "attempt_log_tampered"
 CONSUMED_HOLDOUT_MISSING = "consumed_holdout_missing"
 SEALED_PROTOCOL_MISSING = "sealed_protocol_missing"
 EXPERIMENT_MISSING = "experiment_missing"
+ANCHOR_IDENTITY_MISMATCH = "anchor_identity_mismatch"
+ANCHOR_WITHOUT_IDENTITY = "anchor_without_identity"
+STORE_NOT_BOUND_TO_ANCHOR = "store_not_bound_to_anchor"
+ANCHOR_EMPTY_FOR_USED_STORE = "anchor_empty_for_used_store"
+
+BINDING_TABLE = "evidence_anchor_bindings"
+# Append-only record, in the store, of the anchor it was first anchored to (Lot 4, C-3).
+BINDING_SCHEMA_SQL = f"""
+CREATE TABLE IF NOT EXISTS {BINDING_TABLE} (
+    anchor_id TEXT PRIMARY KEY,
+    anchor_kind TEXT NOT NULL,
+    anchor_location TEXT NOT NULL,
+    production_grade INTEGER NOT NULL,
+    bound_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS {BINDING_TABLE}_no_update BEFORE UPDATE ON {BINDING_TABLE}
+BEGIN SELECT RAISE(ABORT, 'evidence anchor bindings are append-only: UPDATE refused'); END;
+CREATE TRIGGER IF NOT EXISTS {BINDING_TABLE}_no_delete BEFORE DELETE ON {BINDING_TABLE}
+BEGIN SELECT RAISE(ABORT, 'evidence anchor bindings are append-only: DELETE refused'); END;
+"""
 
 
 class AnchorError(ValueError):
@@ -94,12 +129,16 @@ class EvidenceCheckpoint:
     previous_checkpoint_sha256: str
     checkpoint_sha256: str
     format_version: str = ANCHOR_FORMAT_VERSION
+    # Random identity of the anchor, created with its first checkpoint and repeated by every later one.
+    anchor_id: str = ""
 
     def content(self) -> dict[str, Any]:
-        """Every hashed field (all fields except ``checkpoint_sha256``)."""
+        """Every hashed field (all except ``checkpoint_sha256``; a legacy empty ``anchor_id`` is omitted)."""
 
         return {
-            item.name: getattr(self, item.name) for item in fields(self) if item.name != "checkpoint_sha256"
+            item.name: getattr(self, item.name)
+            for item in fields(self)
+            if item.name != "checkpoint_sha256" and not (item.name == "anchor_id" and not self.anchor_id)
         }
 
     def computed_sha256(self) -> str:
@@ -127,6 +166,7 @@ class EvidenceCheckpoint:
                 previous_checkpoint_sha256=str(data["previous_checkpoint_sha256"]),
                 checkpoint_sha256=str(data["checkpoint_sha256"]),
                 format_version=str(data.get("format_version", ANCHOR_FORMAT_VERSION)),
+                anchor_id=str(data.get("anchor_id", "")),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise AnchorError(f"malformed checkpoint: {exc}") from exc
@@ -160,6 +200,18 @@ class EvidenceAnchor(ABC):
     production_grade: bool = False
     kind: str = "abstract"
 
+    @property
+    def location(self) -> str:
+        """Where the anchor lives (recorded in the store's binding); adapters override it."""
+
+        return self.kind
+
+    def anchor_id(self) -> str | None:
+        """The identity created with the first checkpoint (``None`` while empty, ``""`` for a legacy anchor)."""
+
+        items = self.checkpoints()
+        return items[0].anchor_id if items else None
+
     @abstractmethod
     def _load(self) -> tuple[EvidenceCheckpoint, ...]:
         """Every stored checkpoint, oldest first, without chain checks."""
@@ -191,6 +243,10 @@ def _check_successor(latest: EvidenceCheckpoint | None, checkpoint: EvidenceChec
     expected_previous = latest.checkpoint_sha256 if latest else GENESIS_HASH
     if checkpoint.previous_checkpoint_sha256 != expected_previous:
         raise AnchorError("previous_checkpoint_sha256 is not the hash of the latest anchored checkpoint")
+    if latest is not None and checkpoint.anchor_id != latest.anchor_id:
+        raise AnchorError("anchor_id differs from the anchor's identity")
+    if latest is None and not checkpoint.anchor_id and checkpoint.format_version != LEGACY_FORMAT_VERSION:
+        raise AnchorError("the first checkpoint must carry the anchor's identity (anchor_id)")
     expected_sequence = latest.sequence + 1 if latest else 1
     if checkpoint.sequence != expected_sequence:
         raise AnchorError(f"checkpoint sequence {checkpoint.sequence} is not {expected_sequence}")
@@ -227,7 +283,12 @@ class LocalFileAnchor(EvidenceAnchor):
     kind = "LOCAL_FILE_NOT_FOR_PRODUCTION"
 
     def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
+        # Absolute, so the location recorded in the store's binding does not depend on the working directory.
+        self.path = Path(path).resolve()
+
+    @property
+    def location(self) -> str:
+        return str(self.path)
 
     def _load(self) -> tuple[EvidenceCheckpoint, ...]:
         if not self.path.exists():
@@ -262,10 +323,10 @@ class LocalFileAnchor(EvidenceAnchor):
 
 
 def anchor_from_environment() -> LocalFileAnchor | None:
-    """A ``LocalFileAnchor`` at ``$ASTRA_EVIDENCE_ANCHOR`` when set and non-empty, else ``None``."""
+    """A ``LocalFileAnchor`` at ``$ASTRA_EVIDENCE_ANCHOR`` (resolved to an absolute path) when set, else ``None``."""
 
     value = os.environ.get(ENVIRONMENT_VARIABLE, "").strip()
-    return LocalFileAnchor(value) if value else None
+    return LocalFileAnchor(Path(value).resolve()) if value else None
 
 
 # -- reading the store ----------------------------------------------------------------
@@ -332,6 +393,46 @@ def _store_snapshot(db: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
+def _store_bindings(db: sqlite3.Connection) -> tuple[str, ...]:
+    if not _has_table(db, BINDING_TABLE):
+        return ()
+    return tuple(str(row[0]) for row in db.execute(f"SELECT anchor_id FROM {BINDING_TABLE} ORDER BY bound_at"))
+
+
+def _store_in_use(db: sqlite3.Connection) -> bool:
+    """A store with sealed plans or holdout evaluations holds evidence an empty anchor would forget."""
+
+    for table in ("research_protocols", "holdout_evaluations"):
+        if _has_table(db, table) and db.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone() is not None:
+            return True
+    return False
+
+
+def store_binding(database_path: str | Path) -> dict[str, Any] | None:
+    """The anchor a store was bound to on its first anchoring (``None`` when never anchored)."""
+
+    with _read_only(database_path) as db:
+        if not _has_table(db, BINDING_TABLE):
+            return None
+        row = db.execute(f"SELECT * FROM {BINDING_TABLE} ORDER BY bound_at LIMIT 1").fetchone()
+    return dict(row) if row else None
+
+
+def _record_binding(database_path: str | Path, anchor: EvidenceAnchor, anchor_id: str) -> None:
+    db = sqlite3.connect(Path(database_path), timeout=5.0)
+    try:
+        with db:
+            db.executescript(BINDING_SCHEMA_SQL)
+        with db:
+            if db.execute(f"SELECT 1 FROM {BINDING_TABLE} LIMIT 1").fetchone() is None:
+                db.execute(
+                    f"INSERT INTO {BINDING_TABLE} VALUES (?, ?, ?, ?, ?)",
+                    (anchor_id, anchor.kind, anchor.location, int(bool(anchor.production_grade)), _now()),
+                )
+    finally:
+        db.close()
+
+
 def build_checkpoint(database_path: str | Path, previous: EvidenceCheckpoint | None) -> EvidenceCheckpoint:
     """The next checkpoint for the store, chained to ``previous`` (read-only access to the store)."""
 
@@ -347,8 +448,11 @@ def build_checkpoint(database_path: str | Path, previous: EvidenceCheckpoint | N
         "sealed_protocols": snapshot["sealed_protocols"],
         "created_at": _now(),
         "previous_checkpoint_sha256": previous.checkpoint_sha256 if previous else GENESIS_HASH,
-        "format_version": ANCHOR_FORMAT_VERSION,
+        "format_version": ANCHOR_FORMAT_VERSION if previous is None or previous.anchor_id else previous.format_version,
     }
+    anchor_id = previous.anchor_id if previous else uuid.uuid4().hex
+    if anchor_id:
+        content["anchor_id"] = anchor_id
     return EvidenceCheckpoint(**content, checkpoint_sha256=checkpoint_hash(content))
 
 
@@ -357,7 +461,8 @@ def anchor_store(database_path: str | Path, anchor: EvidenceAnchor) -> EvidenceC
 
     Refused (``AnchorError``) when the store does not verify against what is
     already anchored (``anchor_empty`` excepted), so a restored or rewritten
-    store cannot be re-anchored silently.
+    store cannot be re-anchored silently. The first anchoring of a store binds
+    it to the anchor's identity (``evidence_anchor_bindings``).
     """
 
     previous = anchor.latest()
@@ -367,6 +472,8 @@ def anchor_store(database_path: str | Path, anchor: EvidenceAnchor) -> EvidenceC
         raise AnchorError(f"store does not match its anchor: {', '.join(blocking)}")
     checkpoint = build_checkpoint(database_path, previous)
     anchor.append(checkpoint)
+    if checkpoint.anchor_id:
+        _record_binding(database_path, anchor, checkpoint.anchor_id)
     return checkpoint
 
 
@@ -377,7 +484,9 @@ def verify_store_against_anchor(database_path: str | Path, anchor: EvidenceAncho
     ``anchor_empty``, ``store_missing``, ``store_behind_anchor``,
     ``attempt_chain_diverged``, ``attempt_log_tampered``,
     ``consumed_holdout_missing``, ``sealed_protocol_missing``,
-    ``experiment_missing``.
+    ``experiment_missing``, and for the store's binding (Lot 4, C-3)
+    ``anchor_identity_mismatch``, ``anchor_without_identity``,
+    ``store_not_bound_to_anchor``, ``anchor_empty_for_used_store``.
     """
 
     items = anchor.checkpoints()
@@ -408,6 +517,24 @@ def verify_store_against_anchor(database_path: str | Path, anchor: EvidenceAncho
         if _table_exists(db):
             hashes = {int(row[0]): str(row[1]) for row in db.execute(f"SELECT seq, row_hash FROM {TABLE}")}
         snapshot = _store_snapshot(db)
+        bindings = _store_bindings(db)
+        in_use = _store_in_use(db)
+
+    if not items:
+        if bindings or in_use:
+            report(
+                ANCHOR_EMPTY_FOR_USED_STORE,
+                "the store is already bound to an anchor or holds sealed plans or holdout evaluations; "
+                "a fresh anchor would forget them",
+            )
+    else:
+        anchor_id = items[0].anchor_id
+        if not anchor_id:
+            report(ANCHOR_WITHOUT_IDENTITY, "legacy anchor without anchor_id; start a new anchor with a new store")
+        elif not bindings:
+            report(STORE_NOT_BOUND_TO_ANCHOR, f"the store was never anchored to anchor {anchor_id}")
+        elif any(binding != anchor_id for binding in bindings):
+            report(ANCHOR_IDENTITY_MISMATCH, f"store bound to {', '.join(bindings)}, anchor is {anchor_id}")
 
     for item in items:
         if item.attempt_seq == 0:

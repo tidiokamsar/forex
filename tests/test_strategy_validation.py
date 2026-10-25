@@ -337,8 +337,11 @@ class SealedHoldoutTests(unittest.TestCase):
         self.assertIn("criteria_registered_after_holdout_was_scored", failures)
         self.assertIn("holdout_from_another_plan", failures)
         self.assertIn("deflated_sharpe_below_threshold", failures)
-        self.assertNotIn("overfitting_check_missing", failures)
         self.assertNotIn("pbo_above_threshold", failures)
+        # Lot 4 round 4 (P-4): the floors disabled above are recorded with the statistics, so promotion now
+        # flags them, and only that makes the overfitting check count as missing here.
+        self.assertIn("statistical_policy_below_floor", failures)
+        self.assertEqual(evaluation.overfitting.statistical_policy["applied"]["min_dsr_trades"], 0)
 
 
 @unittest.skipUnless(HAS_OVERFITTING_MODULE, "astra.overfitting is not integrated yet (developed in a separate worktree)")
@@ -615,8 +618,9 @@ class TrialUniverseAndGuardTests(unittest.TestCase):
     def assess(self, **kwargs):
         from astra.strategy_validation import assess_overfitting
 
+        # Lot 4 round 4 (P-8): the DSR needs trade information (dsr_trade_count); 100 trades pass the floor.
         options = {"variants_tested": 4, "dsr_returns": self.RETURNS, "trial_sharpe_variance": None,
-                   "initial_equity": 10_000.0}
+                   "initial_equity": 10_000.0, "dsr_trade_count": 100}
         options.update(kwargs)
         return assess_overfitting(self.MATRIX, [f"p{r}" for r in range(16)], **options)
 

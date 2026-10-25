@@ -62,7 +62,8 @@ class HoldoutRederivationTests(unittest.TestCase):
         self.evaluation_id = attempt["evaluation_id"]
 
     def test_rederivation_reproduces_the_stored_holdout(self):
-        derived = rederive_holdout_evidence(BARS, self.report.plan_manifest)
+        # Lot 4 round 4 (C-2): re-derivation needs the store that consumed the holdout.
+        derived = rederive_holdout_evidence(BARS, self.report.plan_manifest, store=self.store)
         evidence = holdout_evidence(self.holdout)
         self.assertEqual(derived["selected_candidate_id"], self.holdout.selected_candidate_id)
         for key in ("trade_count", "net_pnl", "profit_factor", "max_drawdown_pct", "edge_vs_baseline",
@@ -110,7 +111,11 @@ class AnchoredPromotionTests(HoldoutRederivationTests):
 
     def test_clean_anchored_store_has_no_integrity_failure(self):
         self.assertEqual(self.store.reuse_check(self.report.plan_sha256)["verdict"], holdout_reuse.CLEAR)
-        self.assertEqual(self.integrity(self.registry.check_promotion("wf", "1", holdout_bars=BARS)), set())
+        # Lot 4 round 4 (C-3): a non-production anchor fails unless the human reviewer waives it explicitly.
+        self.assertEqual(self.integrity(self.registry.check_promotion("wf", "1", holdout_bars=BARS)),
+                         {"evidence_anchor_not_production_grade"})
+        self.assertEqual(self.integrity(self.registry.check_promotion("wf", "1", holdout_bars=BARS,
+                                                                      allow_non_production_anchor=True)), set())
         self.assertFalse(self.anchor.production_grade)
 
     def test_missing_anchor_blocks_promotion(self):
@@ -148,7 +153,8 @@ class AnchoredPromotionTests(HoldoutRederivationTests):
     def test_consumed_holdout_cannot_be_resealed_in_a_new_store(self):
         other = BacktestStore(f"{self.temp}/other.sqlite3", anchor=self.anchor)
         other.initialize()
-        with overfitting_double(), self.assertRaisesRegex(ValueError, "evidence anchor records"):
+        # Lot 4 round 4 (C-3): refused even earlier, the anchor is bound to the original store's identity.
+        with overfitting_double(), self.assertRaisesRegex(ValueError, "evidence anchor.*store_not_bound_to_anchor"):
             evaluate(store=other)
 
 

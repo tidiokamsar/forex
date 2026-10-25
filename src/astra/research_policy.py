@@ -65,6 +65,24 @@ class StatisticalPolicy:
         return {"version": RESEARCH_POLICY_VERSION, **asdict(self)}
 
 
+def statistical_policy_below_floor(applied: object) -> tuple[str, ...]:
+    """Names of statistical floors recorded as applied that are below ``StatisticalPolicy()`` (fail closed).
+
+    Every floor is stricter when higher. A missing, non-numeric or boolean value is
+    reported too, so a report without the record (or minted without it) cannot pass.
+    """
+
+    floor = asdict(StatisticalPolicy())
+    if not isinstance(applied, dict):
+        return tuple(floor)
+    below = []
+    for name, minimum in floor.items():
+        value = applied.get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value or value < minimum:
+            below.append(name)
+    return tuple(below)
+
+
 HOLDOUT_REUSE_POLICY = HoldoutReusePolicy()
 STATISTICAL_POLICY = StatisticalPolicy()
 

@@ -414,8 +414,12 @@ def trial_key(state: Mapping[str, Any]) -> tuple[str, str, str]:
     return (str(state.get("family") or ""), str(state["params_sha256"]), str(fingerprint))
 
 
-def _statistics(db: sqlite3.Connection, scope: TrialScope) -> TrialStatistics:
+def _statistics(db: sqlite3.Connection, scope: TrialScope, before_seq: int | None = None) -> TrialStatistics:
+    """Trials in ``scope``; with ``before_seq`` only events recorded before that sequence number."""
+
     rows = _event_rows(db) if _table_exists(db) else []
+    if before_seq is not None:
+        rows = [row for row in rows if int(row["seq"]) < before_seq]
     states = [state for state in _attempt_states(rows).values() if state["kind"] in TRIAL_KINDS and _matches(state, scope)]
     keys: dict[tuple[str, str, str], int] = {}
     sharpes: dict[tuple[str, str, str], tuple[int, float]] = {}
@@ -575,12 +579,21 @@ class AttemptLog:
         with self._connect() as db:
             db.executescript(SCHEMA_SQL)
 
-    def start(self, identities: Sequence[AttemptIdentity]) -> list[str]:
-        """Append one STARTED event per identity, atomically; returns the new attempt ids."""
+    def start(
+        self, identities: Sequence[AttemptIdentity], metrics: Sequence[Mapping[str, Any] | None] | None = None
+    ) -> list[str]:
+        """Append one STARTED event per identity, atomically; returns the new attempt ids.
+
+        ``metrics`` (one optional mapping per identity) is hash-chained with the STARTED
+        event, so what was known before scoring (e.g. the holdout returns) is fixed first.
+        """
 
         now = _now()
         ids, rows = [], []
-        for identity in identities:
+        if metrics is not None and len(metrics) != len(identities):
+            raise ValueError("metrics must have one entry per identity")
+        for index, identity in enumerate(identities):
+            start_metrics = metrics[index] if metrics is not None else None
             attempt_id = str(uuid.uuid4())
             params_json = canonical_json(identity.params)
             values = {name: getattr(identity, name) for name in identity.__slots__ if name != "params"}
@@ -595,6 +608,7 @@ class AttemptLog:
                     "params_sha256": _sha256_text(params_json),
                     "astra_version": __version__,
                     "started_at": now,
+                    "metrics_json": canonical_json(start_metrics) if start_metrics is not None else None,
                 }
             )
             ids.append(attempt_id)
@@ -760,6 +774,59 @@ def trial_statistics_for_protocol(database_path: str | Path, protocol_id: str) -
 
 def verify_attempt_chain(database_path: str | Path, expected_head: str | None = None) -> ChainVerification:
     return AttemptLog(database_path).verify_chain(expected_head)
+
+
+def trial_statistics_before(db: sqlite3.Connection, protocol_id: str, before_seq: int) -> TrialStatistics | None:
+    """Trials relevant to a sealed plan as recorded before ``before_seq`` (``None`` without the plan).
+
+    The holdout scoring takes its trial universe right before its STARTED event, so the
+    universe it recorded can be checked against the hash-chained log at promotion.
+    """
+
+    plan = _plan(db, protocol_id)
+    if plan is None:
+        return None
+    return _statistics(db, scope_for_plan(plan), before_seq)
+
+
+def holdout_attempt_records(db: sqlite3.Connection, protocol_id: str) -> list[dict[str, Any]]:
+    """Every holdout attempt of a plan (oldest first): STARTED seq and metrics, terminal status and metrics."""
+
+    if not _table_exists(db):
+        return []
+    rows = db.execute(
+        f"SELECT seq, attempt_id, status, metrics_json FROM {TABLE} WHERE kind = ? AND protocol_id = ? ORDER BY seq",
+        (KIND_HOLDOUT, protocol_id),
+    ).fetchall()
+    records: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        metrics = json.loads(row["metrics_json"]) if row["metrics_json"] else None
+        record = records.setdefault(row["attempt_id"], {"attempt_id": row["attempt_id"]})
+        if row["status"] == AttemptStatus.STARTED:
+            record.update(started_seq=int(row["seq"]), start_metrics=metrics)
+        else:
+            record.update(status=row["status"], metrics=metrics)
+    return sorted(records.values(), key=lambda item: item.get("started_seq", 0))
+
+
+def logged_holdout_returns(db: sqlite3.Connection) -> list[tuple[str, list[float]]]:
+    """``(protocol_id, holdout returns)`` recorded with every STARTED holdout attempt (Lot 4, P-10)."""
+
+    if not _table_exists(db):
+        return []
+    found = []
+    for row in db.execute(
+        f"SELECT protocol_id, metrics_json FROM {TABLE} WHERE kind = ? AND status = ? AND metrics_json IS NOT NULL "
+        "ORDER BY seq",
+        (KIND_HOLDOUT, AttemptStatus.STARTED.value),
+    ):
+        try:
+            returns = json.loads(row["metrics_json"]).get("holdout_returns")
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if isinstance(returns, list) and returns:
+            found.append((str(row["protocol_id"]), [float(value) for value in returns]))
+    return found
 
 
 # -- recorders used by the evaluation code paths ------------------------------------------
@@ -972,7 +1039,11 @@ class HoldoutAttempt:
         experiment_id: str | None = None,
         model_id: str | None = None,
         model_version: str | None = None,
+        holdout_returns: Sequence[float] | None = None,
     ) -> HoldoutAttempt:
+        """Append the STARTED event; ``holdout_returns`` (the sealed holdout's log returns) are chained
+        with it so a holdout stays recognisable after its seal rows are gone (Lot 4, P-10)."""
+
         log = log_for_store(store)
         if log is None:
             return cls(None, None)
@@ -998,7 +1069,8 @@ class HoldoutAttempt:
                     **candidate,
                     **_plan_context(protocol_id, plan),
                 )
-            ]
+            ],
+            [{"holdout_returns": [float(value) for value in holdout_returns]} if holdout_returns else None],
         )
         return cls(log, attempt_id, has_candidate=descriptor is not None)
 

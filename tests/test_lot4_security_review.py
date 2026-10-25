@@ -15,6 +15,7 @@ import json
 import math
 import os
 import random
+import shutil
 import sqlite3
 import sys
 import time
@@ -584,11 +585,13 @@ class _Phase3Case(_StoreCase):
 
 
 class RederivationScopeTests(_Phase3Case):
-    # CONFIRMED DEFECT C-1 (high): re-derivation covers only REDERIVED_FIELDS (trades, P&L, PF, drawdown,
-    # edge, cost stress). pbo, deflated_sharpe_probability and variants_tested are taken from the stored
-    # report. A report minted with the real (re-derived) performance numbers and a made-up pbo = 0 and
-    # DSR = 1 passes re-derivation and provenance, and the overfitting gates no longer fail.
-    @unittest.expectedFailure
+    # FIXED IN LOT 4 ROUND 4 (was CONFIRMED DEFECT C-1, high): re-derivation covered only REDERIVED_FIELDS;
+    # pbo, deflated_sharpe_probability and variants_tested were taken from the stored report. The holdout
+    # attempt now records the report hash, the trial universe and the overfitting payload, and promotion
+    # re-derives PBO and DSR from the bars with that universe; a report minted through the store API has no
+    # such record, so the overfitting check counts as missing. Adapted for C-2: the real performance numbers
+    # come from an honest scoring of a copy of the store, since rederive_holdout_evidence is no longer a
+    # store-free oracle (the minted numbers are the same; the attack is unchanged).
     def test_minted_overfitting_statistics_are_detected(self):
         registry = ModelRegistry(self.database)
         registry.initialize()
@@ -601,7 +604,12 @@ class RederivationScopeTests(_Phase3Case):
                       "params": selected.config, "plan_sha256": report.plan_sha256, "candidate_id": selected.candidate_id},
             criteria=PromotionCriteria(),
         )
-        real = rederive_holdout_evidence(BARS, report.plan_manifest)  # unaudited: see C-2
+        scratch = Path(self.database).parent / "scratch.sqlite3"
+        shutil.copyfile(self.database, scratch)
+        with overfitting_double():
+            honest = evaluate_strategy_holdout_once(BARS, report=report, protocol=PROTOCOL,
+                                                    store=BacktestStore(scratch))
+        real = {"selected_candidate_id": honest.selected_candidate_id, **holdout_evidence(honest)}
         attempt = self.store.begin_holdout_evaluation(protocol_id=report.plan_sha256,
                                                       dataset_identity_sha256=report.dataset_identity_sha256)
         HoldoutAttempt.start(self.store, protocol_id=report.plan_sha256, plan=report.plan_manifest,
@@ -625,15 +633,19 @@ class RederivationScopeTests(_Phase3Case):
                     "pbo_above_threshold", "overfitting_check_missing"}
         self.assertTrue(failures & detected, failures)
 
-    # CONFIRMED DEFECT C-2 (medium): rederive_holdout_evidence is a public, store-free holdout oracle. It
-    # scores the reserved holdout of a sealed, never-scored plan as often as asked, without burning the
-    # attempt or writing to the attempt log, so a caller can peek before deciding what to register.
-    @unittest.expectedFailure
+    # FIXED IN LOT 4 ROUND 4 (was CONFIRMED DEFECT C-2, medium): rederive_holdout_evidence was a public,
+    # store-free holdout oracle for a sealed, never-scored plan. It now needs the store and a COMPLETED or
+    # FAILED holdout evaluation of the plan, and refuses otherwise. The assertion is unchanged in substance
+    # ("scored implies consumed"), applied to every way of calling it: a refusal scores nothing.
     def test_holdout_cannot_be_scored_without_consuming_it(self):
         report = self.seal_original()
-        with contextlib.suppress(ValueError):
-            rederive_holdout_evidence(BARS, report.plan_manifest)
-        self.assertIsNotNone(self.store.holdout_for_protocol(report.plan_sha256))
+        for kwargs in ({}, {"store": self.store}):
+            with self.subTest(store="store" in kwargs):
+                scored = None
+                with contextlib.suppress(ValueError):
+                    scored = rederive_holdout_evidence(BARS, report.plan_manifest, **kwargs)
+                self.assertTrue(scored is None or self.store.holdout_for_protocol(report.plan_sha256) is not None)
+                self.assertIsNone(scored)
 
     def test_regression_sma_plans_fail_closed_and_bars_are_required(self):
         self.assertEqual(_rederivation_failures({"protocol": {}}, {}, BARS), ["holdout_rederivation_unsupported_for_this_plan"])
@@ -657,12 +669,10 @@ class AnchorTests(_Phase3Case):
         with self.assertRaisesRegex(ValueError, "inconsistent with the evidence anchor"):
             self.score(report, store)
 
-    # CONFIRMED DEFECT C-3 (high with LocalFileAnchor, the only adapter): the anchor is whatever the caller
-    # passes (or ASTRA_EVIDENCE_ANCHOR points at). After restoring the pre-scoring backup, a fresh anchor file
-    # verifies the restored store, the same holdout is scored again, anchored, and the new evaluation is the
-    # one the promotion gate looks for. Nothing ties a store to its anchor, and promotion accepts a
-    # non-production anchor.
-    @unittest.expectedFailure
+    # FIXED IN LOT 4 ROUND 4 (was CONFIRMED DEFECT C-3, high with LocalFileAnchor): a store is bound to the
+    # identity of the anchor it was first anchored to (evidence_anchor_bindings); an empty or other anchor is
+    # refused for a used store (anchor_empty_for_used_store, anchor_identity_mismatch), so the restored store
+    # cannot be re-scored under a fresh anchor. Promotion with a non-production anchor fails unless waived.
     def test_restore_then_fresh_anchor_does_not_unspend_the_holdout(self):
         _anchor, store = self.anchored_store()
         with overfitting_double():
@@ -680,6 +690,12 @@ class AnchorTests(_Phase3Case):
     # CONFIRMED DEFECT C-4 (medium): scoring does not require an anchor (require_anchor_consistency returns
     # when none is configured), so a holdout scored without one leaves no external trace; after a restore it
     # is scored again under an anchor and looks first-time (B-8 is only closed when an anchor was present).
+    # LOT 4 ROUND 4: MITIGATED, KEPT AS EXPECTED FAILURE BY DESIGN. Scoring without an anchor stays allowed
+    # (exploration, tests, P-10 relies on it) but is fail-closed for promotion: the report and the hash-chained
+    # holdout attempt record anchored_before_scoring=False (holdout_scored_without_anchor, never promotable),
+    # and a store that already holds sealed plans or holdout evaluations can never be anchored afterwards
+    # (anchor_empty_for_used_store), so the "scored again under an anchor, looks first-time" path is closed.
+    # With an anchor, the STARTED attempt is anchored before scoring (holdout_not_anchored_before_scoring).
     @unittest.expectedFailure
     def test_holdout_cannot_be_scored_without_an_anchor(self):
         with overfitting_double():

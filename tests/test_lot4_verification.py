@@ -12,7 +12,9 @@ Secure behaviour is asserted. Scenarios that fail on 9eae4a6 carry ``@unittest.e
 and a ``# VERIFY FAIL N-n`` comment (severity in the comment). All data is SYNTHETIC.
 """
 
+import hashlib
 import inspect
+import json
 import math
 import random
 import shutil
@@ -269,8 +271,9 @@ class IntegratorEditChecks(unittest.TestCase):
         matrix = [[rng.gauss(0.0, 1.0) for _ in range(7)] for _ in range(32)]
         returns = [0.002 + 0.01 * rng.gauss(0.0, 1.0) for _ in range(60)]
         labels = [f"p{i}" for i in range(32)]
-        honest = assess_overfitting(matrix, labels, variants_tested=7, dsr_returns=returns)
-        understated = assess_overfitting(matrix, labels, variants_tested=1, dsr_returns=returns)
+        # Lot 4 round 4 (P-8): the DSR needs trade information; 100 trades keep it computed here.
+        honest = assess_overfitting(matrix, labels, variants_tested=7, dsr_returns=returns, dsr_trade_count=100)
+        understated = assess_overfitting(matrix, labels, variants_tested=1, dsr_returns=returns, dsr_trade_count=100)
         self.assertEqual(understated.n_trials_used, 7)
         self.assertEqual(understated.deflated_sharpe_probability, honest.deflated_sharpe_probability)
 
@@ -658,11 +661,9 @@ class ResearchPolicyTests(AnchoredStoreMixin):
             self.register_score_record()
         self.assertIn("holdout_reuse_policy_below_floor", self.failures())
 
-    # PHASE3 FAIL P-4 (Low; needs in-process code): the statistical floors are module constants read at run
-    # time and the policy actually applied is not recorded in the plan, report or evidence. Lowering
-    # MIN_DSR_TRADES / MIN_PBO_TRADES_PER_SLICE in-process publishes statistics from a handful of trades and
-    # promotion cannot tell.
-    @unittest.expectedFailure
+    # FIXED IN LOT 4 ROUND 4 (was PHASE3 FAIL P-4, Low): the floors applied are recorded with the StatisticalPolicy
+    # payload in every overfitting assessment (and the hash-chained holdout attempt); promotion fails with
+    # statistical_policy_below_floor, and the re-derivation under the real floors differs.
     def test_lowered_statistical_floor_is_visible_at_promotion(self):
         with patch("astra.strategy_validation.MIN_DSR_TRADES", 0), \
                 patch("astra.strategy_validation.MIN_PBO_TRADES_PER_SLICE", 0):
@@ -729,10 +730,8 @@ class ReuseVerdictPathTests(TempStoreMixin):
                 sql(self.path, statement)
         self.assertEqual(self.store.reuse_check(protocol_id)["verdict"], holdout_reuse.SUSPECT)
 
-    # PHASE3 FAIL P-3 (Low-Medium; needs a DB write): scoring is refused only when a SUSPECT/UNDETERMINED row
-    # exists. With the triggers dropped and the verdict row deleted, a suspect holdout is scored (leaked) again;
-    # promotion still fails with holdout_reuse_check_missing, but the holdout information has leaked.
-    @unittest.expectedFailure
+    # FIXED IN LOT 4 ROUND 4 (was PHASE3 FAIL P-3, Low-Medium): a plan sealed with stored returns and no verdict
+    # row (deleted with the triggers dropped) is refused before scoring, like any verdict other than CLEAR.
     def test_missing_verdict_row_blocks_scoring(self):
         protocol_id = _seal_returns(self.store, _suspect_copy(self.base), "c", 2032)
         drop_all_triggers(self.path)
@@ -836,8 +835,12 @@ class ReuseFalsePositiveTests(unittest.TestCase):
 
 class RederivationAndAnchorTests(AnchoredStoreMixin):
     def test_clean_anchored_path_has_no_integrity_failure_and_anchor_is_not_production(self):
+        # Adapted in Lot 4 round 4 (C-3/P-2): a non-production anchor is now an explicit failure unless the
+        # human reviewer waives it; with the waiver the clean path still has no integrity failure.
         self.register_score_record()
-        self.assertEqual(integrity(self.failures()), set())
+        self.assertEqual(integrity(self.failures()), {"evidence_anchor_not_production_grade"})
+        waived = self.registry.check_promotion("wf", "1", holdout_bars=BARS, allow_non_production_anchor=True)
+        self.assertEqual(integrity(set(waived)), set())
         self.assertFalse(self.anchor.production_grade)
         self.assertFalse(verify_store_against_anchor(self.path, self.anchor).production_grade)
 
@@ -867,11 +870,9 @@ class RederivationAndAnchorTests(AnchoredStoreMixin):
         reinitialize(self.path)
         self.assertIn("holdout_report_differs_from_rederivation", self.failures())
 
-    # PHASE3 FAIL P-1 (Medium; needs a DB write): re-derivation compares only the money fields; the overfitting
-    # statistics (pbo, deflated Sharpe) are taken from the stored report. Forging them in the report and the
-    # evidence (triggers dropped, then recreated) removes the overfitting failures and adds none, although the
-    # hash-chained holdout attempt still records the genuine values.
-    @unittest.expectedFailure
+    # FIXED IN LOT 4 ROUND 4 (was PHASE3 FAIL P-1, Medium): the hash-chained holdout attempt records the report
+    # hash and trial universe, and promotion re-derives PBO and DSR from the bars: the forged report adds
+    # holdout_report_hash_mismatch and holdout_overfitting_differs_from_rederivation.
     def test_forged_overfitting_statistics_are_caught(self):
         _report, _holdout, evaluation_id = self.register_score_record()
         before = self.failures()
@@ -913,11 +914,9 @@ class RederivationAndAnchorTests(AnchoredStoreMixin):
         with self.assertRaisesRegex(ValueError, "evidence anchor"):
             score_holdout(restored, report)
 
-    # PHASE3 FAIL P-2 (Medium; documented limit of LocalFileAnchor, but not surfaced): promotion accepts any
-    # anchor, production grade or not, and records nothing about it. A fresh database with a fresh local anchor
-    # file re-scores a nudged, time-shifted copy of a holdout already consumed elsewhere, and its promotion
-    # check shows no integrity failure and no production-grade warning.
-    @unittest.expectedFailure
+    # FIXED IN LOT 4 ROUND 4 (was PHASE3 FAIL P-2, Medium): promotion with a non-production anchor fails with
+    # evidence_anchor_not_production_grade unless the reviewer passes allow_non_production_anchor=True to
+    # promote(), which is audited. (A fresh store with a fresh anchor remains possible: the waiver accepts it.)
     def test_fresh_store_with_fresh_local_anchor_is_flagged(self):
         self.register_score_record()  # holdout consumed in the original store and anchor
         other = Path(self.temp) / "other"
@@ -953,11 +952,9 @@ class SealDeletionReuseTests(AnchoredStoreMixin):
         with self.assertRaises(ValueError):
             score_holdout(self.store, evaluate(bars=bars, store=self.store), bars=bars)
 
-    # PHASE3 FAIL P-10 (Medium without an anchor, Low with one; needs a DB write): the attempt log keeps only
-    # the exact holdout_content_sha256. After the seal tables are wiped (triggers dropped), a nudged and
-    # time-shifted copy has no stored returns to be compared with and a different content hash: it is sealed
-    # and scored again. Promotion still fails (evidence_anchor_missing), but the holdout leaks.
-    @unittest.expectedFailure
+    # FIXED IN LOT 4 ROUND 4 (was PHASE3 FAIL P-10, Medium without an anchor): the STARTED holdout attempt records
+    # the holdout returns and sealing compares a new holdout with those of logged holdouts whose seal rows are
+    # gone (assess_reuse); the nudged, time-shifted copy is a CONFLICT and is refused.
     def test_without_anchor_a_wiped_store_cannot_score_a_nudged_copy(self):
         with patch.dict("os.environ", {}, clear=True):
             store = BacktestStore(f"{self.temp}/bare.sqlite3")
@@ -1020,9 +1017,8 @@ class LowInformationTests(unittest.TestCase):
                 self.assertNotEqual(result.status, "COMPLETED")
                 self.assertTrue(result.pbo is None or result.deflated_sharpe_probability is None)
 
-    # PHASE3 FAIL P-8 (Low; public API only, production paths pass trade counts): without trade_counts the DSR
-    # trade guard is skipped, so one held position (60 mark-to-market bars) still yields a confident DSR (1.0).
-    @unittest.expectedFailure
+    # FIXED IN LOT 4 ROUND 4 (was PHASE3 FAIL P-8, Low): the DSR needs dsr_trade_count >= min_dsr_trades whether
+    # or not trade_counts is passed; without trade information it is LOW_INFORMATION.
     def test_dsr_without_trade_information_is_not_published(self):
         rng = random.Random(9)
         matrix = [[rng.gauss(0, 5) for _ in range(4)] for _ in range(64)]
@@ -1030,6 +1026,73 @@ class LowInformationTests(unittest.TestCase):
         result = assess_overfitting(matrix, [f"p{i}" for i in range(64)], variants_tested=4, dsr_returns=returns,
                                     initial_equity=10_000.0)
         self.assertIsNone(result.deflated_sharpe_probability)
+
+
+class Round4EvidenceTests(AnchoredStoreMixin):
+    """Lot 4 round 4 (fixer F2): anchoring before scoring, the reviewer's waiver, unanchored holdouts."""
+
+    def test_started_attempt_is_anchored_before_scoring(self):
+        _report, holdout, evaluation_id = self.register_score_record()
+        states = [item["status"] for checkpoint in self.anchor.checkpoints() for item in checkpoint.consumed_holdouts
+                  if item["evaluation_id"] == evaluation_id]
+        self.assertEqual(states[0], "STARTED")
+        self.assertEqual(states[-1], "COMPLETED")
+        self.assertIs(holdout.evidence_anchor["anchored_before_scoring"], True)
+        self.assertEqual(holdout.evidence_anchor["anchor_id"], self.anchor.anchor_id())
+        self.assertNotIn("holdout_not_anchored_before_scoring", self.failures())
+        self.assertNotIn("holdout_scored_without_anchor", self.failures())
+
+    def test_holdout_attempt_records_report_hash_universe_and_returns(self):
+        report, holdout, evaluation_id = self.register_score_record()
+        (record,) = [item for item in AttemptLog(self.path).attempts(protocol_id=report.plan_sha256)
+                     if item["kind"] == attempts.KIND_HOLDOUT]
+        metrics = record["metrics"]
+        stored = sql(self.path, "SELECT report_json FROM holdout_evaluations WHERE evaluation_id = ?", (evaluation_id,))
+        self.assertEqual(metrics["report_sha256"], hashlib.sha256(stored[0][0].encode("utf-8")).hexdigest())
+        self.assertEqual(metrics["evaluation_id"], evaluation_id)
+        self.assertEqual(metrics["trial_universe"]["n_trials"], holdout.variants_tested)
+        self.assertEqual(metrics["overfitting"]["pbo"], holdout.overfitting.pbo)
+        started = sql(self.path, f"SELECT metrics_json FROM {attempts.TABLE} WHERE attempt_id = ? AND status = 'STARTED'",
+                      (record["attempt_id"],))
+        self.assertGreaterEqual(len(json.loads(started[0][0])["holdout_returns"]), 16)
+
+    def test_waiver_is_explicit_and_audited(self):
+        self.register_score_record()
+        with self.assertRaises(ValueError):
+            self.registry.check_promotion("wf", "1", holdout_bars=BARS, allow_non_production_anchor="yes")
+        for flag in (False, True):
+            with self.assertRaises(PromotionError):
+                self.registry.promote(actor=REVIEWER, model_id="wf", version="1", reason="waiver drill",
+                                      holdout_bars=BARS, allow_non_production_anchor=flag)
+        events = [json.loads(row[0]) for row in sql(
+            self.path, "SELECT details_json FROM audit_events WHERE event_type = 'model.promotion_refused'")]
+        self.assertEqual(sorted(event["allow_non_production_anchor"] for event in events), [False, True])
+        for event in events:
+            self.assertEqual(event["evidence_anchor_kind"], "LOCAL_FILE_NOT_FOR_PRODUCTION")
+            self.assertIs(event["evidence_anchor_production_grade"], False)
+            self.assertEqual("evidence_anchor_not_production_grade" in event["failures"],
+                             not event["allow_non_production_anchor"])
+
+    def test_holdout_scored_without_an_anchor_is_never_promotable(self):
+        with patch.dict("os.environ", {}, clear=True):
+            store = BacktestStore(f"{self.temp}/bare.sqlite3")
+            registry = ModelRegistry(store.path)
+        store.initialize()
+        registry.initialize()
+        report = evaluate(store=store)
+        registry.register_candidate(actor=AGENT, model_id="wf", version="1", manifest=bound_manifest(report),
+                                    criteria=PromotionCriteria())
+        holdout = score_holdout(store, report)
+        self.assertIs(holdout.evidence_anchor["anchored_before_scoring"], False)
+        registry.record_evaluation(actor=AGENT, model_id="wf", version="1", kind="holdout",
+                                   evidence=holdout_evidence(holdout),
+                                   holdout_evaluation_id=store.holdout_for_protocol(report.plan_sha256)["evaluation_id"])
+        self.assertIn("holdout_scored_without_anchor", registry.check_promotion("wf", "1", holdout_bars=BARS))
+        # The used store can never be attached to an anchor afterwards (C-4 restore path).
+        fresh = LocalFileAnchor(f"{self.temp}/late-anchor.jsonl")
+        self.assertIn("anchor_empty_for_used_store", verify_store_against_anchor(store.path, fresh).errors)
+        with self.assertRaisesRegex(ValueError, "evidence anchor"):
+            BacktestStore(store.path, anchor=fresh).require_anchor_consistency()
 
 
 if __name__ == "__main__":

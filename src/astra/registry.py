@@ -21,7 +21,13 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from .attempts import AttemptLog, promotion_trial_failures, scope_for_plan
+from .attempts import (
+    AttemptLog,
+    holdout_attempt_records,
+    promotion_trial_failures,
+    scope_for_plan,
+    trial_statistics_before,
+)
 from .governance import Action, Actor, PermissionGuard
 from .storage import BacktestStore
 
@@ -70,6 +76,20 @@ class PromotionCriteria:
 
 PROVENANCE_KEY = "_provenance"
 EVIDENCE_TOLERANCE = 1e-9
+# Failures meaning the stored overfitting statistics are not confirmed by the hash-chained holdout
+# attempt and a re-derivation from the bars (Lot 4, C-1/P-1/P-4): the overfitting check counts as missing.
+OVERFITTING_UNVERIFIED_FAILURES = frozenset(
+    {
+        "holdout_attempt_record_missing",
+        "holdout_attempt_ambiguous",
+        "holdout_attempt_record_incomplete",
+        "holdout_attempt_for_another_evaluation",
+        "holdout_report_hash_mismatch",
+        "holdout_trial_universe_differs_from_attempt_log",
+        "holdout_overfitting_differs_from_rederivation",
+        "statistical_policy_below_floor",
+    }
+)
 
 def criteria_looser_than_floor(criteria: PromotionCriteria) -> tuple[str, ...]:
     """Criteria may be stricter than the defaults, never looser. The floor is code, changed only by review."""
@@ -348,13 +368,30 @@ class ModelRegistry:
             self._audit(db, "model.evaluation_recorded", {"model_id": model_id, "version": version, "kind": kind})
         return evaluation_id
 
-    def check_promotion(self, model_id: str, version: str, *, holdout_bars: Any = None) -> tuple[str, ...]:
+    def check_promotion(
+        self,
+        model_id: str,
+        version: str,
+        *,
+        holdout_bars: Any = None,
+        allow_non_production_anchor: bool = False,
+    ) -> tuple[str, ...]:
         """Return failed criteria; an empty tuple means the gates are met.
 
         With the default verifier, holdout evidence is re-derived from
         ``holdout_bars`` (the sealed plan's market bars); without them the gate
-        fails with ``holdout_not_rederived_from_market_data``.
+        fails with ``holdout_not_rederived_from_market_data``. The PBO, deflated
+        Sharpe and trial count are re-derived too, with the trial universe the
+        hash-chained holdout attempt recorded.
+
+        ``allow_non_production_anchor`` reports the reviewer's waiver state: when
+        False (the default) an evidence anchor that is not production grade (the
+        shipped ``LocalFileAnchor``) fails with ``evidence_anchor_not_production_grade``;
+        only a human reviewer may pass True, through ``promote``, which records it.
         """
+
+        if not isinstance(allow_non_production_anchor, bool):
+            raise ValueError("allow_non_production_anchor must be a bool")
 
         with self._connect() as db:
             row = self._version(db, model_id, version)
@@ -381,8 +418,14 @@ class ModelRegistry:
         if decisive_kind == "holdout":
             with self._connect() as db:
                 if self._verify_evidence is verify_holdout_provenance:
-                    failures.extend(verify_holdout_provenance(db, row, evidence, holdout_bars=holdout_bars))
-                    failures.extend(_anchor_and_reuse_failures(db, self.path, self.anchor, evidence))
+                    failures.extend(
+                        verify_holdout_provenance(db, row, evidence, holdout_bars=holdout_bars, path=self.path)
+                    )
+                    failures.extend(
+                        _anchor_and_reuse_failures(
+                            db, self.path, self.anchor, evidence, allow_non_production_anchor=allow_non_production_anchor
+                        )
+                    )
                 else:
                     failures.extend(self._verify_evidence(db, row, evidence))
                 # One version per holdout, re-checked here: evidence copied to a sibling row bypasses
@@ -436,7 +479,8 @@ class ModelRegistry:
             pbo = number("pbo")
             dsr = number("deflated_sharpe_probability")
             variants = number("variants_tested")
-            if pbo is None or dsr is None or variants is None or variants < 1:
+            unverified = bool(OVERFITTING_UNVERIFIED_FAILURES.intersection(failures))
+            if pbo is None or dsr is None or variants is None or variants < 1 or unverified:
                 failures.append("overfitting_check_missing")
             # The trial count must cover every relevant attempt in the store, not one plan's grid,
             # and the append-only attempt log must be intact.
@@ -449,19 +493,55 @@ class ModelRegistry:
                 failures.append("deflated_sharpe_below_threshold")
         return tuple(failures)
 
-    def promote(self, *, actor: Actor, model_id: str, version: str, reason: str, holdout_bars: Any = None) -> None:
+    def promote(
+        self,
+        *,
+        actor: Actor,
+        model_id: str,
+        version: str,
+        reason: str,
+        holdout_bars: Any = None,
+        allow_non_production_anchor: bool = False,
+    ) -> None:
+        """Promote to CHAMPION when every gate is met.
+
+        ``allow_non_production_anchor=True`` is the human reviewer's explicit
+        acceptance of an evidence anchor that is not production grade (Lot 4,
+        C-3); it is recorded in the audit event either way.
+        """
+
         self._guard.require(actor, Action.PROMOTE_MODEL, target=f"{model_id}@{version}")
-        failures = self.check_promotion(model_id, version, holdout_bars=holdout_bars)
+        if not isinstance(allow_non_production_anchor, bool):
+            raise ValueError("allow_non_production_anchor must be a bool")
+        failures = self.check_promotion(
+            model_id, version, holdout_bars=holdout_bars, allow_non_production_anchor=allow_non_production_anchor
+        )
+        anchor_state = {
+            "allow_non_production_anchor": allow_non_production_anchor,
+            "evidence_anchor_kind": getattr(self.anchor, "kind", None),
+            "evidence_anchor_production_grade": bool(getattr(self.anchor, "production_grade", False)),
+        }
         if failures:
             with self._connect() as db:
                 self._audit(
                     db,
                     "model.promotion_refused",
-                    {"model_id": model_id, "version": version, "failures": list(failures), "actor": actor.actor_id},
+                    {
+                        "model_id": model_id,
+                        "version": version,
+                        "failures": list(failures),
+                        "actor": actor.actor_id,
+                        **anchor_state,
+                    },
                 )
             raise PromotionError(f"promotion refused: {', '.join(failures)}")
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            self._audit(
+                db,
+                "model.promotion_approved",
+                {"model_id": model_id, "version": version, "actor": actor.actor_id, **anchor_state},
+            )
             current = db.execute(
                 "SELECT version FROM model_versions WHERE model_id = ? AND status = 'CHAMPION'", (model_id,)
             ).fetchone()
@@ -627,7 +707,12 @@ class ModelRegistry:
 
 
 def verify_holdout_provenance(
-    db: sqlite3.Connection, version_row: sqlite3.Row, evidence: dict[str, Any], *, holdout_bars: Any = None
+    db: sqlite3.Connection,
+    version_row: sqlite3.Row,
+    evidence: dict[str, Any],
+    *,
+    holdout_bars: Any = None,
+    path: str | Path | None = None,
 ) -> tuple[str, ...]:
     """Check that holdout evidence comes from a sealed, completed holdout of this very candidate.
 
@@ -670,7 +755,23 @@ def verify_holdout_provenance(
     if plan.get("implementation_sha256") != manifest.get("code_sha256"):
         failures.append("manifest_code_differs_from_sealed_plan")
     failures.extend(_report_binding_failures(db, holdout["protocol_id"], plan, plan_row, report, manifest))
-    failures.extend(_rederivation_failures(plan, report, holdout_bars))
+    failures.extend(
+        _rederivation_failures(
+            plan, report, holdout_bars, db=db, path=path, protocol_id=holdout["protocol_id"],
+            report_json=holdout["report_json"], evaluation_id=evaluation_id,
+        )
+    )
+    from .research_policy import statistical_policy_below_floor
+
+    # The floors applied when the statistics were computed must not be below the reviewed policy (Lot 4, P-4).
+    overfitting = report.get("overfitting") if isinstance(report.get("overfitting"), dict) else {}
+    policy = overfitting.get("statistical_policy") if isinstance(overfitting.get("statistical_policy"), dict) else {}
+    if statistical_policy_below_floor(policy.get("applied")):
+        failures.append("statistical_policy_below_floor")
+    # A holdout scored without an evidence anchor left no external trace: never promotable (Lot 4, C-4).
+    anchor_record = report.get("evidence_anchor") if isinstance(report.get("evidence_anchor"), dict) else {}
+    if anchor_record.get("anchored_before_scoring") is not True:
+        failures.append("holdout_scored_without_anchor")
     identity = manifest.get("dataset_identity")
     canonical = identity.get("canonical_sha256") if isinstance(identity, dict) else None
     if canonical is None or canonical != plan.get("dataset_identity_sha256"):
@@ -698,13 +799,22 @@ def _current_implementation_sha256(plan: dict[str, Any]) -> str:
     return _implementation_sha256()
 
 
-def _anchor_and_reuse_failures(db: sqlite3.Connection, path: Path, anchor: Any, evidence: dict[str, Any]) -> list[str]:
+def _anchor_and_reuse_failures(
+    db: sqlite3.Connection,
+    path: Path,
+    anchor: Any,
+    evidence: dict[str, Any],
+    *,
+    allow_non_production_anchor: bool = False,
+) -> list[str]:
     """Promotion needs a store consistent with the external evidence anchor and a clear reuse verdict.
 
     After a restore of an older database, or a rewritten attempt chain, no
     promotion is allowed until the store agrees with the anchor again. A plan
     whose holdout the detector found SUSPECT or UNDETERMINED needs a new
-    independent holdout: no agent statement can clear it.
+    independent holdout: no agent statement can clear it. The holdout must
+    have been anchored while STARTED (before scoring), and a non-production
+    anchor needs the reviewer's explicit waiver (Lot 4, C-3 and C-4).
     """
 
     from .research_policy import reuse_policy_looser_than_floor
@@ -726,13 +836,20 @@ def _anchor_and_reuse_failures(db: sqlite3.Connection, path: Path, anchor: Any, 
             failures.append("evidence_anchor_unreadable")
         else:
             failures.extend(f"evidence_anchor_inconsistent:{code}" for code in verification.errors)
-            anchored = {
-                item.get("evaluation_id")
-                for checkpoint in anchor.checkpoints()
-                for item in checkpoint.consumed_holdouts
-            }
-            if provenance.get("holdout_evaluation_id") not in anchored:
+            if not verification.production_grade and not allow_non_production_anchor:
+                failures.append("evidence_anchor_not_production_grade")
+            first_status = None
+            for checkpoint in anchor.checkpoints():
+                for item in checkpoint.consumed_holdouts:
+                    if item.get("evaluation_id") == provenance.get("holdout_evaluation_id"):
+                        first_status = item.get("status")
+                        break
+                if first_status is not None:
+                    break
+            if first_status is None:
                 failures.append("holdout_not_anchored")
+            elif first_status != "STARTED":
+                failures.append("holdout_not_anchored_before_scoring")
     try:
         check = db.execute(
             "SELECT verdict, policy_json FROM holdout_reuse_checks WHERE protocol_id = ?", (protocol_id,)
@@ -753,26 +870,118 @@ def _anchor_and_reuse_failures(db: sqlite3.Connection, path: Path, anchor: Any, 
     return failures
 
 
-def _rederivation_failures(plan: dict[str, Any], report: dict[str, Any], holdout_bars: Any) -> list[str]:
-    """Recompute the holdout from market bars and compare it with the stored report (Lot 4, A-4 and D-1).
+def _close(recorded: Any, value: Any) -> bool:
+    numeric = (int, float)
+    if isinstance(recorded, bool) or isinstance(value, bool):
+        return recorded == value
+    if isinstance(recorded, numeric) and isinstance(value, numeric):
+        return math.isclose(float(recorded), float(value), rel_tol=EVIDENCE_TOLERANCE, abs_tol=EVIDENCE_TOLERANCE)
+    return recorded == value
+
+
+def _holdout_record_failures(
+    db: sqlite3.Connection,
+    protocol_id: str | None,
+    report_json: str | None,
+    evaluation_id: str | None,
+) -> tuple[list[str], dict[str, Any] | None]:
+    """Check the hash-chained holdout attempt against the stored report; return its trial universe payload.
+
+    The attempt's terminal event records the SHA-256 of the stored report, the
+    trial universe and the overfitting payload (Lot 4, C-1). The universe must
+    be the store's trials as logged before the attempt's STARTED event.
+    """
+
+    failures: list[str] = []
+    try:
+        records = [
+            item for item in holdout_attempt_records(db, protocol_id or "")
+            if str(item.get("status", "")).startswith("COMPLETED")
+        ]
+    except (sqlite3.Error, ValueError):
+        records = []
+    if not records:
+        return ["holdout_attempt_record_missing"], None
+    if len(records) > 1:
+        return ["holdout_attempt_ambiguous"], None
+    (record,) = records
+    metrics = record.get("metrics") if isinstance(record.get("metrics"), dict) else {}
+    universe = metrics.get("trial_universe")
+    if (
+        not isinstance(metrics.get("report_sha256"), str)
+        or not isinstance(universe, dict)
+        or not isinstance(metrics.get("overfitting"), dict)
+    ):
+        return ["holdout_attempt_record_incomplete"], None
+    if metrics.get("evaluation_id") != evaluation_id:
+        failures.append("holdout_attempt_for_another_evaluation")
+    if report_json is None or hashlib.sha256(report_json.encode("utf-8")).hexdigest() != metrics["report_sha256"]:
+        failures.append("holdout_report_hash_mismatch")
+    try:
+        logged = trial_statistics_before(db, protocol_id or "", int(record["started_seq"]))
+    except (KeyError, TypeError, ValueError, sqlite3.Error):
+        logged = None
+    sharpes = universe.get("trial_sharpes")
+    n_trials = universe.get("n_trials")
+    if (
+        logged is None
+        or not isinstance(n_trials, int)
+        or isinstance(n_trials, bool)
+        or n_trials < logged.count
+        or not isinstance(sharpes, list)
+        or len(sharpes) != len(logged.trial_sharpes)
+        or not all(_close(a, b) for a, b in zip(sharpes, logged.trial_sharpes, strict=True))
+    ):
+        failures.append("holdout_trial_universe_differs_from_attempt_log")
+        return failures, None
+    return failures, universe
+
+
+def _rederivation_failures(
+    plan: dict[str, Any],
+    report: dict[str, Any],
+    holdout_bars: Any,
+    *,
+    db: sqlite3.Connection | None = None,
+    path: str | Path | None = None,
+    protocol_id: str | None = None,
+    report_json: str | None = None,
+    evaluation_id: str | None = None,
+) -> list[str]:
+    """Recompute the holdout from market bars and compare it with the stored report (Lot 4, A-4, D-1, C-1).
 
     A stored report, however consistent with the plan and the attempt log, is
     only trusted once the same numbers come out of the sealed plan run again on
-    the bars it was sealed for.
+    the bars it was sealed for. The P&L fields are compared with
+    ``holdout_report_differs_from_rederivation``; the PBO, deflated Sharpe and
+    trial count are re-derived with the trial universe recorded in the
+    hash-chained holdout attempt and compared with
+    ``holdout_overfitting_differs_from_rederivation``.
     """
 
     if holdout_bars is None:
         return ["holdout_not_rederived_from_market_data"]
     if "strategy_validation_version" not in plan:
         return ["holdout_rederivation_unsupported_for_this_plan"]
-    from .strategy_validation import REDERIVED_FIELDS, rederive_holdout_evidence
+    if db is None or path is None:
+        return ["holdout_rederivation_needs_the_store"]
+    from .strategy_validation import REDERIVED_FIELDS, REDERIVED_OVERFITTING_FIELDS, rederive_holdout_evidence
 
+    failures, universe = _holdout_record_failures(db, protocol_id, report_json, evaluation_id)
     try:
-        derived = rederive_holdout_evidence(holdout_bars, plan)
+        derived = rederive_holdout_evidence(
+            holdout_bars, plan, store=BacktestStore(path), trial_universe=universe
+        )
     except (ValueError, TypeError, KeyError) as exc:
-        return [f"holdout_rederivation_failed:{type(exc).__name__}"]
+        return [*failures, f"holdout_rederivation_failed:{type(exc).__name__}"]
+    if "overfitting" in derived:
+        stored_overfitting = report.get("overfitting") if isinstance(report.get("overfitting"), dict) else {}
+        stored = {**stored_overfitting, "variants_tested": report.get("variants_tested")}
+        recomputed = {**derived["overfitting"], "variants_tested": derived["variants_tested"]}
+        if not all(_close(stored.get(key), recomputed.get(key)) for key in REDERIVED_OVERFITTING_FIELDS):
+            failures.append("holdout_overfitting_differs_from_rederivation")
     if derived["selected_candidate_id"] != report.get("selected_candidate_id"):
-        return ["holdout_report_differs_from_rederivation"]
+        return [*failures, "holdout_report_differs_from_rederivation"]
     selected = report.get("selected_candidate") or {}
     stressed = [
         scenario["selected_candidate"]["net_pnl"]
@@ -791,10 +1000,10 @@ def _rederivation_failures(plan: dict[str, Any], report: dict[str, Any], holdout
         recorded, value = stored.get(key), derived.get(key)
         if isinstance(recorded, (int, float)) and isinstance(value, (int, float)):
             if not math.isclose(float(recorded), float(value), rel_tol=EVIDENCE_TOLERANCE, abs_tol=EVIDENCE_TOLERANCE):
-                return ["holdout_report_differs_from_rederivation"]
+                return [*failures, "holdout_report_differs_from_rederivation"]
         elif recorded != value:
-            return ["holdout_report_differs_from_rederivation"]
-    return []
+            return [*failures, "holdout_report_differs_from_rederivation"]
+    return failures
 
 
 def _report_binding_failures(
