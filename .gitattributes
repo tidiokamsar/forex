@@ -1,0 +1,5 @@
+* text=auto eol=lf
+# Data fixtures are hash-pinned: keep their bytes exactly as committed.
+data/** -text
+*.png binary
+*.sqlite3 binary

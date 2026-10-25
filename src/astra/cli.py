@@ -1,0 +1,582 @@
+"""Command line entry point for local research and dashboard operations."""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import asdict
+from datetime import datetime, timezone
+import hashlib
+import json
+import sys
+from pathlib import Path
+from typing import Sequence
+
+from .brokers.base import BrokerTimeout, BrokerUnavailable
+from .config import AppConfig, ModeUnavailableError
+from .data import load_bars_csv
+from .engine import run_paper_replay, strategy_decisions
+from .execution import ExecutionStore, TradingControls
+from .governance import Actor, PermissionDenied, Role
+from .models import BacktestConfig
+from .research import run_sma_backtest
+from .registry import ModelRegistry, PromotionCriteria
+from .risk import RiskEngine
+from .storage import BacktestStore
+from .validation import (
+    WalkForwardProtocol,
+    evaluate_holdout_once,
+    evaluate_walk_forward,
+)
+from .web import serve
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+SOURCE_TYPES = ("HISTORICAL", "DELAYED", "LIVE", "SIMULATED", "SYNTHETIC")
+DEMO_FIXTURE_SHA256 = "16402dc19dc55033e851b1f796aed2a872a19d0a9648ede39f1dfb59ab5d5ef8"
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="astra",
+        description="Recherche Forex locale en simulation uniquement.",
+    )
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("status", help="Afficher le mode et les capacités locales")
+    commands.add_parser("demo", help="Backtester le jeu synthétique inclus")
+    commands.add_parser("serve", help="Démarrer le tableau de bord local en lecture seule")
+    replay = commands.add_parser(
+        "paper-replay",
+        help="Rejouer des barres via Order Gateway et courtier simulé (aucun ordre externe)",
+    )
+    replay.add_argument("--csv", type=Path, help="Fichier OHLC CSV; défaut: jeu synthétique inclus")
+    replay.add_argument("--source-type", choices=SOURCE_TYPES)
+    replay.add_argument("--source-name", help="Libellé de provenance sans chemin local")
+    replay.add_argument("--interval-seconds", type=float)
+    replay.add_argument("--spread-pips", type=float, default=1.0)
+    replay.add_argument("--strategy", choices=("sma", "momentum", "breakout"), default="sma")
+    ml = commands.add_parser(
+        "ml-baseline",
+        help="Régression logistique vs taux de base en walk-forward purgé; enregistre l'expérience",
+    )
+    ml.add_argument("--csv", type=Path, help="Fichier OHLC CSV; défaut: jeu synthétique inclus")
+    ml.add_argument("--source-type", choices=SOURCE_TYPES)
+    ml.add_argument("--source-name")
+    ml.add_argument("--interval-seconds", type=float)
+    ml.add_argument("--horizon", type=int, default=4)
+    ml.add_argument("--folds", type=int, default=2)
+    ml.add_argument("--validation-rows", type=int, default=20)
+    ml.add_argument("--minimum-training-rows", type=int, default=60)
+    ml.add_argument("--embargo-bars", type=int, default=2)
+    check = commands.add_parser(
+        "ctrader-check",
+        help="Vérification en lecture seule d'un compte démo cTrader (aucun ordre envoyé)",
+    )
+    check.add_argument("--operator", required=True, help="Identifiant de l'opérateur humain")
+    commands.add_parser("orders", help="Lister les ordres simulés enregistrés")
+    commands.add_parser("models", help="Lister le registre des modèles et expériences")
+    controls = commands.add_parser("controls", help="Arrêt d'urgence et gels des entrées")
+    control_actions = controls.add_subparsers(dest="control_action", required=True)
+    control_actions.add_parser("show", help="Afficher l'état des contrôles")
+    kill = control_actions.add_parser("kill", help="Activer l'arrêt d'urgence")
+    kill.add_argument("--reason", required=True)
+    kill.add_argument("--operator", required=True, help="Identifiant de l'opérateur")
+    release = control_actions.add_parser("release", help="Lever l'arrêt d'urgence (humain)")
+    release.add_argument("--reason", required=True)
+    release.add_argument("--operator", required=True, help="Identifiant de l'opérateur humain")
+    backtest = commands.add_parser("backtest", help="Backtester un fichier CSV local")
+    backtest.add_argument("--csv", required=True, type=Path, help="Fichier OHLC CSV UTF-8")
+    backtest.add_argument("--source-type", required=True, choices=SOURCE_TYPES)
+    backtest.add_argument(
+        "--exploratory",
+        action="store_true",
+        required=True,
+        help="confirmer explicitement un score exploratoire sur tout l'historique du CSV",
+    )
+    backtest.add_argument("--source-name", help="Libellé de provenance sans chemin local")
+    backtest.add_argument(
+        "--interval-seconds", type=float, help="Cadence attendue pour le contrôle des trous"
+    )
+    walk_forward = commands.add_parser(
+        "walk-forward",
+        help="Évaluer des variantes sur des fenêtres chronologiques; réserve le holdout final",
+    )
+    walk_forward.add_argument("--csv", required=True, type=Path, help="Fichier OHLC CSV UTF-8")
+    walk_forward.add_argument("--source-type", required=True, choices=SOURCE_TYPES)
+    walk_forward.add_argument("--source-name", help="Libellé de provenance sans chemin local")
+    walk_forward.add_argument(
+        "--interval-seconds", type=float, help="Cadence attendue pour le contrôle des trous"
+    )
+    walk_forward.add_argument(
+        "--hypothesis", required=True, help="Hypothèse falsifiable fixée avant évaluation"
+    )
+    walk_forward.add_argument(
+        "--candidate",
+        action="append",
+        metavar="FAST:SLOW",
+        help="Paire SMA candidate; répétable. Défaut: 5:13, 8:21 et 10:30.",
+    )
+    walk_forward.add_argument("--folds", type=int, default=3)
+    walk_forward.add_argument("--minimum-training-bars", type=int, default=60)
+    walk_forward.add_argument("--validation-bars", type=int, default=20)
+    walk_forward.add_argument("--holdout-bars", type=int, default=20)
+    walk_forward.add_argument("--minimum-candidate-trades", type=int, default=1)
+    walk_forward.add_argument(
+        "--evaluate-holdout",
+        action="store_true",
+        help="Consommer une seule fois le holdout final, après scellement SQLite du protocole",
+    )
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        config = AppConfig.from_env()
+        if args.command == "status":
+            _write_json(
+                {
+                    "mode": config.mode.value,
+                    "live_locked": True,
+                    "broker_adapter": None,
+                    "external_orders": False,
+                    "dashboard_host": config.host,
+                    "dashboard_port": config.port,
+                    "database_path": str(config.database_path),
+                }
+            )
+            return 0
+
+        if args.command == "serve":
+            store = BacktestStore(config.database_path)
+            store.initialize()
+            ExecutionStore(config.database_path).initialize()
+            ModelRegistry(config.database_path).initialize()
+            serve(config, store)
+            return 0
+
+        if args.command == "ctrader-check":
+            _write_json(ctrader_check(args.operator, config))
+            return 0
+
+        if args.command in ("orders", "controls", "models"):
+            return _operations_command(args, config)
+
+        if args.command in ("paper-replay", "ml-baseline") and args.csv is not None and args.source_type is None:
+            raise ValueError("--source-type is required with --csv")
+
+        if args.command == "demo" or (args.command in ("paper-replay", "ml-baseline") and args.csv is None):
+            csv_path = PROJECT_ROOT / "data" / "synthetic_eurusd_m15.csv"
+            if hashlib.sha256(csv_path.read_bytes()).hexdigest() != DEMO_FIXTURE_SHA256:
+                raise ValueError(
+                    "bundled demo fixture failed its integrity check; use backtest --exploratory "
+                    "for a separate CSV"
+                )
+            source_type = "SYNTHETIC"
+            source_name = "synthetic_eurusd_m15.csv"
+            expected_interval = 900.0
+        else:
+            csv_path = args.csv
+            source_type = args.source_type
+            source_name = args.source_name
+            expected_interval = args.interval_seconds
+
+        dataset = load_bars_csv(
+            csv_path,
+            source_type=source_type,
+            source_name=source_name,
+            expected_interval_seconds=expected_interval,
+        )
+        if not dataset.usable:
+            _write_json(
+                {
+                    "status": "rejected",
+                    "mode": "SIMULATION",
+                    "dataset_id": dataset.dataset_id,
+                    "source_type": dataset.source_type,
+                    "sha256": dataset.sha256,
+                    "usable": False,
+                    "issues": [asdict(issue) for issue in dataset.issues],
+                    "external_orders": False,
+                },
+                stream=sys.stderr,
+            )
+            return 2
+
+        if args.command == "paper-replay":
+            execution_store = ExecutionStore(config.database_path)
+            execution_store.initialize()
+            summary = run_paper_replay(
+                dataset.bars,
+                execution_store,
+                spread_pips=args.spread_pips,
+                decide=strategy_decisions(args.strategy),
+                data_label=f"{dataset.source_type}:{dataset.source_name}",
+            )
+            _write_json(
+                {
+                    "status": "completed",
+                    "mode": "SIMULATION",
+                    "dataset": {"dataset_id": dataset.dataset_id, "sha256": dataset.sha256},
+                    "replay": summary.to_dict(),
+                    "external_orders": False,
+                }
+            )
+            return 0
+
+        if args.command == "ml-baseline":
+            _write_json(_ml_baseline(args, config, dataset))
+            return 0
+
+        provenance = {
+            "dataset_id": dataset.dataset_id,
+            "source_type": dataset.source_type,
+            "source_name": dataset.source_name,
+            "sha256": dataset.sha256,
+            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        }
+        if args.command == "backtest":
+            provenance["evaluation_classification"] = "EXPLORATORY_FULL_HISTORY_NON_PROMOTABLE"
+        if args.command == "walk-forward":
+            candidate_pairs = args.candidate or ("5:13", "8:21", "10:30")
+            candidates = tuple(
+                BacktestConfig(fast_window=fast, slow_window=slow)
+                for fast, slow in (_parse_candidate(value) for value in candidate_pairs)
+            )
+            report = evaluate_walk_forward(
+                dataset.bars,
+                candidates,
+                hypothesis=args.hypothesis,
+                protocol=WalkForwardProtocol(
+                    fold_count=args.folds,
+                    minimum_training_bars=args.minimum_training_bars,
+                    validation_bars=args.validation_bars,
+                    holdout_bars=args.holdout_bars,
+                    minimum_candidate_trades=args.minimum_candidate_trades,
+                ),
+                dataset_sha256=dataset.sha256,
+            )
+            store = BacktestStore(config.database_path)
+            store.initialize()
+            store.seal_research_protocol(
+                protocol_id=report.plan_sha256,
+                dataset_identity_sha256=report.dataset_identity_sha256,
+                protocol_version=report.protocol_version,
+                plan_manifest=report.plan_manifest,
+            )
+            holdout_result = None
+            if args.evaluate_holdout:
+                holdout_value = evaluate_holdout_once(
+                    dataset.bars,
+                    candidates,
+                    walk_forward_report=report,
+                    protocol=WalkForwardProtocol(
+                        fold_count=args.folds,
+                        minimum_training_bars=args.minimum_training_bars,
+                        validation_bars=args.validation_bars,
+                        holdout_bars=args.holdout_bars,
+                        minimum_candidate_trades=args.minimum_candidate_trades,
+                    ),
+                    store=store,
+                    dataset_sha256=dataset.sha256,
+                )
+                holdout_result = (
+                    holdout_value if isinstance(holdout_value, dict) else asdict(holdout_value)
+                )
+            _write_json(
+                {
+                    "status": "completed",
+                    "mode": "SIMULATION",
+                    "report": asdict(report),
+                    "protocol_id": report.plan_sha256,
+                    "holdout_persistence": "SQLITE_ONCE_PER_CANONICAL_MARKET_BAR_IDENTITY",
+                    "holdout_lock_scope": "CONFIGURED_LOCAL_SQLITE_STORE",
+                    "holdout_evaluation": holdout_result,
+                    "exploratory_warning": (
+                        "Walk-forward results are exploratory and non-promotable. This local "
+                        "store freezes one plan per canonical dataset, but direct API calls, "
+                        "full-history exploratory backtests, database replacement or edits can "
+                        "contaminate evaluation windows. Confirmatory use requires a fresh, "
+                        "independent dataset."
+                    ),
+                    "external_orders": False,
+                }
+            )
+            return 0
+
+        result = run_sma_backtest(
+            dataset.bars,
+            config=BacktestConfig(),
+            risk_engine=RiskEngine(),
+            provenance=provenance,
+        )
+        store = BacktestStore(config.database_path)
+        store.initialize()
+        run_id = store.save_backtest(result, dataset)
+        _write_json(
+            {
+                "status": "completed",
+                "mode": "SIMULATION",
+                "run_id": run_id,
+                "dataset": {
+                    "dataset_id": dataset.dataset_id,
+                    "source_type": dataset.source_type,
+                    "source_name": dataset.source_name,
+                    "sha256": dataset.sha256,
+                    "observations": len(dataset.bars),
+                    "usable": dataset.usable,
+                },
+                "result": {
+                    "strategy": result.strategy,
+                    "strategy_version": result.strategy_version,
+                    "evaluation_classification": result.provenance.get(
+                        "evaluation_classification"
+                    ),
+                    "instrument": result.instrument,
+                    "start": result.start.isoformat() if result.start else None,
+                    "end": result.end.isoformat() if result.end else None,
+                    "initial_equity": result.initial_equity,
+                    "final_equity": result.final_equity,
+                    "trade_count": result.trade_count,
+                    "gross_pnl": result.gross_pnl,
+                    "total_costs": result.total_costs,
+                    "net_pnl": result.net_pnl,
+                    "max_drawdown_pct": result.max_drawdown_pct,
+                    "win_rate": result.win_rate,
+                    "profit_factor": result.profit_factor,
+                    "risk_rejections": result.risk_rejections,
+                    "assumptions": result.assumptions,
+                },
+                **(
+                    {
+                        "exploratory_warning": (
+                            "This command scores the complete CSV history, including bars that "
+                            "could later be assigned to a holdout. Do not use it to tune a sealed "
+                            "protocol, claim out-of-sample performance, or promote a strategy."
+                        )
+                    }
+                    if args.command == "backtest"
+                    else {}
+                ),
+                "external_orders": False,
+            }
+        )
+        return 0
+    except PermissionDenied as exc:
+        _write_json({"status": "denied", "reason": str(exc)}, sys.stderr)
+        return 3
+    except ModeUnavailableError as exc:
+        _write_json({"status": "rejected", "reason": str(exc), "live_locked": True}, sys.stderr)
+        return 2
+    except (BrokerUnavailable, BrokerTimeout) as exc:
+        _write_json({"status": "connector_error", "reason": str(exc), "external_orders": False}, sys.stderr)
+        return 4
+    except (OSError, ValueError) as exc:
+        _write_json({"status": "error", "reason": str(exc)}, sys.stderr)
+        return 1
+
+
+def ctrader_check(operator: str, config: AppConfig, environ=None, transport=None) -> dict:
+    """Read-only connection check against the cTrader DEMO host.
+
+    Authenticates, reads account, assets, symbol and one quote, then
+    disconnects. It never sends an order or position request.
+    """
+
+    import os
+
+    from .brokers.ctrader import CTraderAdapter, CTraderCredentials, NEVER_SENT_BY_CHECK
+    from .execution.mode import verify_mode
+    from .governance import PermissionGuard, SecretVault
+    from .models import RunMode
+
+    values = os.environ if environ is None else environ
+    store = ExecutionStore(config.database_path)
+    store.initialize()
+    vault = SecretVault(PermissionGuard(store), environ=values)
+    actor = Actor(f"cli:{operator}", Role.HUMAN_ADMIN)
+    secrets = {name: vault.get(actor, name) for name in ("CTRADER_CLIENT_ID", "CTRADER_CLIENT_SECRET", "CTRADER_ACCESS_TOKEN")}
+    missing = [f"ASTRA_SECRET_{name}" for name, value in secrets.items() if value is None]
+    account_text = values.get("ASTRA_CTRADER_ACCOUNT_ID", "").strip()
+    if not account_text.isdigit():
+        missing.append("ASTRA_CTRADER_ACCOUNT_ID")
+    if missing:
+        raise ValueError(f"missing environment variables: {', '.join(missing)}")
+    adapter = CTraderAdapter(
+        CTraderCredentials(
+            secrets["CTRADER_CLIENT_ID"], secrets["CTRADER_CLIENT_SECRET"], secrets["CTRADER_ACCESS_TOKEN"], int(account_text)
+        ),
+        transport=transport,
+    )
+    result: dict = {"status": "failed", "host": "demo.ctraderapi.com", "orders_sent": 0}
+    try:
+        adapter.connect()
+        import time as _time
+
+        deadline = _time.monotonic() + 10
+        quote = None
+        while quote is None and _time.monotonic() < deadline:
+            try:
+                quote = adapter.quote("EURUSD")
+            except Exception:
+                _time.sleep(0.2)
+        account = adapter.account_snapshot()
+        capabilities = adapter.capabilities()
+        verification = verify_mode(RunMode.DEMO, RunMode.DEMO, capabilities, account)
+        spec = adapter.instrument_specs().get("EURUSD")
+        result.update(
+            {
+                "status": "connected",
+                "environment_reported": account.environment_reported.value,
+                "environment_source": account.environment_source.value,
+                "demo_mode_checks": {"verified": verification.verified, "reason_codes": list(verification.reason_codes)},
+                "account_ref": account.account_ref_masked,
+                "currency": account.currency,
+                "balance": account.balance,
+                "equity_derived": account.equity,
+                "margin_used": account.margin_used,
+                "open_positions": [[p.instrument, p.net_units] for p in adapter.open_positions()],
+                "eurusd_spec": None if spec is None else {
+                    "min_units": spec.min_units, "unit_step": spec.unit_step, "max_units": spec.max_units,
+                    "pip_size": spec.pip_size, "margin_rate_derived": spec.margin_rate,
+                },
+                "eurusd_quote": None if quote is None else {"bid": quote.bid, "ask": quote.ask, "timestamp": quote.timestamp},
+                "limitations": list(capabilities.limitations),
+            }
+        )
+    finally:
+        adapter.disconnect()
+        sent_orders = [t for t in adapter.sent_payload_types if t in NEVER_SENT_BY_CHECK]
+        result["orders_sent"] = len(sent_orders)
+        store.audit(
+            "connector.ctrader_check",
+            {"operator": operator, "status": result["status"], "orders_sent": len(sent_orders),
+             "environment": result.get("environment_reported")},
+        )
+    if sent_orders:
+        raise RuntimeError("ctrader-check sent an order request; this must never happen")
+    result["note"] = (
+        "Read-only check. DEMO order execution remains disabled in this build until this check and a "
+        "reviewed change enable it."
+    )
+    result["external_orders"] = False
+    return result
+
+
+def _ml_baseline(args: argparse.Namespace, config: AppConfig, dataset) -> dict:
+    from .ml import PurgedWalkForwardConfig, run_purged_walk_forward
+
+    registry = ModelRegistry(config.database_path)
+    registry.initialize()
+    author = Actor("cli:ml-baseline", Role.SYSTEM)
+    walk_config = PurgedWalkForwardConfig(
+        horizon=args.horizon,
+        fold_count=args.folds,
+        validation_rows=args.validation_rows,
+        minimum_training_rows=args.minimum_training_rows,
+        embargo_bars=args.embargo_bars,
+    )
+    identity = {"dataset_id": dataset.dataset_id, "sha256": dataset.sha256, "source_type": dataset.source_type}
+    experiment_id = registry.open_experiment(
+        author=author,
+        hypothesis=(
+            f"Scale-free causal features predict the sign of the {args.horizon}-bar forward return "
+            "better than the training base rate (lower Brier score out of sample)."
+        ),
+        mechanism="Short-horizon persistence or reversal in returns, volatility and trend efficiency.",
+        dataset_id=dataset.dataset_id,
+        plan={"metric": "brier_edge_vs_base_rate", "walk_forward": asdict(walk_config)},
+        variants_tested=1,
+    )
+    run = run_purged_walk_forward(dataset.bars, identity, config=walk_config)
+    manifest = run.manifest.to_dict()
+    edges = [fold["edge_vs_baseline"] for fold in manifest["fold_metrics"]]
+    mean_edge = sum(edges) / len(edges)
+    beats_everywhere = all(edge > 0 for edge in edges)
+    decision = "NEEDS_MORE_RESEARCH" if beats_everywhere else "REJECTED"
+    registry.close_experiment(
+        experiment_id,
+        result={"fold_edges": edges, "mean_edge": mean_edge, "folds": len(edges)},
+        decision=decision,
+    )
+    version = f"{manifest['model_version']}+{run.manifest.code_sha256[:8]}-{experiment_id[:8]}"
+    registry.register_candidate(
+        actor=author,
+        model_id=manifest["model_name"],
+        version=version,
+        manifest={**manifest, "dataset_identity": identity},
+        criteria=PromotionCriteria(),
+    )
+    return {
+        "status": "completed",
+        "mode": "SIMULATION",
+        "experiment_id": experiment_id,
+        "decision": decision,
+        "model_id": manifest["model_name"],
+        "version": version,
+        "registry_status": "CANDIDATE",
+        "dataset": {**identity, "source_name": dataset.source_name, "observations": len(dataset.bars)},
+        "promotion_blockers": list(registry.check_promotion(manifest["model_name"], version)),
+        "fold_edge_vs_base_rate_brier": edges,
+        "fold_metrics": manifest["fold_metrics"],
+        "warning": (
+            "Classification edge is not trading performance. The candidate stays inactive: promotion "
+            "requires pre-registered trading evidence after costs, a holdout, and a human reviewer."
+        ),
+        "external_orders": False,
+    }
+
+
+def _operations_command(args: argparse.Namespace, config: AppConfig) -> int:
+    execution_store = ExecutionStore(config.database_path)
+    execution_store.initialize()
+    if args.command == "orders":
+        _write_json({"mode": "SIMULATION", "orders": [o.to_dict() for o in execution_store.list_orders(limit=100)]})
+        return 0
+    if args.command == "models":
+        registry = ModelRegistry(config.database_path)
+        registry.initialize()
+        _write_json({"models": registry.list_versions(), "experiments": registry.experiments()})
+        return 0
+    controls = TradingControls(execution_store)
+    if args.control_action == "kill":
+        controls.activate_kill_switch(f"cli:{args.operator}", args.reason)
+    elif args.control_action == "release":
+        # The CLI runs locally under the operator's own account; the role is
+        # asserted, not authenticated. Remote use requires real authentication.
+        controls.release_kill_switch(Actor(f"cli:{args.operator}", Role.HUMAN_OPERATOR), args.reason)
+    _write_json(
+        {
+            "kill_switch_active": controls.kill_switch_active(),
+            "entry_freezes": list(controls.freezes()),
+            "reconciliations": execution_store.reconciliations(limit=5),
+        }
+    )
+    return 0
+
+
+def _write_json(payload: dict, stream=None) -> None:
+    target = sys.stdout if stream is None else stream
+    print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default), file=target)
+
+
+def _json_default(value) -> str:
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    if hasattr(value, "value"):
+        return value.value
+    return str(value)
+
+
+def _parse_candidate(value: str) -> tuple[int, int]:
+    try:
+        fast_text, slow_text = value.split(":", maxsplit=1)
+        fast, slow = int(fast_text), int(slow_text)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError(f"candidat invalide {value!r}; format attendu FAST:SLOW") from exc
+    if fast < 1 or slow < 2 or fast >= slow:
+        raise ValueError(f"candidat invalide {value!r}; FAST doit être inférieur à SLOW")
+    return fast, slow
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

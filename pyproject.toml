@@ -1,0 +1,10 @@
+[project]
+name = "astra-forex-intelligence"
+version = "0.2.0"
+description = "Local Forex research and simulation workspace"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.astra]
+supported-mode = "SIMULATION"
+live-execution = false
