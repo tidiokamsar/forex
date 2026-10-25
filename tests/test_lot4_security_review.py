@@ -27,6 +27,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _support import accept_unverified_evidence, workspace_tempdir
+from astra.anchoring import LocalFileAnchor, verify_store_against_anchor
 from astra.attempts import AttemptLog, HoldoutAttempt
 from astra.backup import create_backup, restore_backup
 from astra.cli import main
@@ -39,10 +40,17 @@ from astra.registry import (
     PromotionCriteria,
     PromotionError,
     _canonical,
+    _rederivation_failures,
     _sha256,
 )
+from astra.research_policy import HOLDOUT_REUSE_POLICY, reuse_policy_looser_than_floor
 from astra.storage import BacktestStore
-from astra.strategy_validation import StrategyHoldoutEvaluation, evaluate_strategy_holdout_once, holdout_evidence
+from astra.strategy_validation import (
+    StrategyHoldoutEvaluation,
+    evaluate_strategy_holdout_once,
+    holdout_evidence,
+    rederive_holdout_evidence,
+)
 from astra.validation import _canonical_json
 from astra.validation import _sha256 as _plan_sha256
 from test_features import make_synthetic_bars
@@ -499,15 +507,16 @@ class DetectorFalsePositiveAndCostTests(_StoreCase):
                 refused += 1
         self.assertEqual(refused, 0)
 
-    # CONFIRMED DEFECT B-7: the comparison is O(len(new) * len(old) * window / step) in pure Python, for every
-    # sealed plan, inside BEGIN IMMEDIATE (other writers give up after the 5 s busy timeout). 1500 vs 1500
-    # returns takes about 5 s (2000 vs 2000: 9.5 s, quadratic), so a few long holdouts block every seal.
+    # CONFIRMED DEFECT B-7: the comparison is quadratic in pure Python, for every sealed plan. Phase 2: 1500 vs
+    # 1500 returns about 5 s inside BEGIN IMMEDIATE. Phase 3 (0ef781b): moved before the write lock but about
+    # 12x slower (reversed, 2-bar aggregated, negated, match-share passes): 1500 vs 1500 took 65 s. Sized to
+    # 500 here to keep the suite fast; one seal still costs seconds per long sealed holdout in the store.
     @unittest.expectedFailure
     def test_sealing_a_long_holdout_against_a_long_sealed_one_is_fast(self):
         rng = random.Random(1)
-        self.seal([round(rng.gauss(0.0, 1e-4), 12) for _ in range(1500)], "AAA", 2030, "a" * 64)
+        self.seal([round(rng.gauss(0.0, 1e-4), 12) for _ in range(500)], "AAA", 2030, "a" * 64)
         started = time.perf_counter()
-        self.seal([round(rng.gauss(0.0, 1e-4), 12) for _ in range(1500)], "BBB", 2031, "b" * 64)
+        self.seal([round(rng.gauss(0.0, 1e-4), 12) for _ in range(500)], "BBB", 2031, "b" * 64)
         self.assertLess(time.perf_counter() - started, 1.0)
 
     def test_regression_independent_gaussian_holdouts_are_not_refused(self):
@@ -555,6 +564,180 @@ class BackupRestoreTests(_StoreCase):
         with contextlib.closing(sqlite3.connect(self.database)) as db, self.assertRaises(sqlite3.DatabaseError):
             db.execute("DELETE FROM holdout_evaluations")
         self.assertIsInstance(self.holdout(report), dict)  # still spent: the backup was taken after scoring
+
+
+# =============================================================================================
+# Phase 3: review of 0ef781b (re-derivation at promotion, evidence anchor, reuse verdict policy).
+# =============================================================================================
+
+
+class _Phase3Case(_StoreCase):
+    OPERATOR = Actor("operator", Role.HUMAN_OPERATOR)
+
+    def anchored_store(self, name="anchor.jsonl"):
+        anchor = LocalFileAnchor(Path(self.database).parent / name)
+        return anchor, BacktestStore(self.database, anchor=anchor)
+
+    def score(self, report, store):
+        with overfitting_double():
+            return evaluate_strategy_holdout_once(BARS, report=report, protocol=PROTOCOL, store=store)
+
+
+class RederivationScopeTests(_Phase3Case):
+    # CONFIRMED DEFECT C-1 (high): re-derivation covers only REDERIVED_FIELDS (trades, P&L, PF, drawdown,
+    # edge, cost stress). pbo, deflated_sharpe_probability and variants_tested are taken from the stored
+    # report. A report minted with the real (re-derived) performance numbers and a made-up pbo = 0 and
+    # DSR = 1 passes re-derivation and provenance, and the overfitting gates no longer fail.
+    @unittest.expectedFailure
+    def test_minted_overfitting_statistics_are_detected(self):
+        registry = ModelRegistry(self.database)
+        registry.initialize()
+        report = self.seal_original()
+        selected = next(item for item in report.final_candidate_selection if item.selected)
+        registry.register_candidate(
+            actor=AGENT, model_id="m", version="1",
+            manifest={"dataset_identity": {"canonical_sha256": report.dataset_identity_sha256},
+                      "feature_set_version": "1", "code_sha256": report.implementation_sha256,
+                      "params": selected.config, "plan_sha256": report.plan_sha256, "candidate_id": selected.candidate_id},
+            criteria=PromotionCriteria(),
+        )
+        real = rederive_holdout_evidence(BARS, report.plan_manifest)  # unaudited: see C-2
+        attempt = self.store.begin_holdout_evaluation(protocol_id=report.plan_sha256,
+                                                      dataset_identity_sha256=report.dataset_identity_sha256)
+        HoldoutAttempt.start(self.store, protocol_id=report.plan_sha256, plan=report.plan_manifest,
+                             candidate_id=selected.candidate_id).finish({"selected_candidate": None}, None)
+        minted = {
+            "protocol_id": report.plan_sha256, "plan_sha256": report.plan_sha256,
+            "dataset_identity_sha256": report.dataset_identity_sha256, "status": "COMPLETED",
+            "selected_candidate_id": real["selected_candidate_id"], "selected_config": selected.config,
+            "selected_candidate": {key: real[key] for key in ("trade_count", "net_pnl", "profit_factor", "max_drawdown_pct")},
+            "edge_vs_baseline": real["edge_vs_baseline"],
+            "cost_sensitivity": [{"cost_multiplier": 2.0, "selected_candidate": {"net_pnl": real["cost_stress_net_pnl"]}}],
+            "overfitting": {"pbo": 0.0, "deflated_sharpe_probability": 1.0},
+            "variants_tested": 1_000,
+        }
+        self.store.complete_holdout_evaluation(evaluation_id=attempt["evaluation_id"], report=minted)
+        registry.record_evaluation(actor=AGENT, model_id="m", version="1", kind="holdout",
+                                   evidence=holdout_evidence(minted), holdout_evaluation_id=attempt["evaluation_id"])
+        failures = set(registry.check_promotion("m", "1", holdout_bars=BARS))
+        self.assertNotIn("holdout_report_differs_from_rederivation", failures)  # the performance numbers are real
+        detected = {"holdout_report_differs_from_rederivation", "deflated_sharpe_below_threshold",
+                    "pbo_above_threshold", "overfitting_check_missing"}
+        self.assertTrue(failures & detected, failures)
+
+    # CONFIRMED DEFECT C-2 (medium): rederive_holdout_evidence is a public, store-free holdout oracle. It
+    # scores the reserved holdout of a sealed, never-scored plan as often as asked, without burning the
+    # attempt or writing to the attempt log, so a caller can peek before deciding what to register.
+    @unittest.expectedFailure
+    def test_holdout_cannot_be_scored_without_consuming_it(self):
+        report = self.seal_original()
+        with contextlib.suppress(ValueError):
+            rederive_holdout_evidence(BARS, report.plan_manifest)
+        self.assertIsNotNone(self.store.holdout_for_protocol(report.plan_sha256))
+
+    def test_regression_sma_plans_fail_closed_and_bars_are_required(self):
+        self.assertEqual(_rederivation_failures({"protocol": {}}, {}, BARS), ["holdout_rederivation_unsupported_for_this_plan"])
+        self.assertEqual(_rederivation_failures({}, {}, None), ["holdout_not_rederived_from_market_data"])
+
+    def test_regression_other_bars_do_not_reproduce_the_plan(self):
+        with overfitting_double():
+            report = evaluate()
+        with self.assertRaisesRegex(ValueError, "do not reproduce"):
+            rederive_holdout_evidence(nudge(BARS, len(BARS) - 1), report.plan_manifest)
+
+
+class AnchorTests(_Phase3Case):
+    def test_regression_restore_is_refused_at_scoring_with_the_same_anchor(self):
+        _anchor, store = self.anchored_store()
+        with overfitting_double():
+            report = evaluate(store=store)
+        backup = create_backup(self.database, Path(self.database).parent / "backups")
+        self.assertIsInstance(self.score(report, store), StrategyHoldoutEvaluation)
+        restore_backup(backup.path, self.database, actor=self.OPERATOR, reason="drill")
+        with self.assertRaisesRegex(ValueError, "inconsistent with the evidence anchor"):
+            self.score(report, store)
+
+    # CONFIRMED DEFECT C-3 (high with LocalFileAnchor, the only adapter): the anchor is whatever the caller
+    # passes (or ASTRA_EVIDENCE_ANCHOR points at). After restoring the pre-scoring backup, a fresh anchor file
+    # verifies the restored store, the same holdout is scored again, anchored, and the new evaluation is the
+    # one the promotion gate looks for. Nothing ties a store to its anchor, and promotion accepts a
+    # non-production anchor.
+    @unittest.expectedFailure
+    def test_restore_then_fresh_anchor_does_not_unspend_the_holdout(self):
+        _anchor, store = self.anchored_store()
+        with overfitting_double():
+            report = evaluate(store=store)
+        backup = create_backup(self.database, Path(self.database).parent / "backups")
+        self.score(report, store)
+        restore_backup(backup.path, self.database, actor=self.OPERATOR, reason="drill")
+        fresh, store = self.anchored_store("fresh-anchor.jsonl")
+        second = None
+        with contextlib.suppress(ValueError):
+            second = self.score(report, store)
+        self.assertNotIsInstance(second, StrategyHoldoutEvaluation)
+        self.assertFalse(verify_store_against_anchor(self.database, fresh).ok and second is not None)
+
+    # CONFIRMED DEFECT C-4 (medium): scoring does not require an anchor (require_anchor_consistency returns
+    # when none is configured), so a holdout scored without one leaves no external trace; after a restore it
+    # is scored again under an anchor and looks first-time (B-8 is only closed when an anchor was present).
+    @unittest.expectedFailure
+    def test_holdout_cannot_be_scored_without_an_anchor(self):
+        with overfitting_double():
+            report = evaluate(store=self.store)
+        with self.assertRaises(ValueError):
+            self.score(report, self.store)
+
+
+class ReuseVerdictPolicyTests(_Phase3Case):
+    def sparse(self, seed):
+        rng = random.Random(seed)
+        return [0.0 if rng.random() < 0.9 else rng.choice((-1.0, 1.0)) * 1e-4 for _ in range(40)]
+
+    def seal_direct(self, returns, instrument, year, identity):
+        protocol_id, plan = direct_plan(returns, instrument, year, identity)
+        self.store.seal_research_protocol(protocol_id=protocol_id, dataset_identity_sha256=identity,
+                                          protocol_version="x", plan_manifest=plan, holdout_returns=returns)
+        return protocol_id
+
+    # CONFIRMED DEFECT C-5 (high, permanent denial of service): one sealed plan whose holdout is mostly flat
+    # makes every later, unrelated plan UNDETERMINED (no comparable window on the old side), and UNDETERMINED
+    # blocks scoring and promotion. holdout_reuse_checks and research_protocols are append-only, so any
+    # research agent can poison a store for good with one seal.
+    @unittest.expectedFailure
+    def test_one_flat_sealed_holdout_does_not_block_unrelated_plans(self):
+        self.seal_direct(self.sparse(1), "FLAT", 2030, "a" * 64)
+        rng = random.Random(9)
+        normal = self.seal_direct([rng.gauss(0.0, 1e-4) for _ in range(40)], "LIVELY", 2031, "b" * 64)
+        self.assertEqual(self.store.reuse_check(normal)["verdict"], "CLEAR")
+
+    # CONFIRMED DEFECT C-6 (medium, false positive moved, not removed): independent sparse holdouts are no
+    # longer refused at seal (B-6 test passes) but are sealed UNDETERMINED, so they can never be scored.
+    @unittest.expectedFailure
+    def test_independent_sparse_holdouts_can_be_scored(self):
+        self.seal_direct(self.sparse(2), "OLD", 2030, "a" * 64)
+        new = self.seal_direct(self.sparse(1002), "NEW", 2130, "b" * 64)
+        self.assertEqual(self.store.reuse_check(new)["verdict"], "CLEAR")
+
+    def test_regression_undetermined_plan_cannot_be_scored_and_reseal_keeps_the_verdict(self):
+        self.seal_direct(self.sparse(1), "FLAT", 2030, "a" * 64)
+        rng = random.Random(9)
+        returns = [rng.gauss(0.0, 1e-4) for _ in range(40)]
+        normal = self.seal_direct(returns, "LIVELY", 2031, "b" * 64)
+        verdict = self.store.reuse_check(normal)["verdict"]
+        self.assertIn(verdict, ("UNDETERMINED", "SUSPECT", "CLEAR"))
+        if verdict != "CLEAR":
+            with self.assertRaisesRegex(ValueError, "independent holdout"):
+                self.store.begin_holdout_evaluation(protocol_id=normal, dataset_identity_sha256="b" * 64)
+        self.seal_direct(returns, "LIVELY", 2031, "b" * 64)  # idempotent re-seal
+        self.assertEqual(self.store.reuse_check(normal)["verdict"], verdict)
+
+    def test_regression_recorded_policy_looser_than_code_is_flagged(self):
+        payload = asdict(HOLDOUT_REUSE_POLICY)
+        self.assertEqual(reuse_policy_looser_than_floor(payload), ())
+        for name, value in (("conflict_abs_correlation", 0.999), ("min_holdout_returns", 8), ("match_tolerance", 0.01),
+                            ("suspect_abs_correlation", True), ("clip", None)):
+            with self.subTest(name):
+                self.assertIn(name, reuse_policy_looser_than_floor({**payload, name: value}))
 
 
 if __name__ == "__main__":
