@@ -25,10 +25,11 @@ import contextlib
 import itertools
 import logging
 import threading
+import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from enum import IntEnum
 from typing import Any, Protocol
 
@@ -100,6 +101,9 @@ class PayloadType(IntEnum):
     GET_ACCOUNTS_BY_ACCESS_TOKEN_RES = 2150
     GET_POSITION_UNREALIZED_PNL_REQ = 2187
     GET_POSITION_UNREALIZED_PNL_RES = 2188
+    # Listed in ProtoOAPayloadType (docs read 2026-10-25); not yet exercised against the provider.
+    REFRESH_TOKEN_REQ = 2172
+    REFRESH_TOKEN_RES = 2173
 
 
 class ExecutionType(IntEnum):
@@ -168,6 +172,16 @@ CONNECTION_ERROR_CODES = frozenset(
     }
 )
 RATE_LIMIT_CODES = frozenset({"BLOCKED_PAYLOAD_TYPE", "REQUEST_FREQUENCY_EXCEEDED"})
+# Connection errors that a reconnect cannot fix: a human must act.
+PERMANENT_ERROR_CODES = frozenset(
+    {
+        "OA_AUTH_TOKEN_EXPIRED",
+        "CH_ACCESS_TOKEN_INVALID",
+        "CH_CLIENT_AUTH_FAILURE",
+        "ACCOUNT_NOT_AUTHORIZED",
+        "RET_ACCOUNT_DISABLED",
+    }
+)
 
 
 def provider_error(body: dict[str, Any]) -> Exception:
@@ -183,6 +197,16 @@ class LiveAccountRefused(BrokerUnavailable):
     """The provider reports a live account; this build never trades live."""
 
 
+class CTraderConfigurationError(BrokerUnavailable):
+    """Account, symbol or credential configuration problem; retrying cannot help."""
+
+
+class TokenStore(Protocol):
+    """Secure, durable storage for rotated OAuth tokens (none is bundled)."""
+
+    def save(self, credentials: CTraderCredentials) -> None: ...
+
+
 def create_demo_transport(timeout: float = 10.0):
     """The only network transport this module creates: the documented demo host."""
 
@@ -191,16 +215,65 @@ def create_demo_transport(timeout: float = 10.0):
     return WebSocketJsonTransport(f"wss://{DEMO_HOST}:{JSON_PORT}", timeout=timeout)
 
 
+def _fixed_transport(transport: JsonTransport) -> Callable[[], JsonTransport]:
+    return lambda: transport
+
+
+def _demo_transport(timeout: float) -> Callable[[], JsonTransport]:
+    return lambda: create_demo_transport(timeout)
+
+
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+class RateLimiter:
+    """Token bucket per connection, kept below the documented 50 requests/s."""
+
+    def __init__(
+        self,
+        rate_per_second: float = 40.0,
+        burst: int = 40,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self._rate = rate_per_second
+        self._capacity = float(burst)
+        self._tokens = float(burst)
+        self._clock = clock
+        self._sleep = sleep
+        self._last = clock()
+        self._lock = threading.Lock()
+        self.waited_seconds = 0.0
+
+    def acquire(self) -> None:
+        with self._lock:
+            now = self._clock()
+            self._tokens = min(self._capacity, self._tokens + (now - self._last) * self._rate)
+            self._last = now
+            if self._tokens < 1.0 - 1e-9:  # tolerance for float refill arithmetic
+                wait = (1.0 - self._tokens) / self._rate
+                self.waited_seconds += wait
+                self._sleep(wait)
+                self._last = self._clock()
+                self._tokens = 0.0
+            else:
+                self._tokens -= 1.0
 
 
 class CTraderSession:
     """Request/response correlation by clientMsgId, event fan-out, heartbeat."""
 
-    def __init__(self, transport: JsonTransport, *, heartbeat_seconds: float = HEARTBEAT_SECONDS) -> None:
+    def __init__(
+        self,
+        transport: JsonTransport,
+        *,
+        heartbeat_seconds: float = HEARTBEAT_SECONDS,
+        limiter: RateLimiter | None = None,
+    ) -> None:
         self._transport = transport
         self._heartbeat = heartbeat_seconds
+        self._limiter = limiter or RateLimiter()
         self._lock = threading.Lock()
         self._pending: dict[str, dict[str, Any]] = {}
         self._handlers: list[Callable[[dict[str, Any]], None]] = []
@@ -231,6 +304,7 @@ class CTraderSession:
 
     def send(self, payload_type: int, payload: dict[str, Any], client_msg_id: str | None = None) -> str:
         message_id = client_msg_id or uuid.uuid4().hex
+        self._limiter.acquire()
         try:
             self._transport.send({"clientMsgId": message_id, "payloadType": int(payload_type), "payload": payload})
         except OSError as exc:
@@ -323,6 +397,24 @@ class CTraderCredentials:
     client_secret: SecretValue
     access_token: SecretValue
     ctid_trader_account_id: int
+    refresh_token: SecretValue | None = None
+    # The docs give ~30 days (2,628,000 s) for an access token.
+    access_token_expires_at: datetime | None = None
+
+
+TOKEN_WARNING_DAYS = 3
+READ_ONLY_PAYLOADS = frozenset(
+    {
+        int(PayloadType.TRADER_REQ),
+        int(PayloadType.ASSET_LIST_REQ),
+        int(PayloadType.SYMBOLS_LIST_REQ),
+        int(PayloadType.SYMBOL_BY_ID_REQ),
+        int(PayloadType.RECONCILE_REQ),
+        int(PayloadType.GET_POSITION_UNREALIZED_PNL_REQ),
+        int(PayloadType.GET_ACCOUNTS_BY_ACCESS_TOKEN_REQ),
+    }
+)
+MAX_RETRY_AFTER_SECONDS = 10.0
 
 
 class CTraderAdapter(BrokerAdapter):
@@ -334,16 +426,25 @@ class CTraderAdapter(BrokerAdapter):
         credentials: CTraderCredentials,
         *,
         transport: JsonTransport | None = None,
+        transport_factory: Callable[[], JsonTransport] | None = None,
         instruments: tuple[str, ...] = ("EURUSD",),
         request_timeout: float = 10.0,
         clock: Callable[[], datetime] = _utc_now,
         heartbeat_seconds: float = HEARTBEAT_SECONDS,
         allow_demo_orders: bool = False,
+        sleep: Callable[[float], None] = time.sleep,
+        limiter_factory: Callable[[], RateLimiter] = RateLimiter,
     ) -> None:
         self._credentials = credentials
         # A second, explicit opt-in on top of EXECUTABLE_MODES; False by default.
         self._allow_demo_orders = allow_demo_orders is True
-        self._transport = transport if transport is not None else create_demo_transport(request_timeout)
+        if transport_factory is None:
+            transport_factory = _fixed_transport(transport) if transport is not None else _demo_transport(request_timeout)
+        self._transport_factory = transport_factory
+        self._transport: JsonTransport | None = None
+        self._sleep = sleep
+        self._limiter_factory = limiter_factory
+        self.connect_attempts = 0
         self._instruments = tuple(name.upper() for name in instruments)
         self._timeout = request_timeout
         self._clock = clock
@@ -370,7 +471,12 @@ class CTraderAdapter(BrokerAdapter):
         """Authorize app and account, load account, assets, symbols and spots."""
 
         account_id = self._credentials.ctid_trader_account_id
-        session = CTraderSession(self._transport, heartbeat_seconds=self._heartbeat)
+        self._check_token_expiry()
+        if self._session is not None:
+            self._session.stop()
+        self.connect_attempts += 1
+        self._transport = self._transport_factory()
+        session = CTraderSession(self._transport, heartbeat_seconds=self._heartbeat, limiter=self._limiter_factory())
         session.add_handler(self._on_message)
         session.start()
         self._session = session
@@ -390,7 +496,7 @@ class CTraderAdapter(BrokerAdapter):
             )["payload"].get("ctidTraderAccount", [])
             match = [a for a in accounts if int(a.get("ctidTraderAccountId", -1)) == account_id]
             if not match:
-                raise BrokerUnavailable("configured ctidTraderAccountId is not granted to this access token")
+                raise CTraderConfigurationError("configured ctidTraderAccountId is not granted to this access token")
             is_live = match[0].get("isLive")
             self._is_live = is_live if isinstance(is_live, bool) else None
             if self._is_live is True:
@@ -416,7 +522,7 @@ class CTraderAdapter(BrokerAdapter):
             }
             missing = set(self._instruments) - set(wanted)
             if missing:
-                raise BrokerUnavailable(f"symbols not offered on this account: {sorted(missing)}")
+                raise CTraderConfigurationError(f"symbols not offered on this account: {sorted(missing)}")
             details = self._request(
                 PayloadType.SYMBOL_BY_ID_REQ,
                 {"ctidTraderAccountId": account_id, "symbolId": sorted(wanted.values())},
@@ -425,7 +531,7 @@ class CTraderAdapter(BrokerAdapter):
             by_id = {int(s["symbolId"]): s for s in details}
             for name, symbol_id in wanted.items():
                 if symbol_id not in by_id:
-                    raise BrokerUnavailable(f"no specification returned for {name}")
+                    raise CTraderConfigurationError(f"no specification returned for {name}")
                 self._symbols[name] = by_id[symbol_id]
                 self._symbol_names[symbol_id] = name
             self._request(
@@ -444,6 +550,81 @@ class CTraderAdapter(BrokerAdapter):
             is_live=self._is_live,
             symbols=sorted(self._symbols),
         )
+
+    def reconnect(self, *, max_attempts: int = 5, base_delay: float = 1.0, max_delay: float = 30.0) -> int:
+        """Reconnect with exponential backoff; returns the number of attempts used.
+
+        Permanent failures (live account, configuration, token or account
+        authorization) are raised immediately. The gateway must still
+        reconcile before any new entry; reconnecting lifts no freeze.
+        """
+
+        last_error: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                self.connect()
+                log_event(_LOG, "ctrader.reconnected", attempts=attempt)
+                return attempt
+            except (LiveAccountRefused, CTraderConfigurationError):
+                raise
+            except CTraderConnectionError as exc:
+                if exc.error_code in PERMANENT_ERROR_CODES:
+                    raise
+                last_error = exc
+            except (BrokerUnavailable, BrokerTimeout, OSError) as exc:
+                last_error = exc
+            if attempt < max_attempts:
+                delay = min(max_delay, base_delay * 2 ** (attempt - 1))
+                log_event(_LOG, "ctrader.reconnect_wait", level=logging.WARNING, attempt=attempt, delay_seconds=delay)
+                self._sleep(delay)
+        raise BrokerUnavailable(f"reconnect failed after {max_attempts} attempts: {last_error}")
+
+    def token_status(self) -> dict[str, Any]:
+        expires = self._credentials.access_token_expires_at
+        if expires is None:
+            return {"expires_at": None, "days_left": None, "warning": "expiry unknown; track it from the OAuth response"}
+        days_left = (expires - self._clock()).total_seconds() / 86_400
+        return {"expires_at": expires.isoformat(), "days_left": round(days_left, 2), "warning": days_left < TOKEN_WARNING_DAYS}
+
+    def _check_token_expiry(self) -> None:
+        expires = self._credentials.access_token_expires_at
+        if expires is None:
+            return
+        remaining = (expires - self._clock()).total_seconds()
+        if remaining <= 0:
+            raise CTraderConnectionError("OA_AUTH_TOKEN_EXPIRED", "access token expired according to its recorded expiry")
+        if remaining < TOKEN_WARNING_DAYS * 86_400:
+            log_event(_LOG, "ctrader.token_expiring", level=logging.WARNING, days_left=round(remaining / 86_400, 2))
+
+    def refresh_access_token(self, token_store: TokenStore | None) -> datetime:
+        """Rotate the OAuth token with ProtoOARefreshTokenReq.
+
+        The docs state old tokens are invalidated, so the new pair is saved to
+        ``token_store`` *before* it is used; without a secure store refresh is
+        refused rather than risking an unrecoverable credential loss.
+        """
+
+        if token_store is None:
+            raise CapabilityNotSupported("no secure token store configured; token refresh is disabled")
+        if self._credentials.refresh_token is None:
+            raise CTraderConfigurationError("no refresh token available")
+        self._require_connection()
+        payload = self._request(
+            PayloadType.REFRESH_TOKEN_REQ,
+            {"refreshToken": self._credentials.refresh_token.reveal()},
+            {PayloadType.REFRESH_TOKEN_RES},
+        )["payload"]
+        expires_at = self._clock() + timedelta(seconds=int(payload["expiresIn"]))
+        rotated = replace(
+            self._credentials,
+            access_token=SecretValue(str(payload["accessToken"])),
+            refresh_token=SecretValue(str(payload["refreshToken"])),
+            access_token_expires_at=expires_at,
+        )
+        token_store.save(rotated)
+        self._credentials = rotated
+        log_event(_LOG, "ctrader.token_refreshed", expires_at=expires_at.isoformat())
+        return expires_at
 
     def disconnect(self) -> None:
         if self._session is not None:
@@ -675,8 +856,25 @@ class CTraderAdapter(BrokerAdapter):
     def _request(self, payload_type, payload, expect, client_msg_id=None) -> dict[str, Any]:
         if self._session is None:
             raise BrokerUnavailable("not connected")
+        expected = {int(e) for e in expect}
         self.sent_payload_types.append(int(payload_type))
-        return self._session.request(payload_type, payload, {int(e) for e in expect}, self._timeout, client_msg_id)
+        try:
+            return self._session.request(payload_type, payload, expected, self._timeout, client_msg_id)
+        except CTraderError as exc:
+            # Honour retryAfter once, for read-only requests only. Orders and
+            # position changes are never retried automatically.
+            if (
+                exc.error_code not in RATE_LIMIT_CODES
+                or int(payload_type) not in READ_ONLY_PAYLOADS
+                or exc.retry_after_seconds is None
+                or exc.retry_after_seconds > MAX_RETRY_AFTER_SECONDS
+            ):
+                raise
+            log_event(_LOG, "ctrader.rate_limited", level=logging.WARNING, payload_type=int(payload_type),
+                      retry_after=exc.retry_after_seconds)
+            self._sleep(exc.retry_after_seconds)
+            self.sent_payload_types.append(int(payload_type))
+            return self._session.request(payload_type, payload, expected, self._timeout, None)
 
     def _require_connection(self) -> None:
         if self.connection_state() is not ConnectionState.CONNECTED:

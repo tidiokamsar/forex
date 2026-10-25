@@ -23,6 +23,7 @@ class FakeCTraderServer:
         self.next_order_id = 900
         self.outbox = None
         self.fail_with = {}
+        self.fail_once = {}
 
     def handle(self, message):
         self.received.append(message)
@@ -36,6 +37,12 @@ class FakeCTraderServer:
             return
         if kind in self.fail_with:
             reply(P.OA_ERROR_RES, {"errorCode": self.fail_with[kind], "description": "scripted error"})
+            return
+        if kind in self.fail_once:
+            reply(P.OA_ERROR_RES, {"errorCode": self.fail_once.pop(kind), "description": "scripted one-shot error"})
+            return
+        if kind == P.REFRESH_TOKEN_REQ:
+            reply(P.REFRESH_TOKEN_RES, {"accessToken": "new-access", "tokenType": "bearer", "expiresIn": 2_628_000, "refreshToken": "new-refresh"})
             return
         if kind == P.APPLICATION_AUTH_REQ:
             reply(P.APPLICATION_AUTH_RES, {})
