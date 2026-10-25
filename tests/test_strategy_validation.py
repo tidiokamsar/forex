@@ -405,7 +405,8 @@ class HoldoutProvenanceTests(unittest.TestCase):
                 selected = next(item for item in report.final_candidate_selection if item.selected)
                 registry.register_candidate(
                     actor=Actor("agent", Role.RESEARCH_AGENT), model_id="wf", version="1",
-                    manifest={"dataset_identity": "x", "feature_set_version": "1", "code_sha256": "y",
+                    manifest={"dataset_identity": {"canonical_sha256": report.dataset_identity_sha256},
+                              "feature_set_version": "1", "code_sha256": report.implementation_sha256,
                               "params": selected.config, "plan_sha256": report.plan_sha256,
                               "candidate_id": selected.candidate_id},
                     criteria=PromotionCriteria(),
@@ -422,7 +423,9 @@ class HoldoutProvenanceTests(unittest.TestCase):
             failures = registry.check_promotion("wf", "1")
             provenance = {"evidence_provenance_missing", "holdout_evaluation_not_found_or_incomplete",
                           "holdout_from_another_plan", "holdout_selected_another_candidate",
-                          "criteria_registered_after_holdout_was_scored", "evidence_does_not_match_holdout_report"}
+                          "criteria_registered_after_holdout_was_scored", "evidence_does_not_match_holdout_report",
+                          "manifest_params_differ_from_evaluated_candidate", "manifest_code_differs_from_sealed_plan",
+                          "manifest_dataset_differs_from_sealed_plan"}
             self.assertFalse(provenance & set(failures), failures)
             # Rewriting the recorded numbers is detected against the stored report.
             db = sqlite3.connect(database)
@@ -453,6 +456,64 @@ class HoldoutReuseTests(unittest.TestCase):
             self.assertIn("overlaps the holdout", str(caught.exception))
 
 
+class ManifestBindingTests(unittest.TestCase):
+    """Lot 3 QA (B): a version whose params, code or dataset differ from the evaluated candidate is refused."""
+
+    @patch("astra.strategy_validation.MIN_DSR_RETURNS", 0)
+    @patch("astra.strategy_validation.MIN_PBO_NONZERO_ROW_FRACTION", 0.0)
+    def test_other_params_code_or_dataset_fail_provenance(self):
+        with workspace_tempdir() as temp:
+            database = f"{temp}/astra.sqlite3"
+            store = BacktestStore(database)
+            store.initialize()
+            registry = ModelRegistry(database)
+            registry.initialize()
+            with overfitting_double(pbo=0.25, probability=0.5):
+                report = evaluate(store=store)
+                selected = next(item for item in report.final_candidate_selection if item.selected)
+                registry.register_candidate(
+                    actor=Actor("agent", Role.RESEARCH_AGENT), model_id="wf", version="1",
+                    manifest={"dataset_identity": {"canonical_sha256": "another-dataset"},
+                              "feature_set_version": "1", "code_sha256": "other-code",
+                              "params": {"family": "sma", "fast": 2, "slow": 3}, "plan_sha256": report.plan_sha256,
+                              "candidate_id": selected.candidate_id},
+                    criteria=PromotionCriteria(),
+                )
+                holdout = evaluate_strategy_holdout_once(BARS, None, report=report, protocol=PROTOCOL, store=store)
+            registry.record_evaluation(
+                actor=Actor("agent", Role.RESEARCH_AGENT), model_id="wf", version="1", kind="holdout",
+                evidence=holdout_evidence(holdout),
+                holdout_evaluation_id=store.holdout_for_protocol(report.plan_sha256)["evaluation_id"],
+            )
+            failures = registry.check_promotion("wf", "1")
+            for expected in ("manifest_params_differ_from_evaluated_candidate", "manifest_code_differs_from_sealed_plan",
+                             "manifest_dataset_differs_from_sealed_plan"):
+                self.assertIn(expected, failures)
+
+
+class InstrumentScopedOverlapTests(unittest.TestCase):
+    def test_same_period_on_another_instrument_is_allowed(self):
+        from dataclasses import replace as dc_replace
+
+        with workspace_tempdir() as temp:
+            store = BacktestStore(f"{temp}/astra.sqlite3")
+            store.initialize()
+            with overfitting_double():
+                evaluate(store=store)
+                other = [dc_replace(bar, instrument="GBPUSD") for bar in BARS]
+                report = evaluate(bars=other, store=store)
+            self.assertEqual(report.plan_manifest["instrument"], "GBPUSD")
+
+
+class PerVariantGuardTests(unittest.TestCase):
+    def test_a_barely_trading_variant_makes_pbo_low_information(self):
+        from astra.strategy_validation import assess_overfitting
+
+        matrix = [[float((r * 5 + 1) % 7 - 3), 0.0 if r else 1.0, float((r * 3) % 5 - 2)] for r in range(16)]
+        result = assess_overfitting(matrix, [f"p{r}" for r in range(16)], variants_tested=3,
+                                    dsr_returns=[0.01 * (i % 5 - 2) for i in range(40)], trial_sharpe_variance=None)
+        self.assertIsNone(result.pbo)
+        self.assertTrue(any("variants have fewer than" in error for error in result.errors))
+
 if __name__ == "__main__":
     unittest.main()
-

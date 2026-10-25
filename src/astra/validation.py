@@ -337,6 +337,7 @@ def evaluate_walk_forward(
         },
         "cost_model": _cost_payload(common_cost_model),
         "folds": boundary_payload,
+        "instrument": history[0].instrument,
         "holdout": {
             "status": "RESERVED_NOT_EVALUATED",
             "observations": protocol.holdout_bars,

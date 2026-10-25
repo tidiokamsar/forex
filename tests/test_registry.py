@@ -1,9 +1,10 @@
 import sqlite3
 import unittest
+import uuid
 
-from _support import workspace_tempdir
+from _support import accept_unverified_evidence, workspace_tempdir
 from astra.governance import Actor, PermissionDenied, Role
-from astra.registry import ModelRegistry, ModelStatus, PromotionCriteria, PromotionError, accept_unverified_evidence
+from astra.registry import ModelRegistry, ModelStatus, PromotionCriteria, PromotionError
 from astra.storage import BacktestStore
 
 REVIEWER = Actor("bob", Role.HUMAN_REVIEWER)
@@ -45,7 +46,7 @@ class RegistryTests(unittest.TestCase):
             criteria=PromotionCriteria(),
         )
         if evidence is not None:
-            self.registry.record_evaluation(actor=AGENT, holdout_evaluation_id="test-holdout", model_id="momentum", version=version, kind="holdout", evidence=evidence)
+            self.registry.record_evaluation(actor=AGENT, holdout_evaluation_id=f"test-holdout-{uuid.uuid4()}", model_id="momentum", version=version, kind="holdout", evidence=evidence)
 
     def test_unvalidated_candidate_cannot_be_promoted(self):
         self.register("1.0.0")
@@ -86,14 +87,26 @@ class RegistryTests(unittest.TestCase):
         self.register("1.0.0", {**GOOD_EVIDENCE, "deflated_sharpe_probability": 0.94})
         self.assertEqual(self.registry.check_promotion("momentum", "1.0.0"), ("deflated_sharpe_below_threshold",))
 
-    def test_overfitting_gate_can_be_disabled_only_at_registration(self):
+    def test_criteria_cannot_be_looser_than_the_policy_floor(self):
+        """Lot 3 QA (A/C): nobody can register lax criteria or skip the holdout or the overfitting check."""
+        lax = [
+            PromotionCriteria(require_overfitting_check=False),
+            PromotionCriteria(require_holdout=False),
+            PromotionCriteria(min_trades=1),
+            PromotionCriteria(min_profit_factor=0.0),
+            PromotionCriteria(max_pbo=1.0),
+            PromotionCriteria(min_deflated_sharpe_probability=0.0),
+            PromotionCriteria(max_drawdown_pct=50.0),
+        ]
+        for number, criteria in enumerate(lax):
+            with self.assertRaises(ValueError):
+                self.registry.register_candidate(
+                    actor=AGENT, model_id="lax", version=str(number), manifest=MANIFEST, criteria=criteria
+                )
         self.registry.register_candidate(
-            actor=AGENT, model_id="legacy", version="1", manifest=MANIFEST,
-            criteria=PromotionCriteria(require_overfitting_check=False),
+            actor=AGENT, model_id="strict", version="1", manifest=MANIFEST,
+            criteria=PromotionCriteria(min_trades=100, max_pbo=0.1),
         )
-        evidence = {key: value for key, value in GOOD_EVIDENCE.items() if key not in ("pbo", "deflated_sharpe_probability", "variants_tested")}
-        self.registry.record_evaluation(actor=AGENT, holdout_evaluation_id="test-holdout", model_id="legacy", version="1", kind="holdout", evidence=evidence)
-        self.assertEqual(self.registry.check_promotion("legacy", "1"), ())
         with self.assertRaises(ValueError):
             PromotionCriteria(max_pbo=1.5)
         with self.assertRaises(ValueError):
@@ -107,7 +120,7 @@ class RegistryTests(unittest.TestCase):
     def test_holdout_can_only_be_recorded_once(self):
         self.register("1.0.0", GOOD_EVIDENCE)
         with self.assertRaises(PromotionError):
-            self.registry.record_evaluation(actor=AGENT, holdout_evaluation_id="test-holdout", model_id="momentum", version="1.0.0", kind="holdout", evidence=GOOD_EVIDENCE)
+            self.registry.record_evaluation(actor=AGENT, holdout_evaluation_id=f"test-holdout-{uuid.uuid4()}", model_id="momentum", version="1.0.0", kind="holdout", evidence=GOOD_EVIDENCE)
 
     def test_criteria_tampering_is_detected(self):
         self.register("1.0.0", GOOD_EVIDENCE)
@@ -170,7 +183,7 @@ class RegistryTests(unittest.TestCase):
             db.close()
         legacy_evidence = {key: value for key, value in GOOD_EVIDENCE.items()
                            if key not in ("pbo", "deflated_sharpe_probability", "variants_tested")}
-        self.registry.record_evaluation(actor=AGENT, holdout_evaluation_id="test-holdout", model_id="momentum", version="0.9.0", kind="holdout", evidence=legacy_evidence)
+        self.registry.record_evaluation(actor=AGENT, holdout_evaluation_id=f"test-holdout-{uuid.uuid4()}", model_id="momentum", version="0.9.0", kind="holdout", evidence=legacy_evidence)
         failures = self.registry.check_promotion("momentum", "0.9.0")
         self.assertIn("overfitting_check_missing", failures)
         self.assertNotIn("criteria_tampered", failures)
@@ -218,6 +231,19 @@ class ProvenanceTests(unittest.TestCase):
         with self.assertRaises(PromotionError):
             self.registry.promote(actor=REVIEWER, model_id="fake", version="1", reason="fabricated")
 
+    def test_one_holdout_backs_one_version_only(self):
+        for version in ("1", "2"):
+            self.registry.register_candidate(
+                actor=AGENT, model_id="dup", version=version, manifest=MANIFEST, criteria=PromotionCriteria()
+            )
+        self.registry.record_evaluation(
+            actor=AGENT, model_id="dup", version="1", kind="holdout", evidence=GOOD_EVIDENCE, holdout_evaluation_id="h-1"
+        )
+        with self.assertRaises(PromotionError):
+            self.registry.record_evaluation(
+                actor=AGENT, model_id="dup", version="2", kind="holdout", evidence=GOOD_EVIDENCE, holdout_evaluation_id="h-1"
+            )
+
     def test_holdout_evidence_requires_a_reference_and_an_actor(self):
         self.registry.register_candidate(
             actor=AGENT, model_id="fake", version="2", manifest=MANIFEST, criteria=PromotionCriteria()
@@ -233,3 +259,4 @@ class ProvenanceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

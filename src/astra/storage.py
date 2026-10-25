@@ -139,13 +139,18 @@ class BacktestStore:
                     "use a fresh independent dataset"
                 )
             # Extending or trimming a dataset changes its identity but not its holdout period:
-            # refuse any other plan whose holdout overlaps an already sealed holdout in time.
+            # refuse any other plan whose holdout overlaps an already sealed holdout of the same
+            # instrument (plans without an instrument are compared conservatively with all).
             new_start = datetime.fromisoformat(str(holdout["start"]))
             new_end = datetime.fromisoformat(str(holdout["end"]))
+            instrument = plan_manifest.get("instrument")
             for other in db.execute(
-                "SELECT protocol_id, holdout_start, holdout_end FROM research_protocols WHERE dataset_sha256 <> ?",
+                "SELECT protocol_id, holdout_start, holdout_end, plan_json FROM research_protocols WHERE dataset_sha256 <> ?",
                 (dataset_identity_sha256,),
             ).fetchall():
+                other_instrument = json.loads(other["plan_json"]).get("instrument")
+                if instrument and other_instrument and instrument != other_instrument:
+                    continue  # another instrument's holdout is independent data
                 other_start = datetime.fromisoformat(other["holdout_start"])
                 other_end = datetime.fromisoformat(other["holdout_end"])
                 if new_start <= other_end and other_start <= new_end:

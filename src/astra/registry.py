@@ -70,6 +70,23 @@ class PromotionCriteria:
 PROVENANCE_KEY = "_provenance"
 EVIDENCE_TOLERANCE = 1e-9
 
+def criteria_looser_than_floor(criteria: PromotionCriteria) -> tuple[str, ...]:
+    """Criteria may be stricter than the defaults, never looser. The floor is code, changed only by review."""
+
+    floor = PromotionCriteria()
+    looser = []
+    for name in ("min_trades", "min_net_pnl", "min_profit_factor", "min_edge_vs_baseline", "min_deflated_sharpe_probability"):
+        if getattr(criteria, name) < getattr(floor, name):
+            looser.append(name)
+    for name in ("max_drawdown_pct", "max_pbo"):
+        if getattr(criteria, name) > getattr(floor, name):
+            looser.append(name)
+    for name in ("require_cost_stress_non_negative", "require_holdout", "require_overfitting_check"):
+        if getattr(criteria, name) is not True:
+            looser.append(name)
+    return tuple(looser)
+
+
 EVIDENCE_FIELDS = (
     "trade_count",
     "net_pnl",
@@ -233,6 +250,9 @@ class ModelRegistry:
         missing = [key for key in required if key not in manifest]
         if missing:
             raise ValueError(f"manifest is missing reproducibility fields: {missing}")
+        looser = criteria_looser_than_floor(criteria)
+        if looser:
+            raise ValueError(f"criteria are looser than the policy floor: {', '.join(looser)}")
         manifest_sha = _sha256(manifest)
         criteria_payload = asdict(criteria)
         with self._connect() as db:
@@ -275,6 +295,15 @@ class ModelRegistry:
         if kind == "holdout":
             if not isinstance(holdout_evaluation_id, str) or not holdout_evaluation_id:
                 raise PromotionError("holdout evidence must reference the stored holdout evaluation it comes from")
+            with self._connect() as db:
+                for other in db.execute(
+                    "SELECT model_id, version, evidence_json FROM model_evaluations WHERE kind = 'holdout'"
+                ).fetchall():
+                    reference = (json.loads(other["evidence_json"]).get(PROVENANCE_KEY) or {}).get("holdout_evaluation_id")
+                    if reference == holdout_evaluation_id and (other["model_id"], other["version"]) != (model_id, version):
+                        raise PromotionError(
+                            f"holdout evaluation already backs {other['model_id']}@{other['version']}; one version per holdout"
+                        )
             evidence = {**evidence, PROVENANCE_KEY: {"holdout_evaluation_id": holdout_evaluation_id}}
         evaluation_id = str(uuid.uuid4())
         with self._connect() as db:
@@ -561,6 +590,18 @@ def verify_holdout_provenance(db: sqlite3.Connection, version_row: sqlite3.Row, 
         failures.append("holdout_selected_another_candidate")
     if holdout["started_at"] <= version_row["created_at"]:
         failures.append("criteria_registered_after_holdout_was_scored")
+    if report.get("selected_config") != manifest.get("params"):
+        failures.append("manifest_params_differ_from_evaluated_candidate")
+    plan_row = db.execute(
+        "SELECT plan_json FROM research_protocols WHERE protocol_id = ?", (holdout["protocol_id"],)
+    ).fetchone()
+    plan = json.loads(plan_row["plan_json"]) if plan_row else {}
+    if plan.get("implementation_sha256") != manifest.get("code_sha256"):
+        failures.append("manifest_code_differs_from_sealed_plan")
+    identity = manifest.get("dataset_identity")
+    canonical = identity.get("canonical_sha256") if isinstance(identity, dict) else None
+    if canonical is None or canonical != plan.get("dataset_identity_sha256"):
+        failures.append("manifest_dataset_differs_from_sealed_plan")
     from .strategy_validation import holdout_evidence
 
     expected = holdout_evidence(report)
@@ -574,12 +615,6 @@ def verify_holdout_provenance(db: sqlite3.Connection, version_row: sqlite3.Row, 
             failures.append("evidence_does_not_match_holdout_report")
             break
     return tuple(failures)
-
-
-def accept_unverified_evidence(_db, _row, _evidence) -> tuple[str, ...]:
-    """TEST ONLY: skip provenance checks to exercise the numeric gates in isolation."""
-
-    return ()
 
 
 def _version_dict(row: sqlite3.Row) -> dict[str, Any]:

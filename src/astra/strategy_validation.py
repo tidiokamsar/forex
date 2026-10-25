@@ -397,6 +397,7 @@ def evaluate_strategy_walk_forward(
             }
             for ordinal, (vs, ve, ts, te) in enumerate(ranges, start=1)
         ],
+        "instrument": history[0].instrument,
         "holdout": {
             "status": "RESERVED_NOT_EVALUATED",
             "observations": protocol.holdout_bars,
@@ -802,7 +803,17 @@ def assess_overfitting(
     pbo = pbo_payload = dsr = dsr_payload = None
     nonzero_rows = sum(1 for row in matrix if any(value != 0.0 for value in row))
     distinct_rows = len(set(matrix))
-    if nonzero_rows < MIN_PBO_NONZERO_ROW_FRACTION * len(matrix) or distinct_rows < n_slices:
+    columns = len(matrix[0]) if matrix else 0
+    min_active = max(2, n_slices // 2)
+    inactive_variants = sum(
+        1 for column in range(columns) if sum(1 for row in matrix if row[column] != 0.0) < min_active
+    )
+    if inactive_variants:
+        # A variant that barely trades makes its rank, and therefore the PBO, arbitrary.
+        low_information.append(
+            f"pbo: {inactive_variants} of {columns} variants have fewer than {min_active} non-zero periods"
+        )
+    elif nonzero_rows < MIN_PBO_NONZERO_ROW_FRACTION * len(matrix) or distinct_rows < n_slices:
         # A mostly empty or repetitive matrix gives a PBO that looks precise but says nothing.
         low_information.append(
             f"pbo: {nonzero_rows}/{len(matrix)} non-zero rows and {distinct_rows} distinct rows "
