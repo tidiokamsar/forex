@@ -4,7 +4,7 @@ import logging
 import unittest
 
 from _support import workspace_tempdir
-from astra.logs import configure_logging, correlation, get_logger, log_event, redact
+from astra.logs import configure_logging, correlation, get_logger, log_event, redact, reset_logging
 from test_execution import SYSTEM, ExecutionTestCase
 
 
@@ -16,7 +16,7 @@ class JsonLoggingTests(unittest.TestCase):
     def setUp(self):
         self.stream = io.StringIO()
         configure_logging(level="DEBUG", stream=self.stream)
-        self.addCleanup(configure_logging, level="WARNING", stream=io.StringIO())
+        self.addCleanup(reset_logging)
 
     def test_lines_are_json_with_utc_timestamp_and_correlation(self):
         with correlation("corr-42"):
@@ -42,7 +42,7 @@ class JsonLoggingTests(unittest.TestCase):
                 handler.flush()
             with open(f"{temp}/astra.jsonl", encoding="utf-8") as handle:
                 self.assertEqual(json.loads(handle.readline())["event"], "file.event")
-            configure_logging(level="WARNING", stream=io.StringIO())
+            reset_logging()
 
     def test_exceptions_are_captured(self):
         try:
@@ -58,7 +58,7 @@ class GatewayLoggingTests(ExecutionTestCase):
         super().setUp()
         self.stream = io.StringIO()
         configure_logging(level="INFO", stream=self.stream)
-        self.addCleanup(configure_logging, level="WARNING", stream=io.StringIO())
+        self.addCleanup(reset_logging)
 
     def test_every_order_outcome_is_logged_with_its_correlation_id(self):
         accepted = self.gateway.submit(self.command(), SYSTEM)

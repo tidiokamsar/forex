@@ -18,7 +18,7 @@ from .data import load_bars_csv
 from .engine import run_paper_replay, strategy_decisions
 from .execution import ExecutionStore, TradingControls
 from .governance import Actor, PermissionDenied, Role
-from .logs import configure_logging
+from .logs import configure_logging, reset_logging
 from .models import BacktestConfig
 from .registry import ModelRegistry, PromotionCriteria
 from .research import run_sma_backtest
@@ -81,6 +81,17 @@ def build_parser() -> argparse.ArgumentParser:
     orders.add_argument("--price", type=float, help="Prix moyen d'exécution si FILLED")
     orders.add_argument("--operator", help="Identifiant de l'opérateur humain")
     commands.add_parser("models", help="Lister le registre des modèles et expériences")
+    backup = commands.add_parser("backup", help="Sauvegarde, vérification et restauration de la base")
+    backup_actions = backup.add_subparsers(dest="backup_action", required=True)
+    backup_create = backup_actions.add_parser("create", help="Créer une sauvegarde cohérente vérifiée")
+    backup_create.add_argument("--dir", type=Path, help="Dossier de sauvegarde (défaut: ASTRA_BACKUP_DIR ou var/backups)")
+    backup_create.add_argument("--keep", type=int, default=14)
+    backup_verify = backup_actions.add_parser("verify", help="Vérifier hash et intégrité d'une sauvegarde")
+    backup_verify.add_argument("path", type=Path)
+    backup_restore = backup_actions.add_parser("restore", help="Restaurer (service arrêté, opérateur humain)")
+    backup_restore.add_argument("path", type=Path)
+    backup_restore.add_argument("--operator", required=True)
+    backup_restore.add_argument("--reason", required=True)
     controls = commands.add_parser("controls", help="Arrêt d'urgence et gels des entrées")
     control_actions = controls.add_subparsers(dest="control_action", required=True)
     control_actions.add_parser("show", help="Afficher l'état des contrôles")
@@ -144,6 +155,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         stream=sys.stderr,
     )
     try:
+        return _run(args)
+    finally:
+        reset_logging()
+
+
+def _run(args: argparse.Namespace) -> int:
+    try:
         config = AppConfig.from_env()
         if args.command == "status":
             _write_json(
@@ -169,6 +187,21 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.command == "ctrader-check":
             _write_json(ctrader_check(args.operator, config))
+            return 0
+
+        if args.command == "backup":
+            from dataclasses import asdict as _asdict
+
+            from .backup import create_backup, restore_backup, verify_backup
+
+            if args.backup_action == "create":
+                directory = args.dir or Path(os.environ.get("ASTRA_BACKUP_DIR") or (PROJECT_ROOT / "var" / "backups"))
+                _write_json({"backup": _asdict(create_backup(config.database_path, directory, keep=args.keep))})
+            elif args.backup_action == "verify":
+                _write_json({"verified": _asdict(verify_backup(args.path))})
+            else:
+                actor = Actor(f"cli:{args.operator}", Role.HUMAN_OPERATOR)
+                _write_json({"restore": restore_backup(args.path, config.database_path, actor=actor, reason=args.reason)})
             return 0
 
         if args.command in ("orders", "controls", "models"):

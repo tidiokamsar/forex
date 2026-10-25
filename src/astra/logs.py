@@ -84,6 +84,16 @@ def configure_logging(
     return logger
 
 
+def reset_logging() -> None:
+    """Remove configured handlers and return to the silent library default."""
+
+    logger = logging.getLogger(ROOT_LOGGER)
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
+    logger.addHandler(logging.NullHandler())
+
+
 def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(f"{ROOT_LOGGER}.{name}")
 
