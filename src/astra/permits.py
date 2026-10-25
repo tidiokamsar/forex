@@ -21,7 +21,6 @@ from datetime import datetime, timedelta
 
 from .models import Direction, RunMode
 
-
 PERMIT_TTL = timedelta(seconds=30)
 
 

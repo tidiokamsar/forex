@@ -6,10 +6,10 @@ broker or submit orders.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timezone
-import math
+from datetime import UTC, date, datetime
 from typing import Any
 
 from .models import (
@@ -25,19 +25,24 @@ from .models import (
 )
 from .risk import RiskEngine
 
-
 STRATEGY_NAME = "sma_crossover"
 STRATEGY_VERSION = "1.0.0"
 
 _ASSUMPTIONS = (
     "Signals use only closes through the signal bar; entries and close-based reversal exits are simulated at the next bar open.",
-    "Trade prices and gross P&L use unadjusted bar reference prices; configured spread, slippage, and commission are itemized simulation estimates, not broker-reported costs.",
-    "The stop is fixed from the high-low range of up to stop_lookback bars ending at the signal bar; an open gap through an existing stop is processed before a reversal at that open, and intrabar stops precede close-based strategy exits.",
+    "Trade prices and gross P&L use unadjusted bar reference prices; configured spread, slippage, and commission "
+    "are itemized simulation estimates, not broker-reported costs.",
+    "The stop is fixed from the high-low range of up to stop_lookback bars ending at the signal bar; an open gap "
+    "through an existing stop is processed before a reversal at that open, and intrabar stops precede close-based "
+    "strategy exits.",
     "At most one position is held; daily loss uses realized net P&L grouped by each event timestamp's calendar date.",
     "Historical bars are fresh at their simulated event time; wall-clock age is not applied.",
-    "The offline backtest assumes a verified simulation account, known illustrative instrument specifications, and available simulated margin; these flags do not establish real account, contract, or broker-margin facts.",
-    "Quote-currency P&L is treated as account-currency P&L one-to-one; no FX conversion, financing, swap, margin constraint, or intrabar mark-to-market is modeled.",
-    "Risk sizing treats one price unit times one trade unit as one quote-currency unit; the instrument specification is illustrative.",
+    "The offline backtest assumes a verified simulation account, known illustrative instrument specifications, and "
+    "available simulated margin; these flags do not establish real account, contract, or broker-margin facts.",
+    "Quote-currency P&L is treated as account-currency P&L one-to-one; no FX conversion, financing, swap, margin "
+    "constraint, or intrabar mark-to-market is modeled.",
+    "Risk sizing treats one price unit times one trade unit as one quote-currency unit; the instrument specification "
+    "is illustrative.",
     "Spread is charged as half the configured spread on each side; slippage and commission are charged per side.",
 )
 
@@ -233,7 +238,6 @@ def run_sma_backtest(
                 stop_price=stop_price,
                 created_at=signal.timestamp,
             )
-            policy = engine.policy
             context = RiskContext(
                 mode=RunMode.SIMULATION,
                 account_mode=RunMode.SIMULATION,
@@ -278,11 +282,9 @@ def run_sma_backtest(
                 close_position(bar.timestamp, stop_fill, "stop_loss")
 
         signal = signals_at.get(bar.timestamp)
-        if signal is not None:
-            if position is not None and signal.direction is not position.signal.direction:
-                pending_signal = signal
-            elif position is None:
-                pending_signal = signal
+        # A signal is queued when flat, or when it reverses the open position.
+        if signal is not None and (position is None or signal.direction is not position.signal.direction):
+            pending_signal = signal
 
     # There is no future bar for a signal on the final close. Any position
     # that did enter is closed at the last available reference close.
@@ -373,7 +375,7 @@ def _prepare_bars(bars: Iterable[MarketBar]) -> tuple[MarketBar, ...]:
         bar = replace(
             bar,
             instrument=canonical_instrument,
-            timestamp=bar.timestamp.astimezone(timezone.utc),
+            timestamp=bar.timestamp.astimezone(UTC),
         )
         if not math.isfinite(bar.open) or not math.isfinite(bar.high):
             raise ValueError("bar OHLC prices must be finite positive numbers")

@@ -13,7 +13,7 @@ import hashlib
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from ..brokers.base import (
     BrokerAdapter,
@@ -32,10 +32,9 @@ from ..models import Direction, OrderIntent, RiskContext, RunMode
 from ..permits import _AUTHORITY as _PERMITS
 from ..permits import ExecutionRefused
 from ..risk import RiskEngine
-from .controls import FreezeReason, RECONCILIATION_OWNED, TradingControls
+from .controls import RECONCILIATION_OWNED, FreezeReason, TradingControls
 from .mode import verify_mode
-from .orders import ExecutionStore, OrderRecord, OrderState, TERMINAL_STATES
-
+from .orders import TERMINAL_STATES, ExecutionStore, OrderRecord, OrderState
 
 COMMAND_SCHEMA_VERSION = "astra.execution_command.v1"
 _EVENT_CURSOR = "broker_event_cursor"
@@ -100,7 +99,7 @@ def client_order_id_for(intent_id: str) -> str:
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class OrderGateway:
@@ -146,7 +145,7 @@ class OrderGateway:
             self._store.audit(
                 "order.command_rejected",
                 {
-                    "intent_id": getattr(command, "intent_id", None) if isinstance(getattr(command, "intent_id", None), str) else None,
+                    "intent_id": intent if isinstance(intent := getattr(command, "intent_id", None), str) else None,
                     "reasons": list(schema_errors),
                 },
             )
@@ -520,7 +519,8 @@ class OrderGateway:
             for record in self._store.list_orders(limit=500, open_only=True, account_ref=account.account_ref_masked):
                 report = self._broker.lookup_order(record.client_order_id)
                 if report is None:
-                    if record.state in (OrderState.SUBMITTED, OrderState.UNKNOWN) and capabilities.supports_order_lookup_by_client_id:
+                    sent_or_unknown = record.state in (OrderState.SUBMITTED, OrderState.UNKNOWN)
+                    if sent_or_unknown and capabilities.supports_order_lookup_by_client_id:
                         self._store.transition(
                             record.intent_id,
                             OrderState.CANCELLED,
@@ -559,7 +559,8 @@ class OrderGateway:
         for instrument in sorted(set(broker_net) | set(expected)):
             if abs(broker_net.get(instrument, 0.0) - expected.get(instrument, 0.0)) > self._tolerance:
                 divergences.append(
-                    f"position_mismatch:{instrument}:broker={broker_net.get(instrument, 0.0)}:local={expected.get(instrument, 0.0)}"
+                    f"position_mismatch:{instrument}:broker={broker_net.get(instrument, 0.0)}"
+                    f":local={expected.get(instrument, 0.0)}"
                 )
         still_unknown = [
             r.intent_id

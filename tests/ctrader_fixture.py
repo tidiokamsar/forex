@@ -29,7 +29,9 @@ class FakeCTraderServer:
         kind = message["payloadType"]
         mid = message.get("clientMsgId")
         body = message.get("payload", {})
-        reply = lambda payload_type, payload: self.push({"clientMsgId": mid, "payloadType": int(payload_type), "payload": payload})
+        def reply(payload_type, payload):
+            self.push({"clientMsgId": mid, "payloadType": int(payload_type), "payload": payload})
+
         if kind == P.HEARTBEAT_EVENT:
             return
         if kind in self.fail_with:

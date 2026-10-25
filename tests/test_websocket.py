@@ -38,7 +38,11 @@ class LoopbackServer:
             request = b""
             while b"\r\n\r\n" not in request:
                 request += conn.recv(4096)
-            key = [l.split(":", 1)[1].strip() for l in request.decode().split("\r\n") if l.lower().startswith("sec-websocket-key")][0]
+            key = next(
+                line.split(":", 1)[1].strip()
+                for line in request.decode().split("\r\n")
+                if line.lower().startswith("sec-websocket-key")
+            )
             accept = "invalid" if self.bad_accept else accept_key(key)
             conn.sendall(
                 f"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n".encode()

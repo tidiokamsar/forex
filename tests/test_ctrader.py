@@ -2,16 +2,25 @@ import inspect
 import json
 import time
 import unittest
+from datetime import UTC
 
-from astra.brokers import BrokerEnvironment, BrokerOrderRequest, BrokerOrderStatus, BrokerTimeout, BrokerUnavailable, EnvironmentSource
-from astra.brokers import ctrader
+from _support import workspace_tempdir
+from astra.brokers import (
+    BrokerEnvironment,
+    BrokerOrderRequest,
+    BrokerOrderStatus,
+    BrokerTimeout,
+    BrokerUnavailable,
+    EnvironmentSource,
+    ctrader,
+)
 from astra.brokers.base import ConnectionState
-from astra.brokers.ctrader import CTraderAdapter, CTraderCredentials, LiveAccountRefused, PayloadType as P
+from astra.brokers.ctrader import CTraderAdapter, CTraderCredentials, LiveAccountRefused
+from astra.brokers.ctrader import PayloadType as P
 from astra.execution import ExecutionCommand, ExecutionStore, OrderGateway, verify_mode
 from astra.governance import Actor, Role, SecretValue
 from astra.models import Direction, RunMode
 from ctrader_fixture import FakeCTraderServer, FakeTransport
-from _support import workspace_tempdir
 
 
 def credentials(account_id=4242):
@@ -95,7 +104,7 @@ class CTraderAdapterTests(unittest.TestCase):
         report = adapter._send_order(
             BrokerOrderRequest("ASTRA-abc", "EURUSD", Direction.LONG, 11_000.0, stop_loss=1.0980)
         )
-        sent = [m for m in self.server.received if m["payloadType"] == P.NEW_ORDER_REQ][0]["payload"]
+        sent = next(m for m in self.server.received if m["payloadType"] == P.NEW_ORDER_REQ)["payload"]
         self.assertEqual(sent["volume"], 1_100_000)
         self.assertEqual((sent["orderType"], sent["tradeSide"]), (1, 1))
         self.assertEqual(sent["clientOrderId"], "ASTRA-abc")
@@ -121,7 +130,7 @@ class CTraderAdapterTests(unittest.TestCase):
         adapter._send_order(BrokerOrderRequest("ASTRA-in", "EURUSD", Direction.LONG, 2_000.0, stop_loss=1.09))
         self.assertTrue(wait_for(lambda: bool(self.server.positions)))
         adapter._send_order(BrokerOrderRequest("ASTRA-out", "EURUSD", Direction.SHORT, 2_000.0, reduce_only=True))
-        close = [m for m in self.server.received if m["payloadType"] == P.CLOSE_POSITION_REQ][0]["payload"]
+        close = next(m for m in self.server.received if m["payloadType"] == P.CLOSE_POSITION_REQ)["payload"]
         self.assertEqual((close["positionId"], close["volume"]), (77, 200_000))
         self.assertEqual(adapter.lookup_order("ASTRA-out").status, BrokerOrderStatus.FILLED)
 
@@ -177,9 +186,9 @@ class CTraderGatewayTests(unittest.TestCase):
         self.assertTrue(wait_for(lambda: self.adapter._quotes.get("EURUSD", {}).get("ask") is not None))
 
     def command(self, mode):
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         return ExecutionCommand(
             intent_id=f"demo-{mode}", decision_id="d", correlation_id="c", mode=mode,
             account_ref="CTRADER-****4242", instrument="EURUSD", direction=Direction.LONG,
@@ -207,9 +216,10 @@ if __name__ == "__main__":
 
 class CTraderCheckCliTests(unittest.TestCase):
     def test_read_only_check_reports_demo_and_sends_no_order(self):
+        from pathlib import Path
+
         from astra.cli import ctrader_check
         from astra.config import AppConfig
-        from pathlib import Path
 
         with workspace_tempdir() as temp:
             config = AppConfig(database_path=Path(temp) / "state.sqlite3")
@@ -232,9 +242,10 @@ class CTraderCheckCliTests(unittest.TestCase):
             self.assertNotIn("token-xyz", json.dumps(result, default=str))
 
     def test_missing_configuration_is_reported_without_connecting(self):
+        from pathlib import Path
+
         from astra.cli import ctrader_check
         from astra.config import AppConfig
-        from pathlib import Path
 
         with workspace_tempdir() as temp:
             config = AppConfig(database_path=Path(temp) / "state.sqlite3")
@@ -249,7 +260,7 @@ class ExecutionBoundaryTests(unittest.TestCase):
     """C-01: no direct adapter path may send an order without every safety condition."""
 
     def connected(self, *, server=None, allow=False):
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         self.server = server or FakeCTraderServer()
         adapter = CTraderAdapter(
@@ -260,7 +271,7 @@ class ExecutionBoundaryTests(unittest.TestCase):
         adapter.connect()
         self.assertTrue(wait_for(lambda: adapter._quotes.get("EURUSD", {}).get("ask") is not None))
         self.request = BrokerOrderRequest("ASTRA-boundary", "EURUSD", Direction.LONG, 1_000.0, stop_loss=1.09)
-        self.now = datetime.now(timezone.utc)
+        self.now = datetime.now(UTC)
         return adapter
 
     def permit(self, mode=RunMode.DEMO):
@@ -296,6 +307,7 @@ class ExecutionBoundaryTests(unittest.TestCase):
 
     def test_expired_permit_is_refused(self):
         from datetime import timedelta
+
         from astra.permits import _AUTHORITY
 
         adapter = self.connected(allow=True)
@@ -316,6 +328,7 @@ class ExecutionBoundaryTests(unittest.TestCase):
 
     def test_unknown_account_status_is_refused_even_if_demo_were_enabled(self):
         from unittest.mock import patch
+
         from astra.models import RunMode as Mode
 
         adapter = self.connected(server=FakeCTraderServer(include_is_live=False), allow=True)
@@ -324,6 +337,7 @@ class ExecutionBoundaryTests(unittest.TestCase):
 
     def test_disconnected_adapter_is_refused(self):
         from unittest.mock import patch
+
         from astra.models import RunMode as Mode
 
         adapter = self.connected(allow=True)
@@ -334,6 +348,7 @@ class ExecutionBoundaryTests(unittest.TestCase):
     def test_guard_is_not_a_blanket_refusal(self):
         """With every condition met (DEMO patched in for this test only) the boundary lets the order through."""
         from unittest.mock import patch
+
         from astra.models import RunMode as Mode
 
         adapter = self.connected(allow=True)
@@ -356,9 +371,10 @@ class ExecutionBoundaryTests(unittest.TestCase):
                     return self._send_order(request)
 
     def test_simulated_broker_also_enforces_the_boundary(self):
+        from datetime import datetime
+
         from astra.brokers.simulated import SimulatedBroker
-        from astra.permits import ExecutionRefused, _AUTHORITY
-        from datetime import datetime, timezone
+        from astra.permits import _AUTHORITY, ExecutionRefused
 
         broker = SimulatedBroker()
         broker.set_quote("EURUSD", 1.1, 1.1001)
@@ -366,5 +382,5 @@ class ExecutionBoundaryTests(unittest.TestCase):
         with self.assertRaises(ExecutionRefused):
             broker.submit_order(request)
         with self.assertRaises(ExecutionRefused):
-            broker.submit_order(request, _AUTHORITY.issue(request, RunMode.DEMO, datetime.now(timezone.utc)))
+            broker.submit_order(request, _AUTHORITY.issue(request, RunMode.DEMO, datetime.now(UTC)))
         self.assertEqual(broker.submit_calls, 0)

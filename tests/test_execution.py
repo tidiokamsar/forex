@@ -1,8 +1,7 @@
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from _support import workspace_tempdir
-
 from astra.brokers import BrokerEnvironment, EnvironmentSource
 from astra.brokers.base import BrokerAdapter
 from astra.brokers.simulated import SimulatedBroker
@@ -18,8 +17,7 @@ from astra.governance import Actor, PermissionDenied, Role
 from astra.models import Direction, RunMode
 from astra.storage import BacktestStore
 
-
-T0 = datetime(2026, 3, 2, 9, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 3, 2, 9, 0, tzinfo=UTC)
 SYSTEM = Actor("pipeline", Role.SYSTEM)
 OPERATOR = Actor("alice", Role.HUMAN_OPERATOR)
 

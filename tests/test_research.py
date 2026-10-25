@@ -1,12 +1,11 @@
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from astra.models import BacktestConfig, CostModel, Direction, MarketBar, RiskPolicy
 from astra.research import generate_sma_crossover_signals, run_sma_backtest
 from astra.risk import RiskEngine
 
-
-START = datetime(2020, 1, 1, tzinfo=timezone.utc)
+START = datetime(2020, 1, 1, tzinfo=UTC)
 
 
 def make_bar(index, close, *, open_price=None, high=None, low=None, day_offset=0):
@@ -230,7 +229,7 @@ class ResearchTests(unittest.TestCase):
     def test_naive_event_timestamps_are_rejected(self):
         naive = MarketBar(
             instrument="EURUSD",
-            timestamp=datetime(2020, 1, 1),
+            timestamp=datetime(2020, 1, 1),  # noqa: DTZ001 - naive on purpose: must be rejected
             open=1.0,
             high=1.1,
             low=0.9,

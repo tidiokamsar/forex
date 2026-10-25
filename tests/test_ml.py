@@ -3,7 +3,7 @@ import json
 import platform
 import random
 import unittest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from astra import ml
@@ -19,8 +19,7 @@ from astra.ml import (
 )
 from test_features import make_synthetic_bars, mutate_after
 
-
-CREATED = datetime(2026, 10, 25, tzinfo=timezone.utc)
+CREATED = datetime(2026, 10, 25, tzinfo=UTC)
 IDENTITY = {"dataset": "synthetic_generator", "seed": 7, "classification": "SYNTHETIC"}
 FAST = LogisticParams(iterations=150)
 
@@ -70,7 +69,7 @@ class PurgeEmbargoTests(unittest.TestCase):
     def test_run_respects_purge_in_reported_folds(self):
         config = PurgedWalkForwardConfig(horizon=4, embargo_bars=3)
         result = _run(config=config)
-        for split, metrics in zip(result.splits, result.manifest.fold_metrics):
+        for split, metrics in zip(result.splits, result.manifest.fold_metrics, strict=True):
             self.assertLess(split.training_indices[-1] + 4 + 3, split.validation_indices[0])
             self.assertEqual(metrics.purged_rows, len(split.purged_indices))
             self.assertEqual(metrics.training_rows, len(split.training_indices))
@@ -119,7 +118,7 @@ class ModelTests(unittest.TestCase):
         labels = [int(x > 0) for x, _ in rows]
         model = LogisticRegression(LogisticParams(iterations=300, learning_rate=0.5)).fit(rows, labels, ("a", "b"))
         probabilities = model.predict_proba(rows, ("a", "b"))
-        accuracy = sum(int(p >= 0.5) == y for p, y in zip(probabilities, labels)) / len(labels)
+        accuracy = sum(int(p >= 0.5) == y for p, y in zip(probabilities, labels, strict=True)) / len(labels)
         self.assertGreater(accuracy, 0.9)
         self.assertTrue(all(0.0 < p < 1.0 for p in probabilities))
         self.assertGreater(abs(model.weights[0]), abs(model.weights[1]))
@@ -177,7 +176,7 @@ class ManifestTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             run_purged_walk_forward(bars, {"x": float("nan")}, created_at=CREATED)
         with self.assertRaises(ValueError):
-            run_purged_walk_forward(bars, IDENTITY, created_at=datetime(2026, 1, 1))
+            run_purged_walk_forward(bars, IDENTITY, created_at=datetime(2026, 1, 1))  # noqa: DTZ001 - naive on purpose: must be rejected
 
 
 if __name__ == "__main__":

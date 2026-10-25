@@ -9,12 +9,12 @@ storage, or execution code is imported.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
-from datetime import date, datetime
 import math
 import random
 import statistics
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Any
 
 from .models import (
@@ -30,22 +30,25 @@ from .models import (
 )
 from .research import (
     _ASSUMPTIONS as _SMA_ASSUMPTIONS,
-    _OpenPosition,
+)
+from .research import (
     _close_trade,
     _historical_range_stop,
     _open_gap_stop_fill_price,
+    _OpenPosition,
     _prepare_bars,
     _stop_fill_price,
     _validate_config,
 )
 from .risk import RiskEngine
 
-
 SIGNAL_BACKTEST_VERSION = "1.0.0"
 
 _ASSUMPTIONS = (
-    "Signals are supplied precomputed at bar close; their causality is the caller's responsibility. Entries and close-based reversal exits are simulated at the next bar open.",
-) + _SMA_ASSUMPTIONS[1:]
+    "Signals are supplied precomputed at bar close; their causality is the caller's responsibility. "
+    "Entries and close-based reversal exits are simulated at the next bar open.",
+    *_SMA_ASSUMPTIONS[1:],
+)
 
 
 def run_signal_backtest(

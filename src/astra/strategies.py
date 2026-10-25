@@ -7,18 +7,17 @@ fills belong to the backtester and every entry still passes the RiskEngine.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-import math
 
 from . import research
 from .features import average_true_range, donchian_channel, rolling_zscore
 from .models import BacktestConfig, CostModel, Direction, MarketBar, Signal
 from .regimes import RegimeEstimate, TrendState
 from .research import _historical_range_stop, _prepare_bars
-
 
 MOMENTUM_NAME = "ts_momentum"
 MOMENTUM_VERSION = "1.0.0"
@@ -504,14 +503,14 @@ def _stop_config(config: object) -> BacktestConfig:
 
 
 def _validate_common(config: object, expected_version: str) -> None:
-    if getattr(config, "version") != expected_version:
+    if config.version != expected_version:
         raise ValueError("version does not match this implementation")
-    _require_int(getattr(config, "horizon_bars"), "horizon_bars", 1)
-    _require_int(getattr(config, "atr_window"), "atr_window", 1)
-    _require_int(getattr(config, "stop_lookback"), "stop_lookback", 1)
-    _require_positive(getattr(config, "stop_range_multiple"), "stop_range_multiple")
-    _require_positive(getattr(config, "max_cost_to_move_ratio"), "max_cost_to_move_ratio")
-    confidence = getattr(config, "min_regime_confidence")
+    _require_int(config.horizon_bars, "horizon_bars", 1)
+    _require_int(config.atr_window, "atr_window", 1)
+    _require_int(config.stop_lookback, "stop_lookback", 1)
+    _require_positive(config.stop_range_multiple, "stop_range_multiple")
+    _require_positive(config.max_cost_to_move_ratio, "max_cost_to_move_ratio")
+    confidence = config.min_regime_confidence
     if not _finite(confidence) or not 0 <= confidence <= 1:
         raise ValueError("min_regime_confidence must be within [0, 1]")
 

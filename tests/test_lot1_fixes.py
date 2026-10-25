@@ -5,13 +5,12 @@ import io
 import json
 import os
 import unittest
-from datetime import timedelta
-from pathlib import Path
 from unittest.mock import patch
 
-from astra.brokers import BrokerOrderRequest, BrokerRequestError
+from astra.brokers import BrokerRequestError
 from astra.brokers.base import ConnectionState
-from astra.brokers.ctrader import CTraderAdapter, CTraderConnectionError, CTraderError, PayloadType as P
+from astra.brokers.ctrader import CTraderAdapter, CTraderConnectionError, CTraderError
+from astra.brokers.ctrader import PayloadType as P
 from astra.brokers.simulated import SimulatedBroker
 from astra.cli import main
 from astra.execution import FreezeReason, OrderGateway, OrderState, TradingControls

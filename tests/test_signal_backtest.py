@@ -24,7 +24,6 @@ from astra.strategies import (
 )
 from test_features import START, make_synthetic_bars
 
-
 FIXTURE = Path(__file__).resolve().parents[1] / "data" / "synthetic_eurusd_m15.csv"
 
 

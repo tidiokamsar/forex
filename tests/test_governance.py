@@ -1,6 +1,7 @@
 import json
 import unittest
 
+from _support import workspace_tempdir
 from astra.execution import ExecutionStore
 from astra.governance import (
     LLM_SCHEMA_VERSION,
@@ -14,8 +15,6 @@ from astra.governance import (
 )
 from astra.models import RiskPolicy
 from astra.storage import BacktestStore
-from _support import workspace_tempdir
-
 
 ADMIN = Actor("root", Role.HUMAN_ADMIN)
 REVIEWER = Actor("bob", Role.HUMAN_REVIEWER)

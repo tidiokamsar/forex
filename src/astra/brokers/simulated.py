@@ -10,7 +10,7 @@ from __future__ import annotations
 import itertools
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from threading import RLock
 
 from ..instruments import DEFAULT_SPECS, InstrumentSpec
@@ -33,7 +33,6 @@ from .base import (
     Quote,
 )
 
-
 SUBMIT_BEHAVIORS = frozenset(
     {"fill", "reject", "partial", "accept_only", "timeout_after_accept", "timeout_before_accept"}
 )
@@ -46,7 +45,7 @@ class _Position:
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class SimulatedBroker(BrokerAdapter):

@@ -1,11 +1,10 @@
 import sqlite3
 import unittest
 
+from _support import workspace_tempdir
 from astra.governance import Actor, PermissionDenied, Role
 from astra.registry import ModelRegistry, ModelStatus, PromotionCriteria, PromotionError
 from astra.storage import BacktestStore
-from _support import workspace_tempdir
-
 
 REVIEWER = Actor("bob", Role.HUMAN_REVIEWER)
 AGENT = Actor("agent-3", Role.RESEARCH_AGENT)

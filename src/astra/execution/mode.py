@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from ..brokers.base import AccountSnapshot, BrokerEnvironment, Capabilities, EnvironmentSource
 from ..models import RunMode
 
-
 # DEMO is defined by the contract but no verified demo connector exists in
 # this build, so it is not yet an executable mode. LIVE is always locked here.
 EXECUTABLE_MODES = frozenset({RunMode.SIMULATION})

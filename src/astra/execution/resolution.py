@@ -15,7 +15,6 @@ from ..brokers.base import BrokerOrderReport
 from ..governance import Action, Actor, PermissionGuard
 from .orders import ExecutionStore, OrderRecord, OrderState
 
-
 OUTCOMES = ("FILLED", "NOT_EXECUTED")
 RESOLVABLE_STATES = frozenset({OrderState.UNKNOWN, OrderState.SUBMITTED})
 
@@ -65,7 +64,9 @@ def resolve_unknown_order(
         }
         if target is OrderState.PARTIALLY_FILLED:
             # A partial fill with no live order left is terminal from ASTRA's side.
-            store.transition(intent_id, OrderState.PARTIALLY_FILLED, reason="resolved_by_operator", updates=updates, details=details)
+            store.transition(
+                intent_id, OrderState.PARTIALLY_FILLED, reason="resolved_by_operator", updates=updates, details=details
+            )
             resolved = store.transition(
                 intent_id, OrderState.CANCELLED, reason="remainder_cancelled_by_operator_resolution", details=details
             )

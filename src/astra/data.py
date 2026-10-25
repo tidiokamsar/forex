@@ -13,7 +13,7 @@ import hashlib
 import io
 import math
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .models import MarketBar
@@ -116,10 +116,10 @@ def load_bars_csv(
     freshness_checked = normalized_source_type in {"LIVE", "DELAYED"}
     reference_time: datetime | None = None
     if freshness_checked:
-        reference_time = now if now is not None else datetime.now(timezone.utc)
+        reference_time = now if now is not None else datetime.now(UTC)
         if reference_time.tzinfo is None or reference_time.utcoffset() is None:
             raise ValueError("now must be a timezone-aware datetime")
-        reference_time = reference_time.astimezone(timezone.utc)
+        reference_time = reference_time.astimezone(UTC)
 
     source_path = Path(path)
     with source_path.open("rb") as source_file:
@@ -526,7 +526,7 @@ def _parse_timestamp(value: str) -> datetime:
         raise ValueError(f"timestamp {value!r} is not ISO-8601") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError("timestamp must include a UTC offset")
-    return parsed.astimezone(timezone.utc)
+    return parsed.astimezone(UTC)
 
 
 def _dataset(

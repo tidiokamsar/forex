@@ -8,18 +8,17 @@ feature row ``i`` (itself causal) and bar ``i``.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
-from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
-from enum import StrEnum
 import hashlib
 import json
 import math
+from collections.abc import Iterable, Sequence
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
+from enum import StrEnum
 
 from .features import FeatureMatrix
 from .models import MarketBar
 from .research import _prepare_bars
-
 
 REGIME_MODEL_VERSION = "astra-regimes-1.0.0"
 
@@ -252,7 +251,7 @@ def session_label(timestamp: datetime) -> Session:
 
     if not isinstance(timestamp, datetime) or timestamp.utcoffset() is None:
         raise ValueError("timestamp must be timezone-aware")
-    hour = timestamp.astimezone(timezone.utc).hour
+    hour = timestamp.astimezone(UTC).hour
     if hour < 7:
         return Session.ASIA
     if hour < 12:

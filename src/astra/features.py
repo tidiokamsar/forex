@@ -8,17 +8,16 @@ any broker interface.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
-from dataclasses import asdict, dataclass, field
-from datetime import datetime
 import hashlib
 import json
 import math
 import statistics
+from collections.abc import Iterable, Sequence
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
 
 from .models import MarketBar
 from .research import _prepare_bars
-
 
 FEATURE_SET_VERSION = "astra-features-1.0.0"
 
@@ -279,7 +278,7 @@ class FeatureMatrix:
         chosen = range(len(self.rows)) if indices is None else indices
         return [tuple(self.rows[i][p] for p in positions) for i in chosen]
 
-    def slice(self, start: int, stop: int) -> "FeatureMatrix":
+    def slice(self, start: int, stop: int) -> FeatureMatrix:
         """Return rows ``start:stop`` (e.g. a training window) with the same spec."""
 
         if not 0 <= start < stop <= len(self.rows):
@@ -354,7 +353,7 @@ class TrainOnlyScaler:
     ``constant_columns``.
     """
 
-    __slots__ = ("columns", "means", "stds", "fitted_rows", "constant_columns")
+    __slots__ = ("columns", "constant_columns", "fitted_rows", "means", "stds")
 
     def __init__(self) -> None:
         self.columns: tuple[str, ...] | None = None
@@ -369,7 +368,7 @@ class TrainOnlyScaler:
 
     def fit(
         self, rows: Sequence[Sequence[float | None]], columns: Sequence[str]
-    ) -> "TrainOnlyScaler":
+    ) -> TrainOnlyScaler:
         if self.is_fitted:
             raise RuntimeError("scaler is already fitted; create a new scaler per fold")
         names = tuple(columns)
@@ -406,7 +405,7 @@ class TrainOnlyScaler:
             raise ValueError("columns differ from the columns the scaler was fitted on")
         matrix = _validated_rows(rows, len(self.columns))
         return [
-            tuple((value - mean) / std for value, mean, std in zip(row, self.means, self.stds))
+            tuple((value - mean) / std for value, mean, std in zip(row, self.means, self.stds, strict=True))
             for row in matrix
         ]
 

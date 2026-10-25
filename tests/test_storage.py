@@ -1,14 +1,14 @@
-import unittest
 import hashlib
 import json
 import sqlite3
+import unittest
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
+from _support import workspace_tempdir
 from astra.models import BacktestResult
 from astra.storage import BacktestStore
-from _support import workspace_tempdir
 
 
 @dataclass
@@ -21,8 +21,8 @@ class UsableDataset:
 
 
 def result():
-    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    end = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    end = datetime(2026, 1, 2, tzinfo=UTC)
     return BacktestResult(
         strategy="sma-crossover",
         strategy_version="1",

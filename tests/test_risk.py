@@ -1,11 +1,10 @@
 import unittest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from astra.models import Direction, OrderIntent, RiskContext, RiskPolicy, RunMode
 from astra.risk import RiskEngine
 
-
-NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
+NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def make_intent(**overrides):

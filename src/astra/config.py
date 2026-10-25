@@ -31,7 +31,7 @@ class AppConfig:
             raise ValueError("ASTRA_PORT must be an integer from 1 to 65535")
 
     @classmethod
-    def from_env(cls, environ: dict[str, str] | None = None) -> "AppConfig":
+    def from_env(cls, environ: dict[str, str] | None = None) -> AppConfig:
         values = os.environ if environ is None else environ
         requested = values.get("ASTRA_MODE", "SIMULATION").strip().upper()
         try:

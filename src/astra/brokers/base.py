@@ -10,12 +10,11 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 
 from ..instruments import InstrumentSpec
 from ..models import Direction
-
 
 INTERFACE_VERSION = "1"
 
@@ -185,9 +184,8 @@ class BrokerAdapter(ABC):
         return self.__dict__["_refused_orders"]
 
     def _boundary_now(self) -> datetime:
-        from datetime import timezone
 
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
 
     def _environment_guard(self, request: BrokerOrderRequest, permit: object) -> str | None:
         """Adapter-specific refusal reason, or None to allow. Fails closed by default."""
@@ -222,7 +220,7 @@ class BrokerAdapter(ABC):
     @abstractmethod
     def poll_events(self, after_sequence: int) -> tuple[BrokerEvent, ...]: ...
 
-    def instrument_specs(self) -> dict[str, "InstrumentSpec"]:
+    def instrument_specs(self) -> dict[str, InstrumentSpec]:
         """Provider-reported contract specs; empty when the adapter has none."""
 
         return {}

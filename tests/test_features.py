@@ -2,7 +2,7 @@ import math
 import random
 import unittest
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from astra.features import (
     FEATURE_COLUMNS,
@@ -22,8 +22,7 @@ from astra.features import (
 )
 from astra.models import MarketBar
 
-
-START = datetime(2026, 1, 5, tzinfo=timezone.utc)
+START = datetime(2026, 1, 5, tzinfo=UTC)
 
 
 def make_synthetic_bars(

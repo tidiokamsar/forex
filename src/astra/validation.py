@@ -7,13 +7,14 @@ are exploratory and are not a model-promotion or trading authorization.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
 import hashlib
 import json
 import math
+from collections.abc import Iterable
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
+from itertools import pairwise
 from pathlib import Path
-from typing import Iterable
 
 from . import models, research, risk
 from .models import BacktestConfig, BacktestResult, CostModel, MarketBar
@@ -24,7 +25,6 @@ from .research import (
     _validate_config,
     run_sma_backtest,
 )
-
 
 PROTOCOL_VERSION = "1.0.0"
 MAX_CANDIDATES = 100
@@ -71,7 +71,7 @@ class WalkForwardProtocol:
             raise ValueError("cost stress multipliers must be finite numbers of at least 1.0")
         if not multipliers or not math.isclose(multipliers[0], 1.0):
             raise ValueError("cost_stress_multipliers must start with 1.0")
-        if any(left >= right for left, right in zip(multipliers, multipliers[1:])):
+        if any(left >= right for left, right in pairwise(multipliers)):
             raise ValueError("cost stress multipliers must be strictly increasing")
         object.__setattr__(self, "cost_stress_multipliers", multipliers)
 
@@ -359,7 +359,8 @@ def evaluate_walk_forward(
         trials: list[CandidateTrial] = []
         trial_results: list[tuple[str, BacktestConfig, BacktestResult, float, bool]] = []
         for candidate_id, config_payload, config in zip(
-            candidate_ids, config_payloads, candidate_configs
+            candidate_ids, config_payloads, candidate_configs,
+            strict=True,
         ):
             validation_result = run_sma_backtest(
                 validation_history,
@@ -489,7 +490,7 @@ def evaluate_walk_forward(
         for trial in fold.candidate_trials:
             trials_by_candidate[trial.candidate_id].append(trial)
     aggregate_trials: list[FinalCandidateSelection] = []
-    for candidate_id, config_payload in zip(candidate_ids, config_payloads):
+    for candidate_id, config_payload in zip(candidate_ids, config_payloads, strict=True):
         candidate_trials = trials_by_candidate[candidate_id]
         aggregate_trades = sum(
             trial.validation_trade_count for trial in candidate_trials
@@ -751,7 +752,7 @@ def evaluate_holdout_once(
             dataset_sha256=resolved_hash,
             dataset_identity_sha256=identity_hash,
             status="COMPLETED",
-            evaluated_at=datetime.now(timezone.utc),
+            evaluated_at=datetime.now(UTC),
             selected_candidate_id=selected_id,
             selected_config=_config_payload(selected_config) if selected_config else None,
             candidate_trials=tuple(trials),
@@ -768,7 +769,8 @@ def evaluate_holdout_once(
             holdout_end=holdout_end,
             holdout_observations=holdout_size,
             assumptions=(
-                "The final holdout lock is scoped to this configured SQLite store and canonical market-bar identity; the local database is mutable and can be replaced.",
+                "The final holdout lock is scoped to this configured SQLite store and canonical market-bar identity; "
+                "the local database is mutable and can be replaced.",
                 "The final candidate was selected from aggregate validation-window scores before the holdout was scored.",
                 "The simple reference and cost stress scenarios were declared by the sealed protocol.",
                 "Metrics are historical simulation estimates, not a guarantee or promotion decision.",
@@ -939,7 +941,7 @@ def _dataset_identity_sha256(history: tuple[MarketBar, ...]) -> str:
     canonical = [
         {
             "instrument": bar.instrument.strip().upper(),
-            "timestamp": bar.timestamp.astimezone(timezone.utc).isoformat(),
+            "timestamp": bar.timestamp.astimezone(UTC).isoformat(),
             "open": bar.open,
             "high": bar.high,
             "low": bar.low,

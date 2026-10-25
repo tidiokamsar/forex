@@ -150,7 +150,7 @@ class AbstentionTests(unittest.TestCase):
 
         regimes = _regimes(bars, _thresholds(bars))
         with_regime = evaluate_mean_reversion(bars, config, regimes=regimes)
-        for decision, regime in zip(with_regime, regimes):
+        for decision, regime in zip(with_regime, regimes, strict=True):
             if decision.action is not StrategyAction.ABSTAIN:
                 self.assertIs(regime.trend, TrendState.RANGE)
                 self.assertAlmostEqual(decision.uncertainty, 1.0 - regime.confidence)
@@ -189,7 +189,7 @@ class ConversionAndContractTests(unittest.TestCase):
         signals = decisions_to_signals(decisions)
         directional = [d for d in decisions if d.action is not StrategyAction.ABSTAIN]
         self.assertEqual(len(signals), len(directional))
-        for signal, decision in zip(signals, directional):
+        for signal, decision in zip(signals, directional, strict=True):
             self.assertEqual(signal.timestamp, decision.timestamp)
             self.assertIs(signal.direction, Direction(decision.action.value))
             self.assertEqual(signal.strategy_version, decision.strategy_version)

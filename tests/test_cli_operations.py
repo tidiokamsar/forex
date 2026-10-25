@@ -6,8 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from astra.cli import main
 from _support import workspace_tempdir
+from astra.cli import main
 
 
 class CliOperationsTests(unittest.TestCase):

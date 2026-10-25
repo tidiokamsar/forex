@@ -8,14 +8,15 @@ embargoed, expanding walk-forward split and per-fold train-only scaling.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
-from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
 import hashlib
 import json
 import math
-from pathlib import Path
 import platform
+from collections.abc import Iterable, Sequence
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
+from itertools import pairwise
+from pathlib import Path
 from typing import Any
 
 from .features import (
@@ -27,7 +28,6 @@ from .features import (
 )
 from .models import MarketBar
 from .research import _prepare_bars
-
 
 ML_ENGINE_VERSION = "1.0.0"
 LOGISTIC_MODEL_NAME = "l2_logistic_regression"
@@ -65,7 +65,7 @@ class BaseRateClassifier:
         self.base_rate: float | None = None
         self.columns: tuple[str, ...] | None = None
 
-    def fit(self, labels: Sequence[int], columns: Sequence[str] = ()) -> "BaseRateClassifier":
+    def fit(self, labels: Sequence[int], columns: Sequence[str] = ()) -> BaseRateClassifier:
         values = _validated_labels(labels)
         self.base_rate = sum(values) / len(values)
         self.columns = tuple(columns)
@@ -98,7 +98,7 @@ class LogisticRegression:
     refuses rows described by a different column list than the training one.
     """
 
-    __slots__ = ("params", "columns", "weights", "bias", "training_rows")
+    __slots__ = ("bias", "columns", "params", "training_rows", "weights")
 
     def __init__(self, params: LogisticParams | None = None) -> None:
         params = LogisticParams() if params is None else params
@@ -115,7 +115,7 @@ class LogisticRegression:
         rows: Sequence[Sequence[float]],
         labels: Sequence[int],
         columns: Sequence[str],
-    ) -> "LogisticRegression":
+    ) -> LogisticRegression:
         names = tuple(columns)
         matrix = _validated_matrix(rows, len(names))
         targets = _validated_labels(labels)
@@ -128,7 +128,7 @@ class LogisticRegression:
         for _ in range(self.params.iterations):
             gradient = [0.0] * len(names)
             bias_gradient = 0.0
-            for row, target in zip(matrix, targets):
+            for row, target in zip(matrix, targets, strict=True):
                 error = _sigmoid(bias + _dot(weights, row)) - target
                 bias_gradient += error
                 for position, value in enumerate(row):
@@ -257,7 +257,7 @@ def purged_walk_forward_splits(
     """Split sorted bar indices into expanding folds with purge and embargo."""
 
     indices = tuple(usable_indices)
-    if any(b <= a for a, b in zip(indices, indices[1:])):
+    if any(b <= a for a, b in pairwise(indices)):
         raise ValueError("usable_indices must be strictly increasing")
     needed = config.fold_count * config.validation_rows
     if len(indices) < needed + config.minimum_training_rows:
@@ -299,7 +299,7 @@ def run_purged_walk_forward(
     if not names:
         raise ValueError("columns must not be empty")
     if created_at is None:
-        created_at = datetime.now(timezone.utc)
+        created_at = datetime.now(UTC)
     elif created_at.tzinfo is None or created_at.utcoffset() is None:
         raise ValueError("created_at must be timezone-aware")
 
@@ -374,7 +374,7 @@ def run_purged_walk_forward(
         train_periods=tuple((m.training_start, m.training_end) for m in fold_metrics),
         validation_periods=tuple((m.validation_start, m.validation_end) for m in fold_metrics),
         fold_metrics=tuple(fold_metrics),
-        created_at=created_at.astimezone(timezone.utc).isoformat(),
+        created_at=created_at.astimezone(UTC).isoformat(),
     )
     return MLRunResult(manifest=manifest, model=model, scaler=scaler, splits=splits)
 
@@ -394,7 +394,7 @@ def _calibration(
         upper = (position + 1) / bins
         members = [
             (p, y)
-            for p, y in zip(predicted, observed)
+            for p, y in zip(predicted, observed, strict=True)
             if lower <= p < upper or (position == bins - 1 and p == 1.0)
         ]
         output.append(
@@ -410,17 +410,17 @@ def _calibration(
 
 
 def _accuracy(predicted: Sequence[float], observed: Sequence[int]) -> float:
-    return sum(int(p >= 0.5) == y for p, y in zip(predicted, observed)) / len(observed)
+    return sum(int(p >= 0.5) == y for p, y in zip(predicted, observed, strict=True)) / len(observed)
 
 
 def _brier(predicted: Sequence[float], observed: Sequence[int]) -> float:
-    return sum((p - y) ** 2 for p, y in zip(predicted, observed)) / len(observed)
+    return sum((p - y) ** 2 for p, y in zip(predicted, observed, strict=True)) / len(observed)
 
 
 def _log_loss(predicted: Sequence[float], observed: Sequence[int]) -> float:
     epsilon = 1e-15
     total = 0.0
-    for p, y in zip(predicted, observed):
+    for p, y in zip(predicted, observed, strict=True):
         clipped = min(max(p, epsilon), 1.0 - epsilon)
         total -= y * math.log(clipped) + (1 - y) * math.log(1.0 - clipped)
     return total / len(observed)
@@ -434,7 +434,7 @@ def _sigmoid(value: float) -> float:
 
 
 def _dot(weights: Sequence[float], row: Sequence[float]) -> float:
-    return sum(w * x for w, x in zip(weights, row))
+    return sum(w * x for w, x in zip(weights, row, strict=True))
 
 
 def _validated_matrix(rows: Sequence[Sequence[float]], width: int) -> list[tuple[float, ...]]:

@@ -1,13 +1,12 @@
 import math
 import unittest
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 from astra.models import BacktestConfig, MarketBar
 from astra.validation import WalkForwardProtocol, evaluate_walk_forward
 
-
-START = datetime(2021, 1, 1, tzinfo=timezone.utc)
+START = datetime(2021, 1, 1, tzinfo=UTC)
 
 
 def make_bars(count=100):

@@ -13,12 +13,13 @@ import json
 import math
 import sqlite3
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from .governance import Action, Actor, PermissionGuard
 from .storage import BacktestStore
@@ -69,7 +70,7 @@ EVIDENCE_FIELDS = (
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _canonical(value: Any) -> str:
@@ -286,7 +287,8 @@ class ModelRegistry:
 
         def number(key: str) -> float | None:
             value = evidence.get(key)
-            return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) else None
+            numeric = isinstance(value, (int, float)) and not isinstance(value, bool)
+            return float(value) if numeric and math.isfinite(value) else None
 
         trades = number("trade_count")
         if trades is None or trades < criteria.min_trades:
@@ -328,7 +330,9 @@ class ModelRegistry:
                 "SELECT version FROM model_versions WHERE model_id = ? AND status = 'CHAMPION'", (model_id,)
             ).fetchone()
             if current is not None:
-                self._set_status(db, model_id, current["version"], ModelStatus.RETIRED, actor.actor_id, f"superseded by {version}")
+                self._set_status(
+                    db, model_id, current["version"], ModelStatus.RETIRED, actor.actor_id, f"superseded by {version}"
+                )
             self._set_status(db, model_id, version, ModelStatus.CHAMPION, actor.actor_id, reason)
 
     def start_shadow(self, *, actor: Actor, model_id: str, version: str) -> None:

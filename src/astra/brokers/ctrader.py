@@ -21,13 +21,13 @@ refused at connection time.
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import threading
-import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import IntEnum
 from typing import Any, Protocol
 
@@ -52,7 +52,6 @@ from .base import (
     EnvironmentSource,
     Quote,
 )
-
 
 DEMO_HOST = "demo.ctraderapi.com"
 JSON_PORT = 5036
@@ -190,7 +189,7 @@ def create_demo_transport(timeout: float = 10.0):
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class CTraderSession:
@@ -221,10 +220,8 @@ class CTraderSession:
     def stop(self) -> None:
         self._stop.set()
         self.alive = False
-        try:
+        with contextlib.suppress(OSError):
             self._transport.close()
-        except OSError:
-            pass
         with self._lock:
             for slot in self._pending.values():
                 slot["event"].set()
@@ -408,7 +405,11 @@ class CTraderAdapter(BrokerAdapter):
             light = self._request(
                 PayloadType.SYMBOLS_LIST_REQ, {"ctidTraderAccountId": account_id}, {PayloadType.SYMBOLS_LIST_RES}
             )["payload"].get("symbol", [])
-            wanted = {s["symbolName"].upper(): int(s["symbolId"]) for s in light if str(s.get("symbolName", "")).upper() in self._instruments}
+            wanted = {
+                s["symbolName"].upper(): int(s["symbolId"])
+                for s in light
+                if str(s.get("symbolName", "")).upper() in self._instruments
+            }
             missing = set(self._instruments) - set(wanted)
             if missing:
                 raise BrokerUnavailable(f"symbols not offered on this account: {sorted(missing)}")
@@ -568,7 +569,7 @@ class CTraderAdapter(BrokerAdapter):
             existing = self._orders.get(request.client_order_id)
         if existing is not None:
             return existing
-        volume = int(round(request.units * VOLUME_SCALE))
+        volume = round(request.units * VOLUME_SCALE)
         account_id = self._credentials.ctid_trader_account_id
         message_id = uuid.uuid4().hex
         with self._lock:
@@ -591,7 +592,7 @@ class CTraderAdapter(BrokerAdapter):
                 "label": request.client_order_id[:100],
             }
             if request.stop_loss is not None:
-                payload["relativeStopLoss"] = int(round(abs(reference - request.stop_loss) * PRICE_SCALE))
+                payload["relativeStopLoss"] = round(abs(reference - request.stop_loss) * PRICE_SCALE)
         try:
             response = self._request(
                 payload_type,
@@ -715,7 +716,7 @@ class CTraderAdapter(BrokerAdapter):
                     state["ask"] = round(int(payload["ask"]) / PRICE_SCALE, digits)
                 timestamp = payload.get("timestamp")
                 state["timestamp"] = (
-                    datetime.fromtimestamp(int(timestamp) / 1000, tz=timezone.utc) if timestamp else self._clock()
+                    datetime.fromtimestamp(int(timestamp) / 1000, tz=UTC) if timestamp else self._clock()
                 )
         elif payload_type == PayloadType.EXECUTION_EVENT:
             self._on_execution(message.get("clientMsgId"), payload)
@@ -748,7 +749,8 @@ class CTraderAdapter(BrokerAdapter):
         filled = int(order.get("executedVolume", 0) or 0) / VOLUME_SCALE
         deal = payload.get("deal") or {}
         price = order.get("executionPrice", deal.get("executionPrice"))
-        self._record(client, status, requested, filled, price, str(order_id) if order_id is not None else None, execution_type.name)
+        broker_id = str(order_id) if order_id is not None else None
+        self._record(client, status, requested, filled, price, broker_id, execution_type.name)
 
     def _record(self, client, status, requested, filled, price, broker_id, message) -> BrokerOrderReport:
         with self._lock:

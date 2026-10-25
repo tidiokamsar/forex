@@ -1,6 +1,6 @@
 import unittest
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from astra.features import FeatureSpec, compute_feature_matrix
 from astra.regimes import (
@@ -15,7 +15,6 @@ from astra.regimes import (
     session_label,
 )
 from test_features import CHECK_INDICES, make_synthetic_bars, mutate_after
-
 
 TRAIN_END = 200
 
@@ -117,7 +116,7 @@ class ClassifyTests(unittest.TestCase):
 
     def test_session_labels_by_utc_hour(self):
         def at(hour):
-            return session_label(datetime(2026, 1, 5, hour, tzinfo=timezone.utc))
+            return session_label(datetime(2026, 1, 5, hour, tzinfo=UTC))
 
         self.assertIs(at(3), Session.ASIA)
         self.assertIs(at(8), Session.LONDON)
@@ -125,7 +124,7 @@ class ClassifyTests(unittest.TestCase):
         self.assertIs(at(18), Session.NEW_YORK)
         self.assertIs(at(22), Session.OFF_HOURS)
         with self.assertRaises(ValueError):
-            session_label(datetime(2026, 1, 5, 3))
+            session_label(datetime(2026, 1, 5, 3))  # noqa: DTZ001 - naive on purpose: must be rejected
 
 
 if __name__ == "__main__":

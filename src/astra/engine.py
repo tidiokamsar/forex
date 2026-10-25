@@ -24,7 +24,6 @@ from .governance import Actor, Role
 from .models import BacktestConfig, Direction, MarketBar, RunMode
 from .research import _historical_range_stop, _prepare_bars, generate_sma_crossover_signals
 
-
 PIPELINE_ACTOR = Actor("astra-replay-pipeline", Role.SYSTEM)
 
 
@@ -124,7 +123,9 @@ def strategy_decisions(name: str) -> DecisionFunction:
         if decision.action is strategies.StrategyAction.ABSTAIN or decision.invalidation_price is None:
             return None
         direction = Direction.LONG if decision.action is strategies.StrategyAction.LONG else Direction.SHORT
-        return ReplayDecision(direction, decision.invalidation_price, decision.strategy, decision.strategy_version, decision.reason)
+        return ReplayDecision(
+            direction, decision.invalidation_price, decision.strategy, decision.strategy_version, decision.reason
+        )
 
     return decide
 
@@ -169,7 +170,9 @@ def run_paper_replay(
     rejections: list[str] = []
     sequence = iter(range(1, 1_000_000_000))
 
-    def submit(direction: Direction, purpose: str, stop: float | None, decision: ReplayDecision | None, at: datetime) -> OrderState | None:
+    def submit(
+        direction: Direction, purpose: str, stop: float | None, decision: ReplayDecision | None, at: datetime
+    ) -> OrderState | None:
         intent = f"replay:{run_id}:{next(sequence)}:{at.isoformat()}:{purpose}:{direction.value}"
         command = ExecutionCommand(
             intent_id=intent,
@@ -197,12 +200,13 @@ def run_paper_replay(
         gateway.process_events()
         if pending is not None:
             decision, pending = pending, None
-            if position_direction is not None and decision.direction is not position_direction:
-                if submit(decision.direction, "EXIT", None, None, bar.timestamp) is OrderState.FILLED:
-                    position_direction, position_stop = None, None
-            if position_direction is None:
-                if submit(decision.direction, "ENTRY", decision.stop_price, decision, bar.timestamp) is OrderState.FILLED:
-                    position_direction, position_stop = decision.direction, decision.stop_price
+            reversing = position_direction is not None and decision.direction is not position_direction
+            if reversing and submit(decision.direction, "EXIT", None, None, bar.timestamp) is OrderState.FILLED:
+                position_direction, position_stop = None, None
+            if position_direction is None and (
+                submit(decision.direction, "ENTRY", decision.stop_price, decision, bar.timestamp) is OrderState.FILLED
+            ):
+                position_direction, position_stop = decision.direction, decision.stop_price
 
         if position_direction is not None and position_stop is not None:
             crossed = bar.low <= position_stop if position_direction is Direction.LONG else bar.high >= position_stop

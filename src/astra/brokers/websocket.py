@@ -9,6 +9,7 @@ type JSON uses. Extensions and compression are not negotiated.
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import json
 import os
@@ -140,7 +141,7 @@ class WebSocketJsonTransport:
         while True:
             try:
                 fin, opcode, payload = self._read_frame()
-            except (socket.timeout, TimeoutError):
+            except TimeoutError:
                 # Nothing is consumed until a frame is complete, so a timeout
                 # never loses bytes; fragments persist across calls.
                 return None
@@ -170,14 +171,10 @@ class WebSocketJsonTransport:
 
     def close(self) -> None:
         if self._sock is not None and not self.closed:
-            try:
+            with contextlib.suppress(OSError):
                 self._send_frame(OP_CLOSE, b"")
-            except OSError:
-                pass
-            try:
+            with contextlib.suppress(OSError):
                 self._sock.close()
-            except OSError:
-                pass
         self.closed = True
 
     def _send_frame(self, opcode: int, payload: bytes) -> None:

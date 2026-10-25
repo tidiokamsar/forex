@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-import sqlite3
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -13,7 +13,6 @@ from .config import AppConfig
 from .execution import ExecutionStore, TradingControls
 from .registry import ModelRegistry
 from .storage import BacktestStore
-
 
 STATIC_DIR = Path(__file__).with_name("static")
 OPERATION_ROUTES = frozenset(
@@ -62,7 +61,7 @@ def make_handler(
         server_version = "ASTRA"
         sys_version = ""
 
-        def do_GET(self) -> None:  # noqa: N802 - stdlib handler protocol
+        def do_GET(self) -> None:
             if not self._guard_host():
                 return
             route = urlsplit(self.path).path
@@ -122,17 +121,17 @@ def make_handler(
             else:
                 self._json({"error": "not_found"}, status=404)
 
-        def do_POST(self) -> None:  # noqa: N802 - every mutation is disabled
+        def do_POST(self) -> None:
             if not self._guard_host():
                 return
             self._json({"error": "read_only"}, status=405)
 
-        def do_PUT(self) -> None:  # noqa: N802
+        def do_PUT(self) -> None:
             if not self._guard_host():
                 return
             self._json({"error": "read_only"}, status=405)
 
-        def do_DELETE(self) -> None:  # noqa: N802
+        def do_DELETE(self) -> None:
             if not self._guard_host():
                 return
             self._json({"error": "read_only"}, status=405)

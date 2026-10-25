@@ -5,6 +5,30 @@ description = "Local Forex research and simulation workspace"
 requires-python = ">=3.11"
 dependencies = []
 
+[tool.ruff]
+target-version = "py311"
+line-length = 130
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# Correctness first: pyflakes, pycodestyle errors, bugbear, timezone safety,
+# blind excepts, modern syntax, import order, simplifications.
+select = ["F", "E", "W", "B", "DTZ", "BLE", "UP", "I", "SIM", "RUF", "PLE"]
+ignore = [
+    "SIM117",  # nested `with` blocks are kept where they read clearer in tests
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Test fixtures keep provider payloads and scenario calls on one line for readability.
+"tests/**" = ["E501"]
+
+[tool.ruff.lint.flake8-bugbear]
+# Frozen dataclasses are immutable, so using them as argument defaults is safe.
+extend-immutable-calls = ["astra.models.BacktestConfig", "astra.validation.WalkForwardProtocol", "BacktestConfig", "WalkForwardProtocol"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["astra"]
+
 [tool.astra]
 supported-mode = "SIMULATION"
 live-execution = false

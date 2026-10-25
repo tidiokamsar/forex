@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
-from datetime import datetime, timezone
 import hashlib
 import json
 import sys
+from collections.abc import Sequence
+from dataclasses import asdict
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Sequence
 
 from .brokers.base import BrokerRequestError, BrokerTimeout, BrokerUnavailable
 from .config import AppConfig, ModeUnavailableError
@@ -18,8 +18,8 @@ from .engine import run_paper_replay, strategy_decisions
 from .execution import ExecutionStore, TradingControls
 from .governance import Actor, PermissionDenied, Role
 from .models import BacktestConfig
-from .research import run_sma_backtest
 from .registry import ModelRegistry, PromotionCriteria
+from .research import run_sma_backtest
 from .risk import RiskEngine
 from .storage import BacktestStore
 from .validation import (
@@ -28,7 +28,6 @@ from .validation import (
     evaluate_walk_forward,
 )
 from .web import serve
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SOURCE_TYPES = ("HISTORICAL", "DELAYED", "LIVE", "SIMULATED", "SYNTHETIC")
@@ -238,7 +237,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "source_type": dataset.source_type,
             "source_name": dataset.source_name,
             "sha256": dataset.sha256,
-            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+            "generated_at_utc": datetime.now(UTC).isoformat(),
         }
         if args.command == "backtest":
             provenance["evaluation_classification"] = "EXPLORATORY_FULL_HISTORY_NON_PROMOTABLE"
@@ -390,7 +389,7 @@ def ctrader_check(operator: str, config: AppConfig, environ=None, transport=None
 
     import os
 
-    from .brokers.ctrader import CTraderAdapter, CTraderCredentials, NEVER_SENT_BY_CHECK
+    from .brokers.ctrader import NEVER_SENT_BY_CHECK, CTraderAdapter, CTraderCredentials
     from .execution.mode import verify_mode
     from .governance import PermissionGuard, SecretVault
     from .models import RunMode
@@ -423,7 +422,8 @@ def ctrader_check(operator: str, config: AppConfig, environ=None, transport=None
         while quote is None and _time.monotonic() < deadline:
             try:
                 quote = adapter.quote("EURUSD")
-            except Exception:
+            except BrokerUnavailable:
+                # No complete spot yet; the adapter raises this until bid and ask arrive.
                 _time.sleep(0.2)
         account = adapter.account_snapshot()
         capabilities = adapter.capabilities()

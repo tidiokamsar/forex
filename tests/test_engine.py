@@ -1,17 +1,17 @@
 import math
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
+from _support import workspace_tempdir
 from astra.engine import ReplayDecision, run_paper_replay
 from astra.execution import ExecutionStore, OrderState
 from astra.models import Direction, MarketBar
-from _support import workspace_tempdir
 
 
 def synthetic_bars(count=240):
     """Deterministic synthetic EURUSD bars with alternating trends (not market data)."""
 
-    start = datetime(2026, 1, 5, tzinfo=timezone.utc)
+    start = datetime(2026, 1, 5, tzinfo=UTC)
     bars = []
     price = 1.1
     for i in range(count):

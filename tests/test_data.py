@@ -10,12 +10,12 @@ from __future__ import annotations
 import hashlib
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from itertools import pairwise
 from pathlib import Path
 from unittest.mock import patch
 
 from astra.data import MAX_CSV_BYTES, MAX_CSV_FIELD_CHARS, load_bars_csv
-
 
 FIXTURE = Path(__file__).resolve().parents[1] / "data" / "synthetic_eurusd_m15.csv"
 
@@ -52,12 +52,12 @@ class LoadBarsCsvTests(unittest.TestCase):
         self.assertEqual(dataset.dataset_id, dataset.sha256)
         self.assertEqual({bar.instrument for bar in dataset.bars}, {"EURUSD"})
         self.assertTrue(
-            all(bar.timestamp.tzinfo is timezone.utc for bar in dataset.bars)
+            all(bar.timestamp.tzinfo is UTC for bar in dataset.bars)
         )
         self.assertTrue(
             all(
                 (later.timestamp - earlier.timestamp).total_seconds() == 15 * 60
-                for earlier, later in zip(dataset.bars, dataset.bars[1:])
+                for earlier, later in pairwise(dataset.bars)
             )
         )
         closes = [bar.close for bar in dataset.bars]
@@ -68,7 +68,7 @@ class LoadBarsCsvTests(unittest.TestCase):
         ]
         crossovers = sum(
             earlier * later < 0
-            for earlier, later in zip(sma_differences, sma_differences[1:])
+            for earlier, later in pairwise(sma_differences)
         )
         self.assertGreaterEqual(crossovers, 4)
         self.assertEqual(dataset.issues, ())
@@ -79,7 +79,7 @@ class LoadBarsCsvTests(unittest.TestCase):
         )
         dataset = self._load_text(text, source_type="HISTORICAL")
 
-        self.assertEqual(dataset.bars[0].timestamp, datetime(2026, 1, 5, tzinfo=timezone.utc))
+        self.assertEqual(dataset.bars[0].timestamp, datetime(2026, 1, 5, tzinfo=UTC))
         self.assertTrue(dataset.usable)
 
     def test_malformed_row_is_reported_and_dataset_is_unusable(self) -> None:
@@ -144,7 +144,7 @@ class LoadBarsCsvTests(unittest.TestCase):
         self.assertIn("1 missing bar", gap.message)
 
     def test_staleness_applies_only_to_live_or_delayed_sources(self) -> None:
-        now = datetime(2026, 1, 6, 17, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 1, 6, 17, 0, tzinfo=UTC)
         for source_type in ("LIVE", "DELAYED"):
             with self.subTest(source_type=source_type):
                 dataset = self._load_text(
@@ -166,7 +166,7 @@ class LoadBarsCsvTests(unittest.TestCase):
         self.assertNotIn("STALE_DATA", {issue.code for issue in historical.issues})
 
     def test_future_timestamp_is_rejected_for_live_data(self) -> None:
-        now = datetime(2026, 1, 6, 15, 30, tzinfo=timezone.utc)
+        now = datetime(2026, 1, 6, 15, 30, tzinfo=UTC)
         dataset = self._load_text(self.fixture_text, source_type="LIVE", now=now)
 
         self.assertFalse(dataset.usable)
@@ -184,7 +184,7 @@ class LoadBarsCsvTests(unittest.TestCase):
         self.assertNotIn("STALE_DATA", {issue.code for issue in dataset.issues})
 
     def test_simulated_source_is_supported_and_not_checked_against_wall_clock(self) -> None:
-        now = datetime(2026, 1, 6, 17, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 1, 6, 17, 0, tzinfo=UTC)
         dataset = self._load_text(
             self.fixture_text,
             source_type="simulated",

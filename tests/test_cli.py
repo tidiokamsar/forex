@@ -9,9 +9,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from astra.cli import main
 from _support import workspace_tempdir
-
+from astra.cli import main
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
