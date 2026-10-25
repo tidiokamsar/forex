@@ -59,6 +59,7 @@ from .validation import (
     _flat_metrics,
     _fold_ranges,
     _holdout_content_sha256,
+    _holdout_returns,
     _resolve_dataset_hash,
     _result_metrics,
     _scale_costs,
@@ -431,6 +432,7 @@ def _evaluate_strategy_walk_forward(
             dataset_identity_sha256=identity_hash,
             protocol_version=protocol.version,
             plan_manifest=plan,
+            holdout_returns=_holdout_returns(history, development_end),
         )
         recorder.begin(plan_hash, plan, descriptors)
 
@@ -628,6 +630,7 @@ def evaluate_strategy_holdout_once(
         dataset_identity_sha256=identity_hash,
         protocol_version=report.protocol_version,
         plan_manifest=report.plan_manifest,
+        holdout_returns=_holdout_returns(history, holdout_start_index),
     )
     attempt = store.begin_holdout_evaluation(protocol_id=report.plan_sha256, dataset_identity_sha256=identity_hash)
     if attempt["status"] == "COMPLETED":

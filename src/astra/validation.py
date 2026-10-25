@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from itertools import pairwise
 from pathlib import Path
 
-from . import attempts, models, research, risk
+from . import attempts, holdout_reuse, models, research, risk
 from .models import BacktestConfig, BacktestResult, CostModel, MarketBar
 from .research import (
     STRATEGY_NAME,
@@ -371,6 +371,7 @@ def _evaluate_walk_forward(
             dataset_identity_sha256=dataset_identity_hash,
             protocol_version=protocol.version,
             plan_manifest=plan,
+            holdout_returns=_holdout_returns(history, development_end),
         )
         recorder.begin(plan_hash, plan, candidate_descriptors)
 
@@ -712,6 +713,7 @@ def evaluate_holdout_once(
         dataset_identity_sha256=identity_hash,
         protocol_version=walk_forward_report.protocol_version,
         plan_manifest=walk_forward_report.plan_manifest,
+        holdout_returns=_holdout_returns(history, holdout_start_index),
     )
     attempt = store.begin_holdout_evaluation(
         protocol_id=walk_forward_report.plan_sha256,
@@ -1022,9 +1024,11 @@ def _holdout_content_sha256(history: tuple[MarketBar, ...], start: int) -> str:
     time or rescaled give the same fingerprint.
     """
 
-    closes = [bar.close for bar in history[max(0, start - 1):]]
-    returns = [round(math.log(later / earlier), 12) for earlier, later in pairwise(closes)]
-    return _sha256(_canonical_json(returns))
+    return holdout_reuse.content_sha256(_holdout_returns(history, start))
+
+
+def _holdout_returns(history: tuple[MarketBar, ...], start: int) -> list[float]:
+    return holdout_reuse.holdout_returns([bar.close for bar in history[max(0, start - 1):]])
 
 
 def _canonical_json(value: object) -> str:

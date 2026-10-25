@@ -122,42 +122,35 @@ class HoldoutFingerprintEvasionTests(_StoreCase):
         super().setUp()
         self.seal_original()
 
-    # CONFIRMED DEFECT A-1: identical holdout bars (only the label differs) are accepted once the
+    # FIXED IN LOT 4 (was CONFIRMED DEFECT A-1): identical holdout bars (only the label differs) are accepted once the
     # bar BEFORE the holdout is nudged, because that bar's close is part of the fingerprint.
-    @unittest.expectedFailure
     def test_relabelled_copy_with_only_the_pre_holdout_bar_changed_is_refused(self):
         self.assert_reuse_refused(nudge(relabel(BARS), DEVELOPMENT_END - 1, factor=1.0 + 1e-6))
 
-    # CONFIRMED DEFECT A-1: a 1e-9 relative nudge of one holdout close evades the fingerprint.
-    @unittest.expectedFailure
+    # FIXED IN LOT 4 (was CONFIRMED DEFECT A-1): a 1e-9 relative nudge of one holdout close evades the fingerprint.
     def test_relabelled_copy_with_one_holdout_close_nudged_is_refused(self):
         self.assert_reuse_refused(nudge(relabel(BARS), len(BARS) - 1))
 
-    # CONFIRMED DEFECT A-1: same instrument, dates moved two years, one close nudged by 1e-9.
-    @unittest.expectedFailure
+    # FIXED IN LOT 4 (was CONFIRMED DEFECT A-1): same instrument, dates moved two years, one close nudged by 1e-9.
     def test_time_shifted_copy_with_one_holdout_close_nudged_is_refused(self):
         self.assert_reuse_refused(nudge(shift(BARS), len(BARS) - 1))
 
-    # CONFIRMED DEFECT A-1: one bar appended and dates shifted: 39 of the 40 sealed holdout bars are rescored.
-    @unittest.expectedFailure
+    # FIXED IN LOT 4 (was CONFIRMED DEFECT A-1): one bar appended and dates shifted: 39 of the 40 sealed holdout bars are rescored.
     def test_time_shifted_copy_with_holdout_offset_by_one_bar_is_refused(self):
         longer = make_synthetic_bars(401)
         self.assertEqual([bar.close for bar in longer[:400]], [bar.close for bar in BARS])
         self.assert_reuse_refused(shift(longer))
 
-    # CONFIRMED DEFECT A-1: a one-bar-longer holdout (super-range) on a relabelled copy is accepted.
-    @unittest.expectedFailure
+    # FIXED IN LOT 4 (was CONFIRMED DEFECT A-1): a one-bar-longer holdout (super-range) on a relabelled copy is accepted.
     def test_relabelled_copy_with_a_longer_holdout_is_refused(self):
         self.assert_reuse_refused(relabel(BARS), protocol=replace(PROTOCOL, holdout_bars=PROTOCOL.holdout_bars + 1))
 
-    # CONFIRMED DEFECT A-1: a one-bar-shorter holdout (sub-range) on a relabelled copy is accepted.
-    @unittest.expectedFailure
+    # FIXED IN LOT 4 (was CONFIRMED DEFECT A-1): a one-bar-shorter holdout (sub-range) on a relabelled copy is accepted.
     def test_relabelled_copy_with_a_shorter_holdout_is_refused(self):
         self.assert_reuse_refused(relabel(BARS), protocol=replace(PROTOCOL, holdout_bars=PROTOCOL.holdout_bars - 1))
 
-    # CONFIRMED DEFECT A-2: the inverse quote (1/price, e.g. USDEUR) carries the same information
+    # FIXED IN LOT 4 (was CONFIRMED DEFECT A-2): the inverse quote (1/price, e.g. USDEUR) carries the same information
     # but negated returns give another fingerprint, and another label skips the overlap check.
-    @unittest.expectedFailure
     def test_inverted_quote_copy_is_refused(self):
         self.assert_reuse_refused(invert(BARS))
 
@@ -188,21 +181,35 @@ class HoldoutFingerprintEvasionTests(_StoreCase):
 
 
 class LegacyPlanTests(_StoreCase):
-    # CONFIRMED DEFECT A-3: a plan sealed without holdout.content_sha256 (before 8e1c897, or through
-    # seal_research_protocol directly, which does not require it) gives no content protection: the
-    # exact same prices relabelled are accepted.
-    @unittest.expectedFailure
-    def test_relabelled_copy_of_a_legacy_plan_without_fingerprint_is_refused(self):
+    # FIXED IN LOT 4 (was CONFIRMED DEFECT A-3): a new plan without holdout.content_sha256 and its
+    # returns is refused at seal time; a plan already stored without them (pre-Lot 4 database) is
+    # compared by holdout period with every instrument, so a relabelled copy is refused.
+    def legacy_plan(self):
         with overfitting_double():
             report = evaluate()
         legacy = json.loads(_canonical_json(report.plan_manifest))
         del legacy["holdout"]["content_sha256"]
-        self.store.seal_research_protocol(
-            protocol_id=_plan_sha256(_canonical_json(legacy)),
-            dataset_identity_sha256=report.dataset_identity_sha256,
-            protocol_version=report.protocol_version,
-            plan_manifest=legacy,
-        )
+        return report, legacy
+
+    def test_new_plan_without_fingerprint_is_refused_at_seal(self):
+        report, legacy = self.legacy_plan()
+        with self.assertRaisesRegex(ValueError, "content_sha256"):
+            self.store.seal_research_protocol(
+                protocol_id=_plan_sha256(_canonical_json(legacy)),
+                dataset_identity_sha256=report.dataset_identity_sha256,
+                protocol_version=report.protocol_version,
+                plan_manifest=legacy,
+            )
+
+    def test_relabelled_copy_of_a_legacy_plan_without_fingerprint_is_refused(self):
+        report, legacy = self.legacy_plan()
+        with contextlib.closing(sqlite3.connect(self.database)) as db, db:
+            db.execute(
+                "INSERT INTO research_protocols VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (_plan_sha256(_canonical_json(legacy)), report.dataset_identity_sha256, report.protocol_version,
+                 "2020-01-01T00:00:00+00:00", legacy["holdout"]["start"], legacy["holdout"]["end"],
+                 _canonical_json(legacy)),
+            )
         self.assert_reuse_refused(relabel(BARS))
 
 

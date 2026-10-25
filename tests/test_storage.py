@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from _support import workspace_tempdir
+from astra import holdout_reuse
 from astra.models import BacktestResult
 from astra.storage import BacktestStore
 
@@ -46,6 +47,9 @@ def result():
     )
 
 
+HOLDOUT_RETURNS = [0.001, -0.002, 0.0015, -0.0005]
+HOLDOUT_SHA256 = holdout_reuse.content_sha256(HOLDOUT_RETURNS)
+
 class BacktestStoreTests(unittest.TestCase):
     def test_save_run_and_audit_event_are_persisted_together(self):
         with workspace_tempdir() as temp:
@@ -76,6 +80,7 @@ class BacktestStoreTests(unittest.TestCase):
                 "dataset_sha256": "a" * 64,
                 "dataset_identity_sha256": identity,
                 "holdout": {
+                    "content_sha256": HOLDOUT_SHA256,
                     "start": "2024-01-01T00:00:00+00:00",
                     "end": "2024-01-02T00:00:00+00:00",
                 },
@@ -88,12 +93,14 @@ class BacktestStoreTests(unittest.TestCase):
                 dataset_identity_sha256=identity,
                 protocol_version="1.0.0",
                 plan_manifest=manifest,
+                holdout_returns=HOLDOUT_RETURNS,
             )
             store.seal_research_protocol(
                 protocol_id=protocol_id,
                 dataset_identity_sha256=identity,
                 protocol_version="1.0.0",
                 plan_manifest=manifest,
+                holdout_returns=HOLDOUT_RETURNS,
             )
             attempt = store.begin_holdout_evaluation(
                 protocol_id=protocol_id, dataset_identity_sha256=identity
@@ -127,6 +134,7 @@ class BacktestStoreTests(unittest.TestCase):
                 "dataset_sha256": dataset_hash,
                 "dataset_identity_sha256": identity,
                 "holdout": {
+                    "content_sha256": HOLDOUT_SHA256,
                     "start": "2024-01-01T00:00:00+00:00",
                     "end": "2024-01-02T00:00:00+00:00",
                 },
@@ -140,6 +148,7 @@ class BacktestStoreTests(unittest.TestCase):
                 dataset_identity_sha256=identity,
                 protocol_version="1.0.0",
                 plan_manifest=manifest,
+                holdout_returns=HOLDOUT_RETURNS,
             )
             attempt = store.begin_holdout_evaluation(
                 protocol_id=protocol_id, dataset_identity_sha256=identity
@@ -158,6 +167,7 @@ class BacktestStoreTests(unittest.TestCase):
                 "dataset_sha256": "e" * 64,
                 "dataset_identity_sha256": identity,
                 "holdout": {
+                    "content_sha256": HOLDOUT_SHA256,
                     "start": "2024-01-01T12:00:00+00:00",
                     "end": "2024-01-02T00:00:00+00:00",
                 },
@@ -174,6 +184,7 @@ class BacktestStoreTests(unittest.TestCase):
                     dataset_identity_sha256=identity,
                     protocol_version="1.0.0",
                     plan_manifest=alternative_manifest,
+                    holdout_returns=HOLDOUT_RETURNS,
                 )
 
     def test_initialize_preserves_rows_in_a_legacy_backtest_database(self):
@@ -252,6 +263,7 @@ class BacktestStoreTests(unittest.TestCase):
                 "dataset_sha256": "8" * 64,
                 "dataset_identity_sha256": identity,
                 "holdout": {
+                    "content_sha256": HOLDOUT_SHA256,
                     "start": "2024-01-01T00:00:00+00:00",
                     "end": "2024-01-02T00:00:00+00:00",
                 },
@@ -269,6 +281,7 @@ class BacktestStoreTests(unittest.TestCase):
                     dataset_identity_sha256=identity,
                     protocol_version="1.0.0",
                     plan_manifest=manifest,
+                    holdout_returns=HOLDOUT_RETURNS,
                 )
                 attempts.append(
                     store.begin_holdout_evaluation(

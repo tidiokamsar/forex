@@ -23,7 +23,7 @@ from astra.models import BacktestConfig
 from astra.registry import ModelRegistry, PromotionCriteria
 from astra.storage import BacktestStore
 from astra.strategy_validation import default_candidates, evaluate_strategy_holdout_once
-from astra.validation import WalkForwardProtocol, evaluate_walk_forward
+from astra.validation import WalkForwardProtocol, _holdout_returns, evaluate_walk_forward
 from test_features import make_synthetic_bars
 from test_strategy_validation import BARS, PROTOCOL, evaluate, overfitting_double
 
@@ -227,7 +227,8 @@ class StoreWideCountTests(StoreCase):
             report = evaluate()  # no store: nothing recorded
         self.store.seal_research_protocol(protocol_id=report.plan_sha256,
                                           dataset_identity_sha256=report.dataset_identity_sha256,
-                                          protocol_version=report.protocol_version, plan_manifest=report.plan_manifest)
+                                          protocol_version=report.protocol_version, plan_manifest=report.plan_manifest,
+                                          holdout_returns=_holdout_returns(tuple(BARS), len(BARS) - PROTOCOL.holdout_bars))
         registry = self.register(report)
         registry.record_evaluation(actor=AGENT, model_id="wf", version="1", kind="holdout",
                                    evidence={**GOOD_EVIDENCE, "variants_tested": 7},

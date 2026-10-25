@@ -453,7 +453,7 @@ class HoldoutReuseTests(unittest.TestCase):
                 longer = make_synthetic_bars(401)
                 with self.assertRaises(ValueError) as caught:
                     evaluate(bars=longer, store=store)
-            self.assertIn("overlaps the holdout", str(caught.exception))
+            self.assertRegex(str(caught.exception), "overlaps the holdout|price path matches")
 
 
 class ManifestBindingTests(unittest.TestCase):

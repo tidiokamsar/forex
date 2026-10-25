@@ -6,12 +6,13 @@ import hashlib
 import json
 import sqlite3
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from . import holdout_reuse
 from .attempts import SCHEMA_SQL as ATTEMPT_SCHEMA_SQL
 from .models import BacktestResult
 
@@ -79,6 +80,12 @@ class BacktestStore:
                     holdout_end TEXT NOT NULL,
                     plan_json TEXT NOT NULL
                 );
+                -- Log returns of each sealed holdout, kept out of the plan so they are never
+                -- shown before scoring; used to refuse a holdout that reuses a sealed price path.
+                CREATE TABLE IF NOT EXISTS holdout_signatures (
+                    protocol_id TEXT PRIMARY KEY REFERENCES research_protocols(protocol_id),
+                    returns_json TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS holdout_evaluations (
                     evaluation_id TEXT PRIMARY KEY,
                     protocol_id TEXT NOT NULL REFERENCES research_protocols(protocol_id),
@@ -109,8 +116,16 @@ class BacktestStore:
         dataset_identity_sha256: str,
         protocol_version: str,
         plan_manifest: dict[str, Any],
+        holdout_returns: Sequence[float] | None = None,
     ) -> None:
-        """Store an immutable plan manifest before any holdout is scored."""
+        """Store an immutable plan manifest before any holdout is scored.
+
+        A new plan must carry ``holdout.content_sha256`` and the holdout's log
+        returns (``holdout_returns``, which must hash to it). The plan is refused
+        when its holdout shares a price path with any sealed holdout, whatever
+        the label, dates, scale or quote direction (see ``astra.holdout_reuse``).
+        Re-sealing the identical plan is idempotent and needs no returns.
+        """
 
         plan_json = json.dumps(
             plan_manifest,
@@ -132,6 +147,21 @@ class BacktestStore:
         now = _now()
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            same = db.execute(
+                "SELECT plan_json, dataset_sha256 FROM research_protocols WHERE protocol_id = ?", (protocol_id,)
+            ).fetchone()
+            if same is not None:
+                if same["plan_json"] != plan_json:
+                    raise ValueError("sealed protocol ID already exists with different content")
+                if same["dataset_sha256"] != dataset_identity_sha256:
+                    raise ValueError("sealed protocol ID is associated with a different market-bar identity")
+                return
+            content = holdout.get("content_sha256")
+            if not content or holdout_returns is None:
+                raise ValueError("a new plan must include holdout.content_sha256 and the holdout returns")
+            returns = [float(value) for value in holdout_returns]
+            if holdout_reuse.content_sha256(returns) != content:
+                raise ValueError("holdout returns do not match holdout.content_sha256")
             existing_for_dataset = db.execute(
                 "SELECT protocol_id FROM research_protocols WHERE dataset_sha256 = ? LIMIT 1",
                 (dataset_identity_sha256,),
@@ -147,21 +177,26 @@ class BacktestStore:
             new_start = datetime.fromisoformat(str(holdout["start"]))
             new_end = datetime.fromisoformat(str(holdout["end"]))
             instrument = plan_manifest.get("instrument")
-            content = holdout.get("content_sha256")
             for other in db.execute(
-                "SELECT protocol_id, holdout_start, holdout_end, plan_json FROM research_protocols WHERE dataset_sha256 <> ?",
+                """SELECT p.protocol_id, p.holdout_start, p.holdout_end, p.plan_json, s.returns_json
+                   FROM research_protocols p LEFT JOIN holdout_signatures s ON s.protocol_id = p.protocol_id
+                   WHERE p.dataset_sha256 <> ?""",
                 (dataset_identity_sha256,),
             ).fetchall():
                 other_plan = json.loads(other["plan_json"])
-                if content and (other_plan.get("holdout") or {}).get("content_sha256") == content:
-                    # Same price path relabelled, shifted in time or rescaled: the holdout is already spent.
+                other_returns = json.loads(other["returns_json"]) if other["returns_json"] else None
+                if (other_plan.get("holdout") or {}).get("content_sha256") == content or (
+                    other_returns is not None and holdout_reuse.shares_price_path(returns, other_returns)
+                ):
+                    # Same price path relabelled, shifted, rescaled, inverted or nudged: the holdout is spent.
                     raise ValueError(
                         "the holdout price path matches the holdout of an already sealed plan "
                         f"({other['protocol_id'][:12]}); a holdout can be scored only once"
                     )
                 other_instrument = other_plan.get("instrument")
-                if instrument and other_instrument and instrument != other_instrument:
+                if other_returns is not None and instrument and other_instrument and instrument != other_instrument:
                     continue  # another instrument's holdout is independent data
+                # A plan sealed without stored returns (before Lot 4) is compared by period with every instrument.
                 other_start = datetime.fromisoformat(other["holdout_start"])
                 other_end = datetime.fromisoformat(other["holdout_end"])
                 if new_start <= other_end and other_start <= new_end:
@@ -185,6 +220,11 @@ class BacktestStore:
                     plan_json,
                 ),
             ).rowcount == 1
+            if inserted:
+                db.execute(
+                    "INSERT INTO holdout_signatures (protocol_id, returns_json) VALUES (?, ?)",
+                    (protocol_id, json.dumps(returns, allow_nan=False, separators=(",", ":"))),
+                )
             row = db.execute(
                 "SELECT * FROM research_protocols WHERE protocol_id = ?",
                 (protocol_id,),
