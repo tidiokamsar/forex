@@ -22,6 +22,9 @@ GOOD_EVIDENCE = {
     "edge_vs_baseline": 0.02,
     "cost_stress_net_pnl": 15.0,
     "holdout_used": True,
+    "pbo": 0.1,
+    "deflated_sharpe_probability": 0.97,
+    "variants_tested": 7,
 }
 
 
@@ -59,6 +62,41 @@ class RegistryTests(unittest.TestCase):
             self.registry.promote(actor=REVIEWER, model_id="momentum", version="1.0.0", reason="try")
         events = [e["event_type"] for e in BacktestStore(self.registry.path).audit_events()]
         self.assertIn("model.promotion_refused", events)
+
+    def test_good_evidence_meets_every_gate(self):
+        self.register("1.0.0", GOOD_EVIDENCE)
+        self.assertEqual(self.registry.check_promotion("momentum", "1.0.0"), ())
+
+    def test_missing_overfitting_evidence_blocks_promotion(self):
+        evidence = {key: value for key, value in GOOD_EVIDENCE.items() if key not in ("pbo", "deflated_sharpe_probability")}
+        self.register("1.0.0", evidence)
+        failures = self.registry.check_promotion("momentum", "1.0.0")
+        self.assertEqual(failures, ("overfitting_check_missing",))
+        self.register("1.1.0", {**GOOD_EVIDENCE, "variants_tested": None})
+        self.assertEqual(self.registry.check_promotion("momentum", "1.1.0"), ("overfitting_check_missing",))
+        with self.assertRaises(PromotionError):
+            self.registry.promote(actor=REVIEWER, model_id="momentum", version="1.0.0", reason="try")
+
+    def test_high_pbo_blocks_promotion(self):
+        self.register("1.0.0", {**GOOD_EVIDENCE, "pbo": 0.31})
+        self.assertEqual(self.registry.check_promotion("momentum", "1.0.0"), ("pbo_above_threshold",))
+
+    def test_low_deflated_sharpe_probability_blocks_promotion(self):
+        self.register("1.0.0", {**GOOD_EVIDENCE, "deflated_sharpe_probability": 0.94})
+        self.assertEqual(self.registry.check_promotion("momentum", "1.0.0"), ("deflated_sharpe_below_threshold",))
+
+    def test_overfitting_gate_can_be_disabled_only_at_registration(self):
+        self.registry.register_candidate(
+            actor=AGENT, model_id="legacy", version="1", manifest=MANIFEST,
+            criteria=PromotionCriteria(require_overfitting_check=False),
+        )
+        evidence = {key: value for key, value in GOOD_EVIDENCE.items() if key not in ("pbo", "deflated_sharpe_probability", "variants_tested")}
+        self.registry.record_evaluation(model_id="legacy", version="1", kind="holdout", evidence=evidence)
+        self.assertEqual(self.registry.check_promotion("legacy", "1"), ())
+        with self.assertRaises(ValueError):
+            PromotionCriteria(max_pbo=1.5)
+        with self.assertRaises(ValueError):
+            PromotionCriteria(min_deflated_sharpe_probability=-0.1)
 
     def test_agent_cannot_promote(self):
         self.register("1.0.0", GOOD_EVIDENCE)
