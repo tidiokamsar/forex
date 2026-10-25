@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .attempts import SCHEMA_SQL as ATTEMPT_SCHEMA_SQL
 from .models import BacktestResult
 
 
@@ -98,6 +99,8 @@ class BacktestStore:
                     ON research_protocols(dataset_sha256);
                 """
             )
+            # Append-only, hash-chained attempt registry (see astra.attempts).
+            db.executescript(ATTEMPT_SCHEMA_SQL)
 
     def seal_research_protocol(
         self,

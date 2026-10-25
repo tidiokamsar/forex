@@ -22,6 +22,8 @@
 - cTrader token refresh is refused unless the caller passes a `TokenStore`; none is bundled, so rotated tokens are never written to an unchosen location.
 - Limitation of the permit: it stops accidental, strategy and LLM bypasses inside ASTRA. Code that deliberately imports the private permit authority could forge one; that requires a reviewed code change.
 
+- Research attempt registry (`attempts`): every scored variant (selected, rejected, failed, interrupted) is appended to `research_attempt_events` with a hash chain (`prev_hash`, `row_hash`). Triggers refuse UPDATE, DELETE and unlinked INSERT; `astra attempts verify` detects edited, removed and reordered rows, missing triggers and a truncated tail. Promotion is refused with `attempt_log_tampered` if the chain does not verify and with `trial_count_understated` if the evidence's `variants_tested` is below the store-wide trial count.
+
 ## Known gaps
 
 - No user authentication, authorization, dashboard TLS, network access controls, secret store, external or human-signed order authorization, or multi-user isolation. (The internal HMAC execution permit proves only that the gateway's checks ran in this process; it is not a human signature.) The service must remain on loopback.
@@ -29,6 +31,7 @@
 - The importer limits total bytes, rows, columns, field length, and stored issue count; a size-limit error rejects the import before data is parsed.
 - Reconciliation is implemented and tested against the simulated broker only. Backup and restore are tested locally with the simulator only; backups are unencrypted copies of the database and must be protected like it. No dependency scanner, SBOM, secure token store, or external service supervisor has been implemented.
 - The local SQLite audit trail is not tamper-proof or externally replicated.
+- The attempt hash chain is tamper-evident, not tamper-proof: whoever can write the database file can drop the triggers and rewrite the whole chain consistently (hashes included), or replace the file. Only a chain head kept outside the database (from `astra attempts list|count|verify`, stored elsewhere) and passed as `--expected-head` detects that, and only for rows up to the anchor. Attempts run without a store or against another database file are not recorded.
 
 ## Reporting a security issue
 
