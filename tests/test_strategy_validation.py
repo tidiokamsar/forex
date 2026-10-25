@@ -79,8 +79,8 @@ class _OverfittingDouble:
         self.pbo_calls = []
         self.dsr_calls = []
 
-    def probability_of_backtest_overfitting(self, performance, n_slices):
-        self.pbo_calls.append({"performance": performance, "n_slices": n_slices})
+    def probability_of_backtest_overfitting(self, performance, n_slices, **options):
+        self.pbo_calls.append({"performance": performance, "n_slices": n_slices, **options})
         return _DoublePBOResult(
             pbo=self.pbo,
             n_variants=len(performance[0]),
@@ -515,6 +515,147 @@ class PerVariantGuardTests(unittest.TestCase):
                                     dsr_returns=[0.01 * (i % 5 - 2) for i in range(40)], trial_sharpe_variance=None)
         self.assertIsNone(result.pbo)
         self.assertTrue(any("variants have fewer than" in error for error in result.errors))
+
+class MarkToMarketPeriodTests(unittest.TestCase):
+    """Lot 4: the PBO matrix is built from mark-to-market equity changes, not from P&L booked at exit."""
+
+    @staticmethod
+    def bars(closes):
+        from datetime import UTC, datetime, timedelta
+
+        from astra.models import MarketBar
+
+        start = datetime(2026, 1, 5, tzinfo=UTC)
+        return tuple(
+            MarketBar("EURUSD", start + timedelta(minutes=15 * index), close, close + 0.001, close - 0.001, close)
+            for index, close in enumerate(closes)
+        )
+
+    @staticmethod
+    def trade(history, entry, exit_index, exit_price, units=1000.0, costs=2.0):
+        from astra.models import Direction, Trade
+
+        gross = (exit_price - history[entry].open) * units
+        return Trade("EURUSD", Direction.LONG, history[entry].timestamp, history[exit_index].timestamp,
+                     history[entry].open, exit_price, units, gross, costs, gross - costs, "strategy_exit")
+
+    def test_open_position_is_revalued_each_period(self):
+        from types import SimpleNamespace
+
+        # 10 bars, two 5-bar periods. A long of 1000 units enters at bar 1 (open 1.1010) and exits at
+        # bar 8 at 1.1000. Closes rise to 1.1060 by bar 4 (end of period 1) and fall back afterwards.
+        closes = [1.1000, 1.1010, 1.1030, 1.1050, 1.1060, 1.1040, 1.1020, 1.1010, 1.1000, 1.1000]
+        history = self.bars(closes)
+        trade = self.trade(history, 1, 8, 1.1000)
+        result = SimpleNamespace(trades=(trade,))
+        pnl = strategy_validation.mark_to_market_bar_pnl(history, 0, 10, result)
+        # Bar 1: (1.1010 - 1.1010) * 1000 - 1 (half cost) = -1; bar 2: +2; bar 3: +2; bar 4: +1;
+        # bar 5: -2; bar 6: -2; bar 7: -1; bar 8: realised gross -1 minus mark +0 = -1, minus 1 cost.
+        expected = [0.0, -1.0, 2.0, 2.0, 1.0, -2.0, -2.0, -1.0, -2.0, 0.0]
+        for actual, wanted in zip(pnl, expected, strict=True):
+            self.assertAlmostEqual(actual, wanted, places=9)
+        self.assertAlmostEqual(sum(pnl), trade.net_pnl, places=9)
+
+        labels, rows, counts = strategy_validation._period_rows(history, 0, 10, ["a"], {"a": result}, "w")
+        self.assertEqual(labels, ["w_p1", "w_p2"])
+        # Mark-to-market: +4 in period 1 (open gain), -7 in period 2.
+        self.assertAlmostEqual(rows[0][0], 4.0, places=9)
+        self.assertAlmostEqual(rows[1][0], -7.0, places=9)
+        self.assertEqual(counts, [(0,), (1,)])
+        # The former exit-time attribution booked the whole -3 net in period 2 and 0 in period 1.
+        self.assertNotAlmostEqual(rows[0][0], 0.0, places=6)
+        self.assertAlmostEqual(rows[0][0] + rows[1][0], trade.net_pnl, places=9)
+
+    def test_same_bar_entry_and_exit_and_window_check(self):
+        from types import SimpleNamespace
+
+        history = self.bars([1.1, 1.1, 1.1, 1.1])
+        trade = self.trade(history, 2, 2, 1.0995)
+        pnl = strategy_validation.mark_to_market_bar_pnl(history, 0, 4, SimpleNamespace(trades=(trade,)))
+        self.assertAlmostEqual(pnl[2], trade.net_pnl, places=9)
+        self.assertEqual(pnl[:2] + pnl[3:], [0.0, 0.0, 0.0])
+        with self.assertRaises(ValueError):
+            strategy_validation.mark_to_market_bar_pnl(history, 3, 4, SimpleNamespace(trades=(trade,)))
+
+    def test_walk_forward_matrix_is_mark_to_market(self):
+        with overfitting_double():
+            report = evaluate()
+        overfitting = report.overfitting
+        self.assertEqual(overfitting.dsr_sharpe_unit, strategy_validation.DSR_SHARPE_UNIT)
+        self.assertEqual(overfitting.bar_seconds, 900)
+        self.assertEqual(len(overfitting.trade_count_matrix), len(overfitting.performance_matrix))
+        # Every trade is counted once in the period of its exit.
+        for fold in report.folds:
+            for kind in ("validation", "test"):
+                prefix = f"fold{fold.fold}_{kind}_p"
+                rows = [row for label, row in zip(overfitting.slice_labels, overfitting.trade_count_matrix,
+                                                  strict=True) if label.startswith(prefix)]
+                for column, trial in enumerate(fold.trials):
+                    self.assertEqual(sum(row[column] for row in rows), getattr(trial, kind).trade_count)
+        # The DSR sample has one return per development test bar of the selected candidate.
+        test_bars = sum(fold.test_observations for fold in report.folds)
+        self.assertEqual(len(overfitting.dsr_returns), test_bars)
+        self.assertIn("mark-to-market", report.plan_manifest["overfitting"]["pbo_matrix"])
+
+
+@unittest.skipUnless(HAS_OVERFITTING_MODULE, "astra.overfitting is not integrated")
+class TrialUniverseAndGuardTests(unittest.TestCase):
+    MATRIX = tuple(tuple(float((r * r * 3 + r * 7 + c * 5 + c * r) % 11 - 5) for c in range(4)) for r in range(16))
+    RETURNS = tuple(0.002 * ((i * 7) % 11 - 4) for i in range(120))
+
+    def assess(self, **kwargs):
+        from astra.strategy_validation import assess_overfitting
+
+        options = {"variants_tested": 4, "dsr_returns": self.RETURNS, "trial_sharpe_variance": None,
+                   "initial_equity": 10_000.0}
+        options.update(kwargs)
+        return assess_overfitting(self.MATRIX, [f"p{r}" for r in range(16)], **options)
+
+    def test_external_trial_count_deflates_more_than_the_plan(self):
+        from astra.overfitting import TrialUniverse
+
+        plan = self.assess()
+        self.assertEqual(plan.status, "COMPLETED")
+        self.assertEqual(plan.n_trials_used, 4)
+        self.assertEqual(plan.deflated_sharpe_probability, plan.deflated_sharpe_probability_plan_only)
+        wider = self.assess(trial_universe=TrialUniverse(n_trials=400, source="store"))
+        self.assertEqual(wider.n_trials_used, 400)
+        self.assertEqual(wider.deflated_sharpe_result["n_trials"], 400)
+        self.assertEqual(wider.trial_resolution["n_trials_source"], "universe:store")
+        self.assertLess(wider.deflated_sharpe_probability, plan.deflated_sharpe_probability)
+        self.assertEqual(wider.deflated_sharpe_probability_plan_only, plan.deflated_sharpe_probability)
+
+    def test_pbo_uses_the_selection_rule(self):
+        result = self.assess()
+        self.assertTrue(result.pbo_result["metric"].startswith("astra_selection_score"))
+        self.assertEqual(result.pbo_result["in_sample_tie_policy"],
+                         "worst_out_of_sample_among_in_sample_ties_then_lowest_index")
+
+    def test_mostly_flat_dsr_sample_is_low_information(self):
+        returns = (0.0,) * 100 + tuple(0.01 * (i % 3 - 1) for i in range(20))
+        result = self.assess(dsr_returns=returns)
+        self.assertIsNone(result.deflated_sharpe_probability)
+        self.assertTrue(any("non-zero of 120 returns" in error for error in result.errors))
+
+    def test_two_slices_are_low_information(self):
+        from astra.strategy_validation import assess_overfitting
+
+        matrix = [list(row) for row in self.MATRIX[:7]]
+        result = assess_overfitting(matrix, [f"p{r}" for r in range(7)], variants_tested=4,
+                                    dsr_returns=self.RETURNS, trial_sharpe_variance=None)
+        self.assertEqual(result.n_slices, 2)
+        self.assertIsNone(result.pbo)
+        self.assertIn("pbo: 2 slices (need at least 4)", result.errors)
+
+    def test_mostly_abstaining_pbo_is_low_information(self):
+        # One trade per variant in block 0 and one in block 1, two required: only the 15 of 70
+        # combinations holding both blocks in-sample can select, 55 abstain (> 50%).
+        counts = [[0] * 4 for _ in range(16)]
+        counts[0] = counts[2] = [1, 1, 1, 1]
+        result = self.assess(trade_counts=counts, minimum_candidate_trades=2)
+        self.assertIsNone(result.pbo)
+        self.assertTrue(any("no eligible in-sample variant" in error for error in result.errors))
+
 
 class HoldoutContentReuseTests(unittest.TestCase):
     """Lot 3 QA round 3: the same holdout prices relabelled or shifted in time cannot be scored again."""

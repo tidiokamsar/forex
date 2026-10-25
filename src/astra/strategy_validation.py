@@ -25,6 +25,7 @@ import statistics
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import UTC, datetime
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -66,18 +67,35 @@ from .validation import (
     _sha256,
 )
 
-STRATEGY_VALIDATION_VERSION = "1.0.0"
+STRATEGY_VALIDATION_VERSION = "1.1.0"
 SELECTION_METRIC = validation.SELECTION_METRIC
 MAX_CANDIDATES = validation.MAX_CANDIDATES
 MAX_PBO_SLICES = 8
 # CSCV needs per-period returns, not one total per window: each development
-# window is split into periods of this many bars and each candidate's trade
-# P&L is attributed to the period in which the trade exits.
+# window is split into periods of this many bars and each candidate's
+# mark-to-market P&L (equity change from one period close to the next,
+# open positions revalued at the bar close) fills the period.
 PBO_PERIOD_BARS = 5
 # Minimum information before the statistics are trusted (otherwise the gate stays unmet):
 # the deflated Sharpe needs a real sample, and the PBO matrix must not be mostly empty or repetitive.
 MIN_DSR_RETURNS = 30
 MIN_PBO_NONZERO_ROW_FRACTION = 0.5
+# C(2, 1) = 2 combinations can only give PBO 0, 0.5 or 1; at least 4 slices (6 combinations) are required.
+MIN_PBO_SLICES = 4
+# More than this fraction of CSCV combinations without an eligible in-sample variant leaves too little evidence.
+MAX_PBO_ABSTAINED_FRACTION = 0.5
+PBO_MATRIX = (
+    "mark-to-market net P&L per PBO_PERIOD_BARS-bar period of each development window and variant: "
+    "change of (realised net P&L + open position revalued at the bar close) between period closes; "
+    "half of each trade's round-trip cost is charged at entry, half at exit"
+)
+PBO_SELECTION = (
+    "in-sample selection and out-of-sample ranking both use the ASTRA selection rule "
+    "(net P&L - initial_equity * max drawdown % / 100) on the chronologically joined periods; "
+    "only variants with at least minimum_candidate_trades trades exiting in the in-sample periods are eligible; "
+    "in-sample ties take the tied variant with the worst out-of-sample score"
+)
+DSR_SHARPE_UNIT = "per_bar_mark_to_market_net_return_on_initial_equity"
 FLAT_BASELINE_NAME = "NO_POSITION@1"
 FAMILIES = ("sma", "momentum", "breakout")
 EXCLUDED_FAMILIES = {
@@ -87,13 +105,15 @@ EXCLUDED_FAMILIES = {
     ),
 }
 DSR_SAMPLE = (
-    "per-trade net return (net P&L / initial equity) of the final selected candidate on "
-    "development test windows (never used for selection), plus the holdout trades once evaluated"
+    "per-bar mark-to-market net return (P&L / initial equity) of the final selected candidate on "
+    "development test windows (never used for selection), plus the holdout bars once evaluated"
 )
 DSR_TRIAL_VARIANCE = (
-    "sample variance across candidates of the per-trade Sharpe-like ratio on validation windows "
-    "(candidates with fewer than 2 validation trades or zero dispersion are omitted)"
+    "largest of: 1 / (T - 1) for the DSR sample length T; the sample variance across candidates of the per-bar "
+    "mark-to-market Sharpe on validation windows (candidates with zero dispersion omitted; used only with at "
+    "least overfitting.MIN_TRIAL_SHARPES_FOR_VARIANCE values); the same variance over an external TrialUniverse"
 )
+DSR_TRIAL_COUNT = "max(variants tested in this plan, TrialUniverse.n_trials when supplied); the plan count is a floor"
 
 _FAMILY_SPECS: dict[str, tuple[type, str, str, Any]] = {
     "sma": (SmaBaselineConfig, SMA_BASELINE_NAME, SMA_BASELINE_VERSION, evaluate_sma_baseline),
@@ -224,8 +244,14 @@ class OverfittingAssessment:
     """Inputs and outputs of the PBO and deflated Sharpe checks.
 
     ``status`` is ``COMPLETED`` when both statistics were computed,
-    ``INCOMPLETE`` when one raised, and ``UNAVAILABLE`` when the statistics
-    module is not installed; missing values keep the registry gates unmet.
+    ``INCOMPLETE`` when one raised, ``LOW_INFORMATION`` when a guard refused
+    to compute one, and ``UNAVAILABLE`` when the statistics module is not
+    installed; missing values keep the registry gates unmet.
+
+    ``deflated_sharpe_probability`` uses ``n_trials_used`` (the external trial
+    universe when supplied, never fewer than the plan's variants);
+    ``deflated_sharpe_probability_plan_only`` uses the plan's count only and is
+    therefore an optimistic upper bound kept for comparison.
     """
 
     status: str
@@ -242,6 +268,17 @@ class OverfittingAssessment:
     trial_sharpe_variance: float | None
     trial_sharpe_variance_method: str
     errors: tuple[str, ...]
+    trade_count_matrix: tuple[tuple[int, ...], ...] = ()
+    minimum_candidate_trades: int = 0
+    initial_equity: float | None = None
+    pbo_matrix: str = PBO_MATRIX
+    pbo_selection: str = PBO_SELECTION
+    trial_sharpes: tuple[float, ...] = ()
+    dsr_sharpe_unit: str = DSR_SHARPE_UNIT
+    bar_seconds: int | None = None
+    n_trials_used: int | None = None
+    trial_resolution: dict | None = None
+    deflated_sharpe_probability_plan_only: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,12 +357,17 @@ def evaluate_strategy_walk_forward(
     cost_model: CostModel | None = None,
     dataset_sha256: str | None = None,
     store=None,
+    trial_universe: Any = None,
 ) -> StrategyWalkForwardReport:
     """Select on validation windows across families and score disjoint tests.
 
     With ``store`` the plan is sealed before any window is scored; a different
     plan for the same canonical dataset identity is rejected by the store. No
     metric is computed over the reserved final holdout here.
+
+    ``trial_universe`` (an ``astra.overfitting.TrialUniverse``) supplies the
+    trials run outside this plan for the deflated Sharpe; it is not part of the
+    sealed plan because it grows over time.
     """
 
     history, chosen, cost_model = _prepare(bars, candidates, protocol, initial_equity, cost_model)
@@ -371,15 +413,15 @@ def evaluate_strategy_walk_forward(
         "cost_model": _cost_payload(cost_model),
         "cost_stress": "signals use base costs; simulated costs scaled by each protocol multiplier",
         "overfitting": {
-            "pbo_matrix": (
-                "net trade P&L per PBO_PERIOD_BARS-bar period of each development window "
-                "(by trade exit time) and variant"
-            ),
+            "pbo_matrix": PBO_MATRIX,
+            "pbo_selection": PBO_SELECTION,
             "pbo_period_bars": PBO_PERIOD_BARS,
             "n_slices": n_slices,
             "max_slices": MAX_PBO_SLICES,
             "dsr_sample": DSR_SAMPLE,
+            "dsr_sharpe_unit": DSR_SHARPE_UNIT,
             "dsr_trial_variance": DSR_TRIAL_VARIANCE,
+            "dsr_trial_count": DSR_TRIAL_COUNT,
         },
         "folds": [
             {
@@ -419,9 +461,10 @@ def evaluate_strategy_walk_forward(
     ids = tuple(candidate.candidate_id for candidate in chosen)
     folds: list[StrategyFold] = []
     matrix: list[tuple[float, ...]] = []
+    counts: list[tuple[int, ...]] = []
     labels: list[str] = []
-    validation_trades: dict[str, list[float]] = {cid: [] for cid in ids}
-    test_trades: dict[str, list[float]] = {cid: [] for cid in ids}
+    validation_bar_returns: dict[str, list[float]] = {cid: [] for cid in ids}
+    test_bar_returns: dict[str, list[float]] = {cid: [] for cid in ids}
     for ordinal, (vs, ve, ts, te) in enumerate(ranges, start=1):
         # 1) Validation only, then selection. Test results do not exist yet.
         validation_results = {
@@ -490,26 +533,35 @@ def evaluate_strategy_walk_forward(
                 ),
             )
         )
-        for kind, (start, stop), results in (
-            ("validation", (vs, ve), validation_results),
-            ("test", (ts, te), test_results),
+        for kind, (start, stop), results, bar_returns in (
+            ("validation", (vs, ve), validation_results, validation_bar_returns),
+            ("test", (ts, te), test_results, test_bar_returns),
         ):
-            period_labels, period_rows = _period_rows(history, start, stop, ids, results, f"fold{ordinal}_{kind}")
+            bar_pnl = {cid: mark_to_market_bar_pnl(history, start, stop, results[cid]) for cid in ids}
+            period_labels, period_rows, period_counts = _period_rows(
+                history, start, stop, ids, results, f"fold{ordinal}_{kind}", bar_pnl
+            )
             labels.extend(period_labels)
             matrix.extend(period_rows)
-        for cid in ids:
-            validation_trades[cid].extend(_trade_returns(validation_results[cid], initial_equity))
-            test_trades[cid].extend(_trade_returns(test_results[cid], initial_equity))
+            counts.extend(period_counts)
+            for cid in ids:
+                bar_returns[cid].extend(value / initial_equity for value in bar_pnl[cid])
 
     final_selection = _final_selection(chosen, folds, protocol.minimum_candidate_trades)
     final_id = next((item.candidate_id for item in final_selection if item.selected), None)
-    trial_sharpes = [value for value in (_sharpe(validation_trades[cid]) for cid in ids) if value is not None]
+    trial_sharpes = tuple(value for value in (_sharpe(validation_bar_returns[cid]) for cid in ids) if value is not None)
     overfitting = assess_overfitting(
         matrix,
         labels,
         variants_tested=len(chosen),
-        dsr_returns=test_trades[final_id] if final_id else (),
-        trial_sharpe_variance=statistics.variance(trial_sharpes) if len(trial_sharpes) >= 2 else None,
+        dsr_returns=test_bar_returns[final_id] if final_id else (),
+        trial_sharpe_variance=None,
+        trade_counts=counts,
+        minimum_candidate_trades=protocol.minimum_candidate_trades,
+        initial_equity=initial_equity,
+        trial_sharpes=trial_sharpes,
+        bar_seconds=_bar_seconds(history),
+        trial_universe=trial_universe,
     )
     denominator = initial_equity * len(folds)
     return StrategyWalkForwardReport(
@@ -555,12 +607,14 @@ def evaluate_strategy_holdout_once(
     initial_equity: float = 10_000.0,
     cost_model: CostModel | None = None,
     dataset_sha256: str | None = None,
+    trial_universe: Any = None,
 ) -> StrategyHoldoutEvaluation | dict:
     """Score the reserved final block once, after a durable STARTED record.
 
     Selection is recomputed from validation windows and must reproduce the
     sealed plan. A completed retry returns the stored report (a ``dict``);
-    a STARTED or FAILED attempt stays consumed.
+    a STARTED or FAILED attempt stays consumed. ``trial_universe`` is passed
+    to the deflated Sharpe as in ``evaluate_strategy_walk_forward``.
     """
 
     history, chosen, cost_model = _prepare(bars, candidates, protocol, initial_equity, cost_model)
@@ -595,6 +649,7 @@ def evaluate_strategy_holdout_once(
         initial_equity=initial_equity,
         cost_model=cost_model,
         dataset_sha256=dataset_sha256,
+        trial_universe=trial_universe,
     )
     if verified.plan_sha256 != report.plan_sha256:
         raise ValueError("recomputed plan does not match the sealed plan")
@@ -643,14 +698,24 @@ def evaluate_strategy_holdout_once(
             for multiplier in protocol.cost_stress_multipliers
         )
         dev = verified.overfitting
+        holdout_returns = (
+            [value / initial_equity for value in mark_to_market_bar_pnl(history, holdout_start_index, end,
+                                                                         selected_result)]
+            if selected_result
+            else []
+        )
         overfitting = assess_overfitting(
             dev.performance_matrix,
             dev.slice_labels,
             variants_tested=verified.variants_tested,
-            dsr_returns=(
-                (*dev.dsr_returns, *_trade_returns(selected_result, initial_equity)) if selected_result else ()
-            ),
-            trial_sharpe_variance=dev.trial_sharpe_variance,
+            dsr_returns=(*dev.dsr_returns, *holdout_returns) if selected_result else (),
+            trial_sharpe_variance=None,
+            trade_counts=dev.trade_count_matrix,
+            minimum_candidate_trades=dev.minimum_candidate_trades,
+            initial_equity=dev.initial_equity,
+            trial_sharpes=dev.trial_sharpes,
+            bar_seconds=dev.bar_seconds,
+            trial_universe=trial_universe,
         )
         selected_metrics = _result_metrics(selected_result) if selected_result else None
         evaluation = StrategyHoldoutEvaluation(
@@ -725,6 +790,39 @@ def holdout_evidence(report: StrategyHoldoutEvaluation | Mapping[str, Any]) -> d
     return {key: values[key] for key in EVIDENCE_FIELDS}
 
 
+def mark_to_market_bar_pnl(
+    history: tuple[MarketBar, ...], start: int, stop: int, result: BacktestResult
+) -> list[float]:
+    """Net P&L of ``result`` for each bar ``history[start:stop]``, marked to market at each bar close.
+
+    Bar ``i`` holds the change of ``realised net P&L + open position value`` from the
+    close of bar ``i - 1`` (or the window start) to the close of bar ``i``. An open
+    position is valued at ``(close - entry_price) * direction * units``; at the exit
+    bar the realised gross P&L replaces the mark. Half of the trade's round-trip
+    cost is charged on the entry bar and half on the exit bar, so the bars of a
+    trade sum to its ``net_pnl`` exactly and the window sums to ``result.net_pnl``.
+    """
+
+    index_at = {history[index].timestamp: index for index in range(start, stop)}
+    pnl = [0.0] * (stop - start)
+    for trade in result.trades:
+        entry = index_at.get(trade.entry_time)
+        exit_index = index_at.get(trade.exit_time)
+        if entry is None or exit_index is None or exit_index < entry:
+            raise ValueError("trade entry and exit must fall on bars of the evaluated window, in order")
+        sign = trade.direction.sign
+        marked = 0.0
+        for index in range(entry, exit_index):
+            value = (history[index].close - trade.entry_price) * sign * trade.units
+            pnl[index - start] += value - marked
+            marked = value
+        pnl[exit_index - start] += trade.gross_pnl - marked
+        entry_cost = trade.costs / 2.0
+        pnl[entry - start] -= entry_cost
+        pnl[exit_index - start] -= trade.costs - entry_cost
+    return pnl
+
+
 def _period_bounds(start: int, stop: int) -> list[tuple[int, int]]:
     return [(first, min(first + PBO_PERIOD_BARS, stop)) for first in range(start, stop, PBO_PERIOD_BARS)]
 
@@ -733,19 +831,33 @@ def _period_count(ranges) -> int:
     return sum(len(_period_bounds(vs, ve)) + len(_period_bounds(ts, te)) for vs, ve, ts, te in ranges)
 
 
-def _period_rows(history, start, stop, ids, results, label_prefix):
-    """Net trade P&L per candidate for each PBO_PERIOD_BARS period of one window, by trade exit time."""
+def _period_rows(history, start, stop, ids, results, label_prefix, bar_pnl=None):
+    """Mark-to-market net P&L and exiting-trade counts per candidate for each period of one window."""
 
     bounds = _period_bounds(start, stop)
     labels = [f"{label_prefix}_p{number}" for number in range(1, len(bounds) + 1)]
+    if bar_pnl is None:
+        bar_pnl = {cid: mark_to_market_bar_pnl(history, start, stop, results[cid]) for cid in ids}
+    rows = [
+        tuple(math.fsum(bar_pnl[cid][first - start : last - start]) for cid in ids) for first, last in bounds
+    ]
     ends = [history[last - 1].timestamp for _first, last in bounds]
-    rows = [[0.0] * len(ids) for _ in bounds]
+    counts = [[0] * len(ids) for _ in bounds]
     for column, cid in enumerate(ids):
         for trade in results[cid].trades:
             # Trades of a window exit inside it; the first period ending at or after the exit owns it.
             row = next((index for index, end in enumerate(ends) if trade.exit_time <= end), len(ends) - 1)
-            rows[row][column] += trade.net_pnl
-    return labels, [tuple(row) for row in rows]
+            counts[row][column] += 1
+    return labels, rows, [tuple(row) for row in counts]
+
+
+def _bar_seconds(history: tuple[MarketBar, ...]) -> int | None:
+    """Median spacing of the bars in whole seconds (``None`` below 2 bars)."""
+
+    if len(history) < 2:
+        return None
+    gaps = [(later.timestamp - earlier.timestamp).total_seconds() for earlier, later in pairwise(history)]
+    return max(1, round(statistics.median(gaps)))
 
 
 def pbo_slice_count(available_slices: int) -> int:
@@ -764,18 +876,34 @@ def assess_overfitting(
     *,
     variants_tested: int,
     dsr_returns: Iterable[float],
-    trial_sharpe_variance: float | None,
+    trial_sharpe_variance: float | None = None,
+    trade_counts: Iterable[Iterable[int]] | None = None,
+    minimum_candidate_trades: int = 0,
+    initial_equity: float | None = None,
+    trial_sharpes: Iterable[float] = (),
+    bar_seconds: int | None = None,
+    trial_universe: Any = None,
 ) -> OverfittingAssessment:
     """Call the statistics module on ``performance[t][v]`` and the DSR sample.
 
-    The import is lazy so this module works before ``astra.overfitting`` is
-    integrated; without it the assessment is ``UNAVAILABLE`` and the
-    registry's overfitting gate stays unmet.
+    PBO: CSCV with the ASTRA selection rule (``selection_score_metric(initial_equity)``)
+    in-sample and out-of-sample; with ``trade_counts`` (trades exiting per period and
+    variant) only variants with at least ``minimum_candidate_trades`` in-sample trades
+    can be selected. DSR: ``n_trials`` and the trial-Sharpe variance come from
+    ``overfitting.resolve_trials`` (plan count as a floor, optional external
+    ``trial_universe``); an explicit ``trial_sharpe_variance`` is one more candidate
+    in that conservative maximum. The import is lazy so this module works without
+    ``astra.overfitting``; the assessment is then ``UNAVAILABLE`` and the registry's
+    overfitting gate stays unmet.
     """
 
     matrix = tuple(tuple(float(value) for value in row) for row in performance)
     labels = tuple(slice_labels)
     returns = tuple(float(value) for value in dsr_returns)
+    count_matrix = () if trade_counts is None else tuple(tuple(int(value) for value in row) for row in trade_counts)
+    sharpes = tuple(float(value) for value in trial_sharpes)
+    if count_matrix and (len(count_matrix) != len(matrix) or any(len(row) != len(matrix[0]) for row in count_matrix)):
+        raise ValueError("trade_counts must have the same shape as performance")
     # At least two rows per slice, as the statistics module requires.
     n_slices = pbo_slice_count(len(matrix) // 2)
     common = {
@@ -785,11 +913,20 @@ def assess_overfitting(
         "n_slices": n_slices,
         "dsr_sample": DSR_SAMPLE,
         "dsr_returns": returns,
-        "trial_sharpe_variance": trial_sharpe_variance,
         "trial_sharpe_variance_method": DSR_TRIAL_VARIANCE,
+        "trade_count_matrix": count_matrix,
+        "minimum_candidate_trades": minimum_candidate_trades,
+        "initial_equity": initial_equity,
+        "trial_sharpes": sharpes,
+        "bar_seconds": bar_seconds,
     }
     try:
-        from .overfitting import deflated_sharpe_ratio, probability_of_backtest_overfitting
+        from .overfitting import (
+            deflated_sharpe_ratio,
+            probability_of_backtest_overfitting,
+            resolve_trials,
+            selection_score_metric,
+        )
     except ImportError:
         return OverfittingAssessment(
             status="UNAVAILABLE",
@@ -797,12 +934,16 @@ def assess_overfitting(
             pbo_result=None,
             deflated_sharpe_probability=None,
             deflated_sharpe_result=None,
+            trial_sharpe_variance=None,
             errors=("astra.overfitting is not available; overfitting gates remain unmet",),
             **common,
         )
     errors: list[str] = []
     low_information: list[str] = []
-    pbo = pbo_payload = dsr = dsr_payload = None
+    pbo = pbo_payload = dsr = dsr_payload = dsr_plan_only = None
+    variance_used: float | None = None
+    n_trials_used: int | None = None
+    resolution_payload: dict | None = None
     nonzero_rows = sum(1 for row in matrix if any(value != 0.0 for value in row))
     distinct_rows = len(set(matrix))
     columns = len(matrix[0]) if matrix else 0
@@ -810,7 +951,9 @@ def assess_overfitting(
     inactive_variants = sum(
         1 for column in range(columns) if sum(1 for row in matrix if row[column] != 0.0) < min_active
     )
-    if inactive_variants:
+    if n_slices < MIN_PBO_SLICES:
+        low_information.append(f"pbo: {n_slices} slices (need at least {MIN_PBO_SLICES})")
+    elif inactive_variants:
         # A variant that barely trades makes its rank, and therefore the PBO, arbitrary.
         low_information.append(
             f"pbo: {inactive_variants} of {columns} variants have fewer than {min_active} non-zero periods"
@@ -823,18 +966,58 @@ def assess_overfitting(
         )
     else:
         try:
-            result = probability_of_backtest_overfitting([list(row) for row in matrix], n_slices=n_slices)
-            pbo, pbo_payload = _finite_or_none(result.pbo), _json_safe(result.to_dict())
+            options: dict[str, Any] = {"metric": selection_score_metric(initial_equity)}
+            if count_matrix:
+                options["eligibility"] = [list(row) for row in count_matrix]
+                options["minimum_eligibility"] = minimum_candidate_trades
+            result = probability_of_backtest_overfitting([list(row) for row in matrix], n_slices=n_slices, **options)
+            abstained = getattr(result, "n_abstained", 0)
+            if abstained > MAX_PBO_ABSTAINED_FRACTION * result.n_combinations:
+                low_information.append(
+                    f"pbo: {abstained} of {result.n_combinations} combinations had no eligible in-sample variant"
+                )
+            else:
+                pbo, pbo_payload = _finite_or_none(result.pbo), _json_safe(result.to_dict())
         except (ValueError, ArithmeticError) as exc:
             errors.append(f"pbo: {type(exc).__name__}: {exc}")
+    active_returns = sum(1 for value in returns if value != 0.0)
     if len(returns) < MIN_DSR_RETURNS:
         low_information.append(f"deflated_sharpe: {len(returns)} returns (need at least {MIN_DSR_RETURNS})")
+    elif active_returns < MIN_DSR_RETURNS:
+        # Flat bars are real zero returns, but too few non-zero ones carry almost no information.
+        low_information.append(
+            f"deflated_sharpe: {active_returns} non-zero of {len(returns)} returns "
+            f"(need at least {MIN_DSR_RETURNS} non-zero)"
+        )
     else:
         try:
-            result = deflated_sharpe_ratio(
-                list(returns), n_trials=variants_tested, trial_sharpe_variance=trial_sharpe_variance
+            resolution = resolve_trials(
+                plan_trials=variants_tested,
+                plan_trial_sharpes=sharpes,
+                sample_length=len(returns),
+                sharpe_unit=DSR_SHARPE_UNIT,
+                bar_seconds=bar_seconds,
+                universe=trial_universe,
             )
+            plan_resolution = resolve_trials(
+                plan_trials=variants_tested,
+                plan_trial_sharpes=sharpes,
+                sample_length=len(returns),
+                sharpe_unit=DSR_SHARPE_UNIT,
+                bar_seconds=bar_seconds,
+            )
+            explicit = () if trial_sharpe_variance is None else (float(trial_sharpe_variance),)
+            variance_used = max((resolution.trial_sharpe_variance, *explicit))
+            n_trials_used = resolution.n_trials
+            resolution_payload = _json_safe(resolution.to_dict())
+            result = deflated_sharpe_ratio(list(returns), n_trials=n_trials_used, trial_sharpe_variance=variance_used)
             dsr, dsr_payload = _finite_or_none(result.probability), _json_safe(result.to_dict())
+            plan_only = deflated_sharpe_ratio(
+                list(returns),
+                n_trials=variants_tested,
+                trial_sharpe_variance=max((plan_resolution.trial_sharpe_variance, *explicit)),
+            )
+            dsr_plan_only = _finite_or_none(plan_only.probability)
         except (ValueError, ArithmeticError) as exc:
             errors.append(f"deflated_sharpe: {type(exc).__name__}: {exc}")
     if pbo is not None and dsr is not None:
@@ -850,7 +1033,11 @@ def assess_overfitting(
         pbo_result=pbo_payload,
         deflated_sharpe_probability=dsr,
         deflated_sharpe_result=dsr_payload,
+        trial_sharpe_variance=variance_used,
         errors=tuple(errors),
+        n_trials_used=n_trials_used,
+        trial_resolution=resolution_payload,
+        deflated_sharpe_probability_plan_only=dsr_plan_only,
         **common,
     )
 
@@ -956,10 +1143,6 @@ def _final_selection(
         )
         for candidate, score, net, trades, ok in rows
     )
-
-
-def _trade_returns(result: BacktestResult, initial_equity: float) -> list[float]:
-    return [trade.net_pnl / initial_equity for trade in result.trades]
 
 
 def _sharpe(values: list[float]) -> float | None:
