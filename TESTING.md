@@ -8,13 +8,15 @@ Run from the project directory in PowerShell:
 $env:PYTHONPATH = "src"
 python -m unittest discover -s tests -v
 python -m compileall -q src tests
+node --check src/astra/static/app.js
+python -m ruff check src tests
 ```
 
-The suite is standard-library `unittest`; there are no test dependencies. It should cover configuration fail-closed behavior, data provenance/quality, signal timing, transaction costs, risk denials, persistence, and read-only API behavior.
+The suite is standard-library `unittest`; there are no test dependencies. Ruff is a separately installed development tool configured in `pyproject.toml`; it is not a runtime or test dependency. It should cover configuration fail-closed behavior, data provenance/quality, signal timing, transaction costs, risk denials, persistence, and read-only API behavior.
 
 ## Evidence boundary
 
-Passing local tests prove only the functions exercised with local code and fixtures. Synthetic data is not market evidence. Execution tests run against the in-process `SimulatedBroker` with scripted faults: timeouts before and after acceptance, rejection, partial fills, disconnects, reversed event delivery, injected external positions and false environment reports. There is no broker connection, external account test, demo execution, production database, deployment, performance claim, or backup/restore proof in this delivery. The dashboard was viewed once in a desktop browser pane; no device testing was done.
+Passing local tests prove only the functions exercised with local code and fixtures. Synthetic data is not market evidence. Execution tests run against the in-process `SimulatedBroker` with scripted faults: timeouts before and after acceptance, rejection, partial fills, disconnects, reversed event delivery, injected external positions and false environment reports. The cTrader adapter is tested against a scripted fake cTrader server (`tests/ctrader_fixture.py`, labelled as not recorded provider traffic) and the WebSocket client against a loopback WebSocket server; both are local and offline, and no test reaches the real cTrader service. There is no broker connection, external account test, demo execution, production database, deployment, performance claim, or backup/restore proof in this delivery. The dashboard was viewed once in a desktop browser pane; no device testing was done.
 
 ## Mandatory negative tests (spec 15.2)
 
@@ -34,5 +36,15 @@ Passing local tests prove only the functions exercised with local code and fixtu
 | 12 | Rollback to a known version | `test_registry.test_promotion_then_rollback_restores_known_version` |
 
 No-lookahead coverage: `test_features`, `test_regimes`, `test_strategies` and `test_ml` mutate bars after index `i` and assert nothing at or before `i` changes; `test_engine.test_decision_function_sees_only_past_bars` checks the replay.
+
+## Lot 1 corrections evidence
+
+| Item | Tests |
+|---|---|
+| C-01, D-1, D-2 execution boundary (permit, environment guard, MRO check) | `test_ctrader.ExecutionBoundaryTests`, `test_execution.test_refusal_at_adapter_boundary_is_recorded_and_nothing_sent` |
+| C-03 human resolution | `test_lot1_fixes.ResolutionTests` |
+| C-04 single event from cTrader `lookup_order` | `test_lot1_fixes.LookupEventTests` |
+| C-05 per-account freezes and daily-loss state | `test_lot1_fixes.AccountScopedControlTests` |
+| C-07 request errors versus connection loss | `test_lot1_fixes.ErrorClassificationTests` |
 
 Record the exact command, exit code, and observed summary in `ACCEPTANCE_REPORT.md`. A skipped, interrupted, or unavailable check is not a pass.

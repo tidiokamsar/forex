@@ -25,5 +25,6 @@ The specification requires an idempotent, persistent order state machine, mode v
 ## Consequences and revisit conditions
 
 - Controls (kill switch, freezes) are global to one store, not per account. Revisit when more than one account runs concurrently.
+  - Amendment (lot 1 corrections, C-05): freezes and the daily-loss day marker are now per account (`TradingControls(scope=account_ref)`, `OrderGateway(account_ref=...)`); the kill switch remains global to the store.
 - SQLite with per-call connections is adequate for one local operator; revisit for multi-process or remote deployment (PostgreSQL candidate).
 - The simulated broker is a test double; its fills say nothing about any real provider.

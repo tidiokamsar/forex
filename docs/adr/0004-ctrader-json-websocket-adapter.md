@@ -23,3 +23,5 @@ The user selected cTrader Open API for the first demo connector. The docs offer 
 ## Revisit when
 
 The first supervised connection disagrees with any listed assumption, the account is hedged with several positions per symbol, or a second cTrader account must run concurrently (controls are global per store).
+
+Amendment (lot 1 corrections, C-05): freezes and the daily-loss day marker are now per account; only the kill switch remains global to the store. A second concurrent account no longer needs shared freezes, but still needs its own gateway built with its `account_ref`.

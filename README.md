@@ -7,7 +7,7 @@ ASTRA is a local quantitative research and **simulation-only** trading workspace
 ## Requirements
 
 - Python 3.11 or later, standard library only (developed on 3.14.6)
-- No broker credentials or network access
+- No broker credentials or network access, except for the optional read-only `ctrader-check`
 
 ## Quick start (PowerShell)
 
@@ -32,6 +32,7 @@ Open `http://127.0.0.1:8765`. All bundled data is **synthetic** (`data/synthetic
 | `ml-baseline [--csv ...]` | Purged walk-forward logistic regression vs base rate; logs the experiment and registers an inactive candidate |
 | `paper-replay [--csv ...] [--strategy sma\|momentum\|breakout]` | Replays bars through Order Gateway + RiskEngine + simulated broker, then reconciles |
 | `orders`, `models` | Inspect stored orders, model versions and experiments |
+| `orders --resolve INTENT_ID --outcome FILLED\|NOT_EXECUTED --evidence "..." --operator <name> [--filled-units N --price P]` | Human resolution of an `UNKNOWN` or `SUBMITTED` order; never lifts freezes (see [OPERATIONS.md](OPERATIONS.md)) |
 | `controls show\|kill\|release` | Emergency stop and entry freezes (see [OPERATIONS.md](OPERATIONS.md)) |
 | `serve` | Read-only loopback dashboard |
 | `ctrader-check --operator <name>` | Read-only cTrader DEMO connection check; sends no order (see [BROKERS.md](BROKERS.md)) |
@@ -51,7 +52,10 @@ CSV columns are `timestamp,instrument,open,high,low,close`; `volume`, `bid`, `as
 | `risk` | Independent RiskEngine with hard-capped policy |
 | `instruments` | Contract specs (illustrative), size rounding, margin |
 | `brokers` | Broker contract and `SimulatedBroker` |
+| `brokers.ctrader`, `brokers.websocket` | cTrader Open API demo adapter (JSON over WebSocket) and its standard-library RFC 6455 client |
+| `permits` | Execution permits issued by the gateway and verified at `BrokerAdapter.submit_order` |
 | `execution` | Order store/state machine, controls, mode verification, gateway, reconciliation |
+| `execution.resolution` | Human resolution of undetermined orders with evidence |
 | `governance` | Roles, permission guard, secret access, two-person risk change, LLM output validation |
 | `engine` | Paper replay end-to-end path |
 | `web`, `cli` | Dashboard and command line |
@@ -63,16 +67,19 @@ $env:PYTHONPATH = "src"
 python -m unittest discover -s tests -v
 python -m compileall -q src tests
 node --check src/astra/static/app.js
+python -m ruff check src tests
 ```
+
+Ruff is a development tool installed separately (`pyproject.toml` holds its configuration); it is not a runtime dependency.
 
 Latest recorded result: see [ACCEPTANCE_REPORT.md](ACCEPTANCE_REPORT.md).
 
 ## Limits
 
 - Synthetic data only; no result here is evidence about real markets. Historical performance does not guarantee future results, and nothing here is financial advice.
-- No external broker adapter, demo verification, authentication, TLS, backups/restore proof, service supervisor or alert delivery.
+- The cTrader demo adapter is tested offline only; its read-only `ctrader-check` has not been run against a real demo account, and DEMO order execution is disabled. No authentication, dashboard TLS, backups/restore proof, service supervisor or alert delivery.
 - Instrument specifications and costs are illustrative; no swaps or financing are modelled.
-- Emergency controls are global to a store; the SQLite audit trail is mutable by its owner.
+- The kill switch is global to a store; entry freezes and daily-loss state are per account. The SQLite audit trail is mutable by its owner.
 - The dashboard binds to loopback only; do not expose it.
 
 Further reading: [ARCHITECTURE.md](ARCHITECTURE.md), [SECURITY.md](SECURITY.md), [RISK_POLICY.md](RISK_POLICY.md), [RESEARCH_PROTOCOL.md](RESEARCH_PROTOCOL.md), [TASKS.md](TASKS.md), [ROADMAP.md](ROADMAP.md).

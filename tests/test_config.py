@@ -31,3 +31,14 @@ class AppConfigTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VersionTests(unittest.TestCase):
+    def test_package_version_matches_pyproject(self):
+        import tomllib
+        from pathlib import Path
+
+        import astra
+
+        pyproject = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
+        self.assertEqual(astra.__version__, pyproject["project"]["version"])

@@ -1,5 +1,18 @@
 # Changelog
 
+## Lot 1 corrections · branch `fix/lot1-securite` · 2026-10-25
+
+- C-01: execution permits are verified at `BrokerAdapter.submit_order`, the single execution boundary. The gateway issues an HMAC permit (process-local key, 30 s validity) after its checks; a missing, forged, mismatched or expired permit, or a refusal by the adapter's environment guard, raises `ExecutionRefused` and the order ends `BROKER_REJECTED` with `execution_refused:<reason>`. The cTrader guard requires `isLive: false`, DEMO in `EXECUTABLE_MODES` (not in this build), `allow_demo_orders=True` and a `CONNECTED` adapter.
+- D-1: the permit also binds order type and stop-loss, and is single-use (`permit_already_used`).
+- D-2: the `submit_order` override check resolves through the MRO, so a mixin cannot replace the boundary either.
+- C-03: human resolution of `UNKNOWN` or `SUBMITTED` orders with evidence (`execution/resolution.py`, CLI `orders --resolve`). Roles `HUMAN_ADMIN`/`HUMAN_OPERATOR`; evidence of at least 8 characters; refused when the adapter still reports the order. Resolution never lifts freezes; a consistent reconciliation does.
+- C-04: duplicate events from cTrader `lookup_order`: not a defect; a test shows one event.
+- C-05: freezes and the daily-loss day marker are per account (`TradingControls(scope=account_ref)`, `OrderGateway(account_ref=...)`); the kill switch stays global; a gateway without `account_ref` writes global freezes. `controls show` and `/api/controls` also return `entry_freezes_by_account`.
+- C-07: `BrokerRequestError` (provider refused a request) no longer freezes the connection. On submit it gives `BROKER_REJECTED` with `broker_request_error:<code>`; during reconciliation the result is `FAILED` and `reconciliation_required` is kept. cTrader authentication/session error codes raise `CTraderConnectionError` and are handled as `connection_lost`.
+- C-08: ruff configuration in `pyproject.toml`; `python -m ruff check src tests`. Ruff is installed separately as a development tool, not a runtime dependency.
+- Git repository initialised on top of the remote's `Initial commit`; secret scan of tracked files before publication; `.gitattributes` keeps `data/` byte-exact.
+- Verification: see ACCEPTANCE_REPORT.md.
+
 ## Unreleased · 0.2.0 · 2026-10-25
 
 ### cTrader demo connector (offline)
@@ -20,7 +33,7 @@
 - Added `engine.run_paper_replay` and CLI commands `paper-replay`, `ml-baseline`, `orders`, `models`, `controls show|kill|release`.
 - Dashboard: read-only routes `/api/orders`, `/api/controls`, `/api/reconciliations`, `/api/models`, `/api/experiments` and French panels for controls, registry and simulated orders.
 - Docs: BROKERS.md evaluation matrix with official documentation links (checked 2026-10-25, untested), ADR-0003, updated policies, mandatory negative-test map in TESTING.md.
-- Verification: 192 tests passed; see ACCEPTANCE_REPORT.md.
+- Verification: 192 tests passed (the count at that time); see ACCEPTANCE_REPORT.md.
 
 ## 0.1.0 · 2026-10-25
 

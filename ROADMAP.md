@@ -14,9 +14,12 @@ Mapped to the specification's phases (section 14). Gates are not skipped.
 - [ ] Phase 9: real-mode preparation dossier (no automatic activation).
 - [ ] Phase 10: supervised operation.
 
+Lot 1 corrections (audit 2026-10-25) are done: execution permits at the adapter boundary, human resolution of undetermined orders, per-account freezes, request-error classification, ruff. C-06 (bound the RiskEngine in-memory idempotency set) remains open.
+
 ## Next concrete tasks
 
 1. Backup and verified restore of the SQLite store; structured JSON logs; supervised service runner.
 2. Turn strategy decisions and ML probabilities into walk-forward trading evidence that can feed `record_evaluation`.
 3. Drift monitor (data, costs, rejection rate, calibration) that places a strategy in observation and triggers `rollback`.
-4. After the user chooses a broker and opens a demo account: build its adapter against `BrokerAdapter` with offline recorded-response tests, then a supervised demo test.
+4. Broker already chosen (cTrader Open API) and its adapter built and tested offline. After the user runs `ctrader-check` on a demo account: confirm the BROKERS.md assumptions, enable DEMO by reviewed change, then a supervised minimum-size demo test.
+5. C-06: bound the RiskEngine in-memory idempotency set.
