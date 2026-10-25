@@ -22,12 +22,13 @@ from typing import Any
 ROOT_LOGGER = "astra"
 _correlation: contextvars.ContextVar[str | None] = contextvars.ContextVar("astra_correlation_id", default=None)
 _SECRET_KEY = re.compile(
-    r"(secret|token|password|passwd|passphrase|api[_-]?key|authorization|credential|private[_-]?key|refresh|cookie)",
+    r"(secret|token|password|passwd|passphrase|api[_-]?key|authorization|credential|private[_-]?key)",
     re.IGNORECASE,
 )
 # Values revealed through governance.SecretValue; masked wherever they appear.
 _KNOWN_SECRETS: set[str] = set()
-_MIN_SECRET_LENGTH = 4
+# Short values (prices, small numbers) would cause false masking; real credentials are longer.
+_MIN_SECRET_LENGTH = 8
 
 
 def register_secret(value: str) -> None:
@@ -37,14 +38,19 @@ def register_secret(value: str) -> None:
         _KNOWN_SECRETS.add(value)
 
 
-def _mask_known_secrets(text: str) -> str:
-    for secret in sorted(_KNOWN_SECRETS, key=len, reverse=True):
-        if secret in text:
-            text = text.replace(secret, REDACTED)
-        escaped = json.dumps(secret)[1:-1]
-        if escaped != secret and escaped in text:
-            text = text.replace(escaped, REDACTED)
-    return text
+def _mask_known_secrets(value: Any) -> Any:
+    """Mask registered secrets inside string values, recursively, before JSON encoding."""
+
+    if isinstance(value, str):
+        for secret in sorted(_KNOWN_SECRETS, key=len, reverse=True):
+            if secret in value:
+                value = value.replace(secret, REDACTED)
+        return value
+    if isinstance(value, dict):
+        return {key: _mask_known_secrets(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_mask_known_secrets(item) for item in value]
+    return value
 _RESERVED = frozenset(vars(logging.LogRecord("", 0, "", 0, "", None, None))) | {"message", "asctime"}
 REDACTED = "****"
 
@@ -78,7 +84,9 @@ class JsonFormatter(logging.Formatter):
             payload["fields"] = redact(fields)
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
-        return _mask_known_secrets(json.dumps(payload, ensure_ascii=False, default=str, separators=(",", ":")))
+        if _KNOWN_SECRETS:
+            payload = _mask_known_secrets(json.loads(json.dumps(payload, ensure_ascii=False, default=str)))
+        return json.dumps(payload, ensure_ascii=False, default=str, separators=(",", ":"))
 
 
 def configure_logging(
