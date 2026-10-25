@@ -14,6 +14,10 @@
 - `SecretVault` is the single audited secret access path (environment variables prefixed `ASTRA_SECRET_`, `HUMAN_ADMIN` only); `SecretValue` never prints its value.
 - LLM output is parsed by `handle_llm_output` against a strict schema. Any deviation, or any execution field (units, size, order, stop, mode and similar), yields `NO_ACTION`. A valid response is advisory only and has no path to the gateway.
 - `OrderGateway` is the only caller of a broker adapter, and the adapter contract has no funds-movement operations.
+- Execution boundary: every adapter's `submit_order` requires an HMAC execution permit that only the gateway issues after its checks (process-local random key, 30-second validity, bound to client id, instrument, side, size and purpose). Subclasses cannot override `submit_order`. Without a valid permit, or when the adapter's own environment guard refuses, `ExecutionRefused` is raised and nothing is sent (C-01, tests in `test_ctrader.ExecutionBoundaryTests`).
+- cTrader adapter guard: refuses unless the provider reported `isLive: false`, DEMO is in `EXECUTABLE_MODES` and the adapter was explicitly built with `allow_demo_orders=True`. None of these is enabled for orders in this build.
+- Read-only check review (2026-10-25): `ctrader-check` builds the adapter with `allow_demo_orders=False`, never calls `submit_order` or `_send_order` (a test fails if either is reached), and counts any `ProtoOANewOrderReq`/`ProtoOAClosePositionReq` sent (must be 0). It is safe to run against a demo account.
+- Limitation of the permit: it stops accidental, strategy and LLM bypasses inside ASTRA. Code that deliberately imports the private permit authority could forge one; that requires a reviewed code change.
 
 ## Known gaps
 

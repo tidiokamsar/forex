@@ -241,6 +241,43 @@ class CTraderCheckCliTests(unittest.TestCase):
             self.assertFalse(sent & {int(P.NEW_ORDER_REQ), int(P.CLOSE_POSITION_REQ)})
             self.assertNotIn("token-xyz", json.dumps(result, default=str))
 
+    def test_check_never_reaches_any_send_path(self):
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from astra.cli import ctrader_check
+        from astra.config import AppConfig
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("ctrader-check reached an order path")
+
+        captured = {}
+        original_init = CTraderAdapter.__init__
+
+        def spy_init(self, *args, **kwargs):
+            original_init(self, *args, **kwargs)
+            captured["adapter"] = self
+
+        with workspace_tempdir() as temp:
+            config = AppConfig(database_path=Path(temp) / "state.sqlite3")
+            env = {
+                "ASTRA_SECRET_CTRADER_CLIENT_ID": "client-id",
+                "ASTRA_SECRET_CTRADER_CLIENT_SECRET": "client-secret",
+                "ASTRA_SECRET_CTRADER_ACCESS_TOKEN": "token-xyz",
+                "ASTRA_CTRADER_ACCOUNT_ID": "4242",
+            }
+            with patch.object(CTraderAdapter, "_send_order", forbidden), patch.object(
+                CTraderAdapter, "submit_order", forbidden
+            ), patch.object(CTraderAdapter, "__init__", spy_init):
+                result = ctrader_check("alice", config, environ=env, transport=FakeTransport(FakeCTraderServer()))
+        self.assertEqual(result["orders_sent"], 0)
+        adapter = captured["adapter"]
+        self.assertFalse(adapter._allow_demo_orders)
+        allowed, reasons = adapter.demo_orders_authorized()
+        self.assertFalse(allowed)
+        self.assertIn("demo_orders_not_explicitly_allowed", reasons)
+        self.assertIn("demo_not_executable_in_this_build", reasons)
+
     def test_missing_configuration_is_reported_without_connecting(self):
         from pathlib import Path
 

@@ -1,5 +1,22 @@
 # Acceptance report
 
+## Lot 1 corrections (branch `fix/lot1-securite`, 2026-10-25)
+
+Scope: C-01, C-03, C-05, C-07, C-08 fixed; C-04 shown not to be a defect; Git initialised on top of the remote's `Initial commit`. No order was sent, DEMO execution was not enabled, LIVE stays locked. No connection to any external broker was made.
+
+Publication checks before push: secret scan of every tracked file (token, key, private-key, credential-assignment patterns, `.env` files, personal data) found nothing; the only credential-like strings are labelled fakes in `tests/ctrader_fixture.py` and `tests/test_ctrader.py`. `.gitignore` excludes `.env*` (except `.env.example`), SQLite files, logs, backups and keys. `.gitattributes` keeps `data/` byte-exact: the fixture SHA-256 in the index is `16402dc1...5ef8`, identical to the pinned value.
+
+Verification (bash, project directory, after all lot 1 code changes):
+
+```bash
+python -m ruff check src tests              # All checks passed!
+PYTHONPATH=src python -m unittest discover -s tests
+python -m compileall -q src tests
+node --check src/astra/static/app.js
+```
+
+Observed: ruff `All checks passed!`; `Ran 245 tests in 93.941s`, `OK` (0 failures, 0 skipped); compileall and node exit 0. All tests are local: simulator, scripted fake cTrader server and loopback servers. None ran against the real cTrader service.
+
 ## Lot 2b: cTrader demo adapter, offline (2026-10-25)
 
 Protocol facts were gathered by a delegated web-reading agent from https://help.ctrader.com/open-api/ (pages listed in BROKERS.md). The coordinator used only facts it reported as read from those pages. Undocumented points are recorded as assumptions, not facts.

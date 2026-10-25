@@ -43,6 +43,22 @@ OrderGateway: permission -> schema -> idempotency -> kill switch / freezes
 - `engine.run_paper_replay` replays bars causally: the previous close's decision executes at the next open, stop exits are engine-managed, and the next decision is taken at the close.
 - Design record: [ADR-0003](docs/adr/0003-order-gateway-and-simulated-broker.md).
 
+## Execution boundary (lot 1 corrections)
+
+```text
+OrderGateway (all checks) --issues--> ExecutionPermit (HMAC, process key, 30 s, bound to request)
+                                          |
+BrokerAdapter.submit_order (not overridable)
+   1. verify_permit        -> missing / forged / mismatched / expired -> ExecutionRefused
+   2. _environment_guard   -> adapter-specific; default refuses
+   3. _send_order          -> provider call
+```
+
+- `SimulatedBroker` accepts only SIMULATION permits. `CTraderAdapter` accepts only DEMO permits and only when `isLive is False`, `RunMode.DEMO in EXECUTABLE_MODES` (not in this build) and `allow_demo_orders=True`. A refusal ends the order as `BROKER_REJECTED` with `execution_refused:<reason>`; nothing leaves the process.
+- Freezes are scoped per account (`TradingControls(scope=account_ref)`, `OrderGateway(account_ref=...)`); global freezes and the kill switch apply to every account.
+- `BrokerRequestError` (provider refused a request) is handled without a connection freeze; `BrokerUnavailable` (link, auth, session) still freezes entries and requires reconciliation.
+- `execution.resolution` lets a human resolve an `UNKNOWN` order with evidence; it never lifts freezes, reconciliation does.
+
 ## Structural options considered
 
 | Option | Benefits | Costs and risks | Decision |

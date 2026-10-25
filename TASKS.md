@@ -29,4 +29,17 @@ Statuses: **DONE** = implemented and verified by tests run in this checkout; **P
 | ASTRA-021 | Autonomous improvement loop (candidate generation in sandbox) | TODO | Registry and gates exist; generation loop not built |
 | ASTRA-022 | Real-mode readiness dossier | TODO | Only after DEMO evidence; no automatic activation |
 
+## Lot 1 corrections (audit 2026-10-25)
+
+| ID | Scope | Status | Evidence |
+|---|---|---|---|
+| C-01 | No direct adapter path can send without a gateway permit and a safe environment | DONE | `permits.py`, `BrokerAdapter.submit_order`; `test_ctrader.ExecutionBoundaryTests` (11), `test_execution` boundary test |
+| C-02 | Git repository on top of the remote history, secret scan, `.gitattributes` | DONE | Branch `fix/lot1-securite`; remote `Initial commit` preserved |
+| C-03 | Human resolution of UNKNOWN orders with evidence; freezes only lifted by reconciliation | DONE | `execution/resolution.py`, CLI `orders --resolve`; `test_lot1_fixes.ResolutionTests` (6) |
+| C-04 | Duplicate events from cTrader `lookup_order` | NOT A DEFECT | The audit claim was wrong; `test_lot1_fixes.LookupEventTests` proves one event |
+| C-05 | Freezes and daily-loss state per account; kill switch global | DONE | `TradingControls(scope)`, `OrderGateway(account_ref)`; `AccountScopedControlTests` (5) |
+| C-06 | Bound RiskEngine in-memory idempotency set | TODO | Low priority; durable idempotency is in the gateway |
+| C-07 | Provider request errors vs connection loss | DONE | `BrokerRequestError`, `CTraderConnectionError`; `ErrorClassificationTests` (5) |
+| C-08 | Project ruff configuration, relevant findings fixed | DONE | `pyproject.toml [tool.ruff]`; `ruff check src tests` passes |
+
 No item is marked DONE from an agent report alone: the coordinator ran the integrated suite (see ACCEPTANCE_REPORT.md).
