@@ -717,7 +717,9 @@ class ReuseVerdictPathTests(TempStoreMixin):
             self.store.begin_holdout_evaluation(protocol_id=protocol_id, dataset_identity_sha256="c" * 64)
 
     def test_undetermined_is_sealed_but_cannot_be_scored(self):
-        protocol_id = _seal_returns(self.store, _sparse(8), "d", 2033)
+        # Round 4: UNDETERMINED means the NEW holdout has too few moves to be compared at all (P-5 below:
+        # a 10%-sparse holdout with 5 moves is now compared on its moves), so two moves in 40 bars.
+        protocol_id = _seal_returns(self.store, _nearly_flat(), "d", 2033)
         self.assertEqual(self.store.reuse_check(protocol_id)["verdict"], holdout_reuse.UNDETERMINED)
         with self.assertRaisesRegex(ValueError, "undetermined"):
             self.store.begin_holdout_evaluation(protocol_id=protocol_id, dataset_identity_sha256="d" * 64)
@@ -741,13 +743,17 @@ class ReuseVerdictPathTests(TempStoreMixin):
         with self.assertRaises(ValueError):
             self.store.begin_holdout_evaluation(protocol_id=protocol_id, dataset_identity_sha256="c" * 64)
 
-    # PHASE3 FAIL P-5 (Low, availability): independent mostly-flat holdouts (forward-filled or quiet bars) are
-    # always UNDETERMINED: sealed but never scored or promoted. N-8 was closed by moving the false CONFLICT to
-    # UNDETERMINED; the calibration suite counts UNDETERMINED as "not flagged".
-    @unittest.expectedFailure
+    # FIXED IN LOT 4 ROUND 4 (was PHASE3 FAIL P-5, Low, availability): independent mostly-flat holdouts
+    # (forward-filled or quiet bars) were always UNDETERMINED: sealed but never scored or promoted. They are now
+    # compared on their moves; the calibration suite reports UNDETERMINED separately.
     def test_independent_sparse_holdout_is_clear(self):
         protocol_id = _seal_returns(self.store, _sparse(8), "d", 2033)
         self.assertEqual(self.store.reuse_check(protocol_id)["verdict"], holdout_reuse.CLEAR)
+
+
+def _nearly_flat():
+    # Two moves in 40 bars: fewer than min_informative_points, so it cannot be compared with anything.
+    return [0.0] * 10 + [1e-4] + [0.0] * 20 + [-1e-4] + [0.0] * 8
 
 
 def _quantized(closes):
@@ -795,10 +801,10 @@ def _trend(drift, noise):
 class ReuseFalsePositiveTests(unittest.TestCase):
     """Second statistic (match share) and correlation on real-like independent data, prices quantized to 1e-5."""
 
-    # PHASE3 FAIL P-9 (Low, availability): tick-quantized independent random walks (moves of 1 or 2 ticks of
-    # 1e-5) hit the match-share threshold (exactly 0.8) by chance: 1 of 600 pairs is a CONFLICT (pair 108 here),
-    # so with K sealed holdouts a fresh independent seal is refused with probability of about K * 0.17%.
-    @unittest.expectedFailure
+    # FIXED IN LOT 4 ROUND 4 (was PHASE3 FAIL P-9, Low, availability): tick-quantized independent random walks
+    # (moves of 1 or 2 ticks of 1e-5) hit the match-share threshold (exactly 0.8) by chance: 1 of 600 pairs was
+    # a CONFLICT. A match share now also needs a binomial chance probability (at the pair's own chance match
+    # rate, Bonferroni-corrected by the spans tested) of at most 1e-4 (CONFLICT) or 1e-2 (SUSPECT).
     def test_tick_quantized_random_walks_are_not_flagged(self):
         self.assertEqual(_flagged(_pairs(_ticks, 150)), 0)
 
@@ -809,17 +815,16 @@ class ReuseFalsePositiveTests(unittest.TestCase):
         self.assertEqual(_flagged(_pairs(_trend(1e-4, 3e-4), 100)), 0)
         self.assertEqual(_flagged(_pairs(_trend(2e-5, 1e-5), 100)), 0)
 
-    # PHASE3 FAIL P-6 (Low, availability; documented as "near-constant paths"): two independent smooth trends
-    # with noise below the 1e-5 tick (+2 ticks per bar, noise 0.2 tick) are a CONFLICT by match share in every
-    # pair: the seal of an independent dataset is refused.
-    @unittest.expectedFailure
+    # FIXED IN LOT 4 ROUND 4 (was PHASE3 FAIL P-6, Low, availability): two independent smooth trends with noise
+    # below the 1e-5 tick (+2 ticks per bar, noise 0.2 tick) were a CONFLICT by match share in every pair.
+    # Returns are now matched after removing each path's median (a shared drift is not a match), the robust
+    # scale is floored at the match tolerance, and only an entirely constant old path is matched as a constant.
     def test_independent_sub_tick_trends_are_not_a_conflict(self):
         self.assertEqual(_flagged(_pairs(_trend(2e-5, 2e-6), 20), (holdout_reuse.CONFLICT,)), 0)
 
-    # PHASE3 FAIL P-7 (Low, availability): long holdouts (400 returns) of independent but serially correlated
-    # data are SUSPECT in a few percent of pairs (AR(1) 0.7: 6 of 200); every new seal is compared with every
-    # sealed holdout, so the per-seal rate grows with the store. The calibration uses 40 iid returns only.
-    @unittest.expectedFailure
+    # FIXED IN LOT 4 ROUND 4 (was PHASE3 FAIL P-7, Low, availability): long holdouts (400 returns) of independent
+    # but serially correlated data were SUSPECT in a few percent of pairs (AR(1) 0.7: 6 of 200). A window pair
+    # now also has to be correlated after prewhitening each path by its own lag-1 autocorrelation.
     def test_long_autocorrelated_independent_holdouts_are_not_flagged(self):
         rng = random.Random("ar1_0.7")
 
