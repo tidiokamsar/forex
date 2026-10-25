@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import shutil
 import sqlite3
 from dataclasses import asdict, dataclass
@@ -24,6 +25,22 @@ from .logs import get_logger, log_event
 
 _LOG = get_logger("backup")
 MANIFEST_SUFFIX = ".manifest.json"
+
+
+class _TolerantAuditSink:
+    """Audits into the target store when it is readable; otherwise only logs."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+
+    def audit(self, event_type: str, details: dict) -> None:
+        try:
+            if self._path.exists():
+                ExecutionStore(self._path).audit(event_type, details)
+                return
+        except sqlite3.Error as exc:
+            log_event(_LOG, "backup.audit_target_unreadable", level=logging.WARNING, error=str(exc))
+        log_event(_LOG, event_type, **details)
 
 
 class BackupError(ValueError):
@@ -133,9 +150,8 @@ def restore_backup(
 
     target = Path(database)
     source = Path(backup)
-    PermissionGuard(ExecutionStore(target) if target.exists() else None).require(
-        actor, Action.RESTORE_BACKUP, target=str(source)
-    )
+    # A corrupted target is the usual reason to restore: auditing into it must not block the restore.
+    PermissionGuard(_TolerantAuditSink(target)).require(actor, Action.RESTORE_BACKUP, target=str(source))
     if not reason.strip():
         raise BackupError("a restore reason is required")
     record = verify_backup(source)
@@ -145,7 +161,7 @@ def restore_backup(
         try:
             statuses = service_status(ExecutionStore(target), stale_after_seconds=stale_after_seconds)
         except sqlite3.Error:
-            statuses = []  # no service_state table yet: no service ever heartbeated here
+            statuses = []  # unreadable target, or no service_state table: no live heartbeat to honour
         alive = [status["account_ref"] for status in statuses if status["alive"]]
         if alive:
             raise BackupError(f"a trading service is still running for {alive}; stop it before restoring")
@@ -160,6 +176,10 @@ def restore_backup(
         staged_store.initialize()
         # Freeze every account the restored store knows about, before it goes live.
         accounts = staged_store.account_refs()
+        # Heartbeats copied from a backup belong to a service that is not running now.
+        for key, state, _updated in staged_store.states_with_prefix("service:"):
+            if state.get("status") in ("running", "degraded"):
+                staged_store.put_state(key, {**state, "status": "stopped_by_restore"})
         for account_ref in accounts:
             TradingControls(staged_store, scope=account_ref).freeze(
                 FreezeReason.RECONCILIATION_REQUIRED, actor=actor.actor_id, context="restored_from_backup"

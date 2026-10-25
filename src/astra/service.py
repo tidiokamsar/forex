@@ -229,15 +229,21 @@ class TradingService:
             self._tick()
             self._consecutive_errors = 0
         except BrokerRequestError as exc:
-            # A provider refusal such as a rate limit is transient: log, do not count.
-            log_event(_LOG, "service.request_refused", level=logging.WARNING, error_code=exc.error_code)
+            log_event(_LOG, "service.request_refused", level=logging.WARNING, error_code=exc.error_code,
+                      transient=exc.transient)
+            if not exc.transient:
+                # Only rate limits clear by themselves; any other refusal is a real error.
+                self._count_error(exc)
         except Exception as exc:  # noqa: BLE001 - the loop must survive and report any failure
-            self.stats.errors += 1
-            self._consecutive_errors += 1
             _LOG.exception("service tick failed", extra={"event": "service.tick_failed", "error": type(exc).__name__})
-            if self._consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
-                self._enter_degraded(f"{self._consecutive_errors} consecutive tick errors")
+            self._count_error(exc)
         self._heartbeat("degraded" if self.stats.degraded else "running")
+
+    def _count_error(self, exc: BaseException) -> None:
+        self.stats.errors += 1
+        self._consecutive_errors += 1
+        if self._consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+            self._enter_degraded(f"{self._consecutive_errors} consecutive tick errors ({type(exc).__name__})")
 
     def _enter_degraded(self, context: str) -> None:
         if self.stats.degraded:

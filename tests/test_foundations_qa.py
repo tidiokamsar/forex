@@ -104,10 +104,10 @@ class ServiceErrorHandlingTests(ExecutionTestCase):
         service = self.service(None)
 
         def limited(_instrument):
-            raise BrokerRequestError("REQUEST_FREQUENCY_EXCEEDED")
+            raise BrokerRequestError("REQUEST_FREQUENCY_EXCEEDED", transient=True)
 
         def limited_events(_after):
-            raise BrokerRequestError("REQUEST_FREQUENCY_EXCEEDED")
+            raise BrokerRequestError("REQUEST_FREQUENCY_EXCEEDED", transient=True)
 
         self.broker.quote = limited
         self.broker.poll_events = limited_events

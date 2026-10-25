@@ -60,11 +60,20 @@ class BrokerUnavailable(Exception):
 class BrokerRequestError(Exception):
     """The provider refused one request; the connection itself is still healthy."""
 
-    def __init__(self, error_code: str, description: str = "", retry_after_seconds: float | None = None) -> None:
+    def __init__(
+        self,
+        error_code: str,
+        description: str = "",
+        retry_after_seconds: float | None = None,
+        *,
+        transient: bool = False,
+    ) -> None:
         super().__init__(f"{error_code}: {description}".strip(": "))
         self.error_code = error_code
         self.description = description
         self.retry_after_seconds = retry_after_seconds
+        # True only for refusals that clear by themselves (rate limits).
+        self.transient = transient is True
 
 
 class CapabilityNotSupported(Exception):

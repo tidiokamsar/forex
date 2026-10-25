@@ -196,7 +196,9 @@ def provider_error(body: dict[str, Any]) -> Exception:
     if code in CONNECTION_ERROR_CODES:
         return CTraderConnectionError(code, description)
     retry_after = body.get("retryAfter") if code in RATE_LIMIT_CODES else None
-    return CTraderError(code, description, float(retry_after) if retry_after is not None else None)
+    return CTraderError(
+        code, description, float(retry_after) if retry_after is not None else None, transient=code in RATE_LIMIT_CODES
+    )
 
 
 class LiveAccountRefused(BrokerUnavailable):
