@@ -49,6 +49,9 @@ class PromotionCriteria:
     require_cost_stress_non_negative: bool = True
     require_holdout: bool = True
     require_shadow: bool = False
+    max_pbo: float = 0.3
+    min_deflated_sharpe_probability: float = 0.95
+    require_overfitting_check: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.min_trades, int) or self.min_trades < 1:
@@ -56,6 +59,12 @@ class PromotionCriteria:
         for name in ("min_net_pnl", "min_profit_factor", "max_drawdown_pct", "min_edge_vs_baseline"):
             if not math.isfinite(getattr(self, name)):
                 raise ValueError(f"{name} must be finite")
+        for name in ("max_pbo", "min_deflated_sharpe_probability"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must be a probability within [0, 1]")
+        if not isinstance(self.require_overfitting_check, bool):
+            raise ValueError("require_overfitting_check must be a bool")
 
 
 EVIDENCE_FIELDS = (
@@ -66,6 +75,9 @@ EVIDENCE_FIELDS = (
     "edge_vs_baseline",
     "cost_stress_net_pnl",
     "holdout_used",
+    "pbo",
+    "deflated_sharpe_probability",
+    "variants_tested",
 )
 
 
@@ -311,6 +323,16 @@ class ModelRegistry:
                 failures.append("fails_cost_stress")
         if criteria.require_holdout and evidence.get("holdout_used") is not True:
             failures.append("holdout_not_confirmed")
+        if criteria.require_overfitting_check:
+            pbo = number("pbo")
+            dsr = number("deflated_sharpe_probability")
+            variants = number("variants_tested")
+            if pbo is None or dsr is None or variants is None or variants < 1:
+                failures.append("overfitting_check_missing")
+            if pbo is not None and pbo > criteria.max_pbo:
+                failures.append("pbo_above_threshold")
+            if dsr is not None and dsr < criteria.min_deflated_sharpe_probability:
+                failures.append("deflated_sharpe_below_threshold")
         return tuple(failures)
 
     def promote(self, *, actor: Actor, model_id: str, version: str, reason: str) -> None:

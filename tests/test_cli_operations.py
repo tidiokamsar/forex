@@ -49,6 +49,43 @@ class CliOperationsTests(unittest.TestCase):
             self.assertEqual(models["models"][0]["status"], "CANDIDATE")
             self.assertEqual(models["experiments"][0]["decision"], result["decision"])
 
+    def test_evaluate_strategies_seals_plan_and_records_inactive_candidate(self):
+        from astra.registry import EVIDENCE_FIELDS
+
+        with workspace_tempdir() as temp:
+            env = {"ASTRA_DATABASE": str(Path(temp) / "state.sqlite3")}
+            code, error = self.run_cli(env, "evaluate-strategies", "--register", "--model-id", "wf", "--version", "1")
+            self.assertEqual(code, 1)
+            self.assertIn("--evaluate-holdout", error["reason"])
+
+            code, result = self.run_cli(
+                env, "evaluate-strategies", "--evaluate-holdout", "--register", "--model-id", "wf", "--version", "1"
+            )
+            self.assertEqual(code, 0)
+            self.assertFalse(result["external_orders"])
+            self.assertIn("SYNTHETIC", result["exploratory_warning"])
+            self.assertEqual(result["dataset"]["source_type"], "SYNTHETIC")
+            self.assertEqual(result["report"]["families"], ["sma", "momentum", "breakout"])
+            self.assertEqual(result["holdout_evaluation"]["status"], "COMPLETED")
+            self.assertEqual(list(result["evidence"]), list(EVIDENCE_FIELDS))
+            self.assertEqual(result["registry_status"], "CANDIDATE")
+            self.assertTrue(result["promotion_blockers"])
+            self.assertIn(result["decision"], ("REJECTED", "NEEDS_MORE_RESEARCH"))
+
+            code, models = self.run_cli(env, "models")
+            self.assertEqual(models["models"][0]["status"], "CANDIDATE")
+            self.assertEqual(models["experiments"][0]["variants_tested"], result["report"]["variants_tested"])
+            self.assertEqual(models["experiments"][0]["decision"], result["decision"])
+
+            # Same plan: the completed holdout is returned, not recomputed.
+            code, retry = self.run_cli(env, "evaluate-strategies", "--evaluate-holdout")
+            self.assertEqual(code, 0)
+            self.assertEqual(retry["holdout_evaluation"]["evaluated_at"], result["holdout_evaluation"]["evaluated_at"])
+            # A different plan for the same dataset is refused.
+            code, error = self.run_cli(env, "evaluate-strategies", "--folds", "1")
+            self.assertEqual(code, 1)
+            self.assertIn("already sealed", error["reason"])
+
     def test_paper_replay_accepts_strategy_families(self):
         with workspace_tempdir() as temp:
             env = {"ASTRA_DATABASE": str(Path(temp) / "state.sqlite3")}

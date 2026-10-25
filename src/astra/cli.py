@@ -68,6 +68,31 @@ def build_parser() -> argparse.ArgumentParser:
     ml.add_argument("--validation-rows", type=int, default=20)
     ml.add_argument("--minimum-training-rows", type=int, default=60)
     ml.add_argument("--embargo-bars", type=int, default=2)
+    strategies_wf = commands.add_parser(
+        "evaluate-strategies",
+        help="Walk-forward scellé multi-familles (SMA, momentum, breakout); preuves pour le registre",
+    )
+    strategies_wf.add_argument("--csv", type=Path, help="Fichier OHLC CSV; défaut: jeu synthétique inclus")
+    strategies_wf.add_argument("--source-type", choices=SOURCE_TYPES)
+    strategies_wf.add_argument("--source-name", help="Libellé de provenance sans chemin local")
+    strategies_wf.add_argument("--interval-seconds", type=float)
+    strategies_wf.add_argument("--folds", type=int, default=2)
+    strategies_wf.add_argument("--minimum-training-bars", type=int, default=60)
+    strategies_wf.add_argument("--validation-bars", type=int, default=20)
+    strategies_wf.add_argument("--holdout-bars", type=int, default=20)
+    strategies_wf.add_argument("--minimum-candidate-trades", type=int, default=1)
+    strategies_wf.add_argument(
+        "--evaluate-holdout",
+        action="store_true",
+        help="Consommer une seule fois le holdout final, après scellement SQLite du plan",
+    )
+    strategies_wf.add_argument(
+        "--register",
+        action="store_true",
+        help="Enregistrer le candidat sélectionné (CANDIDATE inactif) avec la preuve holdout",
+    )
+    strategies_wf.add_argument("--model-id", help="Identifiant du modèle au registre (avec --register)")
+    strategies_wf.add_argument("--version", help="Version immuable au registre (avec --register)")
     check = commands.add_parser(
         "ctrader-check",
         help="Vérification en lecture seule d'un compte démo cTrader (aucun ordre envoyé)",
@@ -227,10 +252,11 @@ def _run(args: argparse.Namespace) -> int:
         if args.command in ("orders", "controls", "models"):
             return _operations_command(args, config)
 
-        if args.command in ("paper-replay", "ml-baseline") and args.csv is not None and args.source_type is None:
+        defaultable = ("paper-replay", "ml-baseline", "evaluate-strategies")
+        if args.command in defaultable and args.csv is not None and args.source_type is None:
             raise ValueError("--source-type is required with --csv")
 
-        if args.command == "demo" or (args.command in ("paper-replay", "ml-baseline") and args.csv is None):
+        if args.command == "demo" or (args.command in defaultable and args.csv is None):
             csv_path = PROJECT_ROOT / "data" / "synthetic_eurusd_m15.csv"
             if hashlib.sha256(csv_path.read_bytes()).hexdigest() != DEMO_FIXTURE_SHA256:
                 raise ValueError(
@@ -291,6 +317,10 @@ def _run(args: argparse.Namespace) -> int:
 
         if args.command == "ml-baseline":
             _write_json(_ml_baseline(args, config, dataset))
+            return 0
+
+        if args.command == "evaluate-strategies":
+            _write_json(_evaluate_strategies(args, config, dataset))
             return 0
 
         provenance = {
@@ -589,6 +619,167 @@ def _ml_baseline(args: argparse.Namespace, config: AppConfig, dataset) -> dict:
             "Classification edge is not trading performance. The candidate stays inactive: promotion "
             "requires pre-registered trading evidence after costs, a holdout, and a human reviewer."
         ),
+        "external_orders": False,
+    }
+
+
+STRATEGY_HYPOTHESIS = (
+    "At least one pre-declared SMA, momentum or breakout configuration, selected on validation "
+    "windows only, earns positive net P&L after modelled costs out of sample and beats both the "
+    "flat and the SMA reference baselines, including under 1.5x and 2x cost stress."
+)
+STRATEGY_MECHANISM = (
+    "Trend persistence (SMA crossover, time-series momentum) or range expansion (Donchian breakout) "
+    "observable at bar close."
+)
+
+
+def _evaluate_strategies(args: argparse.Namespace, config: AppConfig, dataset) -> dict:
+    from . import features
+    from .strategy_validation import (
+        default_candidates,
+        evaluate_strategy_holdout_once,
+        evaluate_strategy_walk_forward,
+        holdout_evidence,
+    )
+
+    if args.register and not args.evaluate_holdout:
+        raise ValueError("--register requires --evaluate-holdout (only holdout evidence is recorded)")
+    if args.register and not (args.model_id and args.version):
+        raise ValueError("--register requires --model-id and --version")
+    protocol = WalkForwardProtocol(
+        fold_count=args.folds,
+        minimum_training_bars=args.minimum_training_bars,
+        validation_bars=args.validation_bars,
+        holdout_bars=args.holdout_bars,
+        minimum_candidate_trades=args.minimum_candidate_trades,
+    )
+    candidates = default_candidates()
+    registry = ModelRegistry(config.database_path)
+    registry.initialize()
+    store = BacktestStore(config.database_path)
+    store.initialize()
+    author = Actor("cli:evaluate-strategies", Role.SYSTEM)
+    identity = {"dataset_id": dataset.dataset_id, "sha256": dataset.sha256, "source_type": dataset.source_type}
+    experiment_id = registry.open_experiment(
+        author=author,
+        hypothesis=STRATEGY_HYPOTHESIS,
+        mechanism=STRATEGY_MECHANISM,
+        dataset_id=dataset.dataset_id,
+        plan={
+            "protocol": asdict(protocol),
+            "candidates": [candidate.descriptor() for candidate in candidates],
+            "selection": "validation windows only",
+            "evaluate_holdout": bool(args.evaluate_holdout),
+        },
+        variants_tested=len(candidates),
+    )
+    try:
+        report = evaluate_strategy_walk_forward(
+            dataset.bars,
+            candidates,
+            hypothesis=STRATEGY_HYPOTHESIS,
+            protocol=protocol,
+            dataset_sha256=dataset.sha256,
+            store=store,
+        )
+        selected = next((item for item in report.final_candidate_selection if item.selected), None)
+        registered = None
+        if args.register:
+            if selected is None:
+                raise ValueError("no eligible candidate was selected on validation windows; nothing to register")
+            # Criteria are frozen at registration, before the holdout is scored.
+            registry.register_candidate(
+                actor=author,
+                model_id=args.model_id,
+                version=args.version,
+                manifest={
+                    "dataset_identity": {**identity, "canonical_sha256": report.dataset_identity_sha256},
+                    "feature_set_version": features.FEATURE_SET_VERSION,
+                    "code_sha256": report.implementation_sha256,
+                    "params": selected.config,
+                    "candidate_id": selected.candidate_id,
+                    "plan_sha256": report.plan_sha256,
+                    "strategy_validation_version": report.strategy_validation_version,
+                    "experiment_id": experiment_id,
+                },
+                criteria=PromotionCriteria(),
+            )
+            registered = {"model_id": args.model_id, "version": args.version}
+        holdout_payload = None
+        evidence = None
+        if args.evaluate_holdout:
+            holdout = evaluate_strategy_holdout_once(
+                dataset.bars,
+                candidates,
+                report=report,
+                protocol=protocol,
+                store=store,
+                dataset_sha256=dataset.sha256,
+            )
+            holdout_payload = holdout if isinstance(holdout, dict) else asdict(holdout)
+            evidence = holdout_evidence(holdout)
+            if registered is not None:
+                registry.record_evaluation(
+                    model_id=args.model_id, version=args.version, kind="holdout", evidence=evidence
+                )
+    except Exception as exc:
+        # Failed runs are kept as rejected experiments, never deleted.
+        registry.close_experiment(
+            experiment_id,
+            result={"status": "error", "error_type": type(exc).__name__, "reason": str(exc)},
+            decision="REJECTED",
+        )
+        raise
+
+    if selected is None:
+        decision = "REJECTED"
+    elif evidence is not None:
+        stress = evidence["cost_stress_net_pnl"]
+        positive = all(
+            isinstance(value, (int, float)) and value > 0
+            for value in (evidence["net_pnl"], evidence["edge_vs_baseline"])
+        )
+        decision = "NEEDS_MORE_RESEARCH" if positive and stress is not None and stress >= 0 else "REJECTED"
+    else:
+        selected_net = report.selected_candidate_test_aggregate.net_pnl
+        baseline_net = max(0.0, report.sma_reference_test_aggregate.net_pnl)
+        decision = "NEEDS_MORE_RESEARCH" if selected_net > baseline_net else "REJECTED"
+    registry.close_experiment(
+        experiment_id,
+        result={
+            "selected_candidate_id": report.selected_candidate_id,
+            "selected_family": selected.family if selected else None,
+            "variants_tested": report.variants_tested,
+            "overfitting_status": report.overfitting.status,
+            "holdout_evidence": evidence,
+        },
+        decision=decision,
+    )
+    blockers = list(registry.check_promotion(registered["model_id"], registered["version"])) if registered else None
+    warnings = [
+        "Strategy walk-forward results are simulation evidence, not a promotion decision or a trading "
+        "authorization. This command never promotes; a human reviewer must pass every pre-registered gate.",
+        "This local store freezes one plan per canonical dataset, but direct API calls, full-history "
+        "backtests, database replacement or edits can contaminate evaluation windows.",
+    ]
+    if dataset.source_type == "SYNTHETIC":
+        warnings.append("SYNTHETIC data: results are exploratory only and say nothing about real markets.")
+    return {
+        "status": "completed",
+        "mode": "SIMULATION",
+        "experiment_id": experiment_id,
+        "decision": decision,
+        "dataset": {**identity, "source_name": dataset.source_name, "observations": len(dataset.bars)},
+        "protocol_id": report.plan_sha256,
+        "report": asdict(report),
+        "holdout_persistence": "SQLITE_ONCE_PER_CANONICAL_MARKET_BAR_IDENTITY",
+        "holdout_evaluation": holdout_payload,
+        "evidence": evidence,
+        "registered": registered,
+        "registry_status": "CANDIDATE" if registered else None,
+        "promotion_blockers": blockers,
+        "exploratory_warning": " ".join(warnings),
         "external_orders": False,
     }
 
