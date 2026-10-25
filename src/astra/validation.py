@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from itertools import pairwise
 from pathlib import Path
 
-from . import models, research, risk
+from . import attempts, models, research, risk
 from .models import BacktestConfig, BacktestResult, CostModel, MarketBar
 from .research import (
     STRATEGY_NAME,
@@ -225,14 +225,32 @@ def evaluate_walk_forward(
     hypothesis: str,
     protocol: WalkForwardProtocol = WalkForwardProtocol(),
     dataset_sha256: str | None = None,
+    store=None,
+    experiment_id: str | None = None,
 ) -> WalkForwardReport:
     """Select configurations on validation windows and score disjoint tests.
 
     The last ``holdout_bars`` rows are assigned to the final holdout boundary,
     but no function in this protocol computes metrics over them. A durable,
-    once-only holdout lock remains a separate persistence capability.
+    once-only holdout lock remains a separate persistence capability. With
+    ``store`` the plan is sealed before any window is scored and every variant
+    of every fold (and of the run) is appended to the attempt registry.
     """
 
+    recorder = attempts.WalkForwardAttempts.for_store(store, experiment_id=experiment_id)
+    try:
+        return _evaluate_walk_forward(
+            bars, candidates, hypothesis=hypothesis, protocol=protocol, dataset_sha256=dataset_sha256,
+            store=store, recorder=recorder,
+        )
+    except BaseException as exc:
+        recorder.abort(exc)
+        raise
+
+
+def _evaluate_walk_forward(
+    bars, candidates, *, hypothesis, protocol, dataset_sha256, store, recorder
+) -> WalkForwardReport:
     if not isinstance(hypothesis, str) or not hypothesis.strip():
         raise ValueError("a falsifiable, non-empty hypothesis is required")
     history = _prepare_bars(bars)
@@ -347,11 +365,20 @@ def evaluate_walk_forward(
         },
     }
     plan_hash = _sha256(_canonical_json(plan))
+    if store is not None:
+        store.seal_research_protocol(
+            protocol_id=plan_hash,
+            dataset_identity_sha256=dataset_identity_hash,
+            protocol_version=protocol.version,
+            plan_manifest=plan,
+        )
+        recorder.begin(plan_hash, plan, candidate_descriptors)
 
     completed_folds: list[FoldEvaluation] = []
     for fold_number, (validation_start, validation_end, test_start, test_end) in enumerate(
         fold_ranges, start=1
     ):
+        recorder.start_fold(fold_number)
         train_bars = history[:validation_start]
         validation_history = history[:validation_end]
         validation_start_time = history[validation_start].timestamp
@@ -414,6 +441,10 @@ def evaluate_walk_forward(
                 )
                 for trial in trials
             ]
+        recorder.finish_fold(
+            fold_number, trials,
+            {item[0]: [trade.net_pnl / initial_equity for trade in item[2].trades] for item in trial_results},
+        )
 
         selected_config = selected_tuple[1] if selected_tuple else None
         selected_result = (
@@ -538,6 +569,7 @@ def evaluate_walk_forward(
         )
         for trial in aggregate_trials
     )
+    recorder.finish_run(final_candidate_selection)
 
     denominator = initial_equity * len(completed_folds)
     selected_aggregate = _aggregate(
@@ -617,6 +649,7 @@ def evaluate_holdout_once(
     protocol: WalkForwardProtocol,
     store,
     dataset_sha256: str | None = None,
+    experiment_id: str | None = None,
 ) -> HoldoutEvaluation | dict:
     """Evaluate the reserved final block once, with a durable pre-run lock.
 
@@ -687,6 +720,11 @@ def evaluate_holdout_once(
     if attempt["status"] == "COMPLETED":
         return attempt["report"]
 
+    selected_trial = next((trial for trial in verified_report.final_candidate_selection if trial.selected), None)
+    holdout_attempt = attempts.HoldoutAttempt.start(
+        store, protocol_id=walk_forward_report.plan_sha256, plan=walk_forward_report.plan_manifest,
+        candidate_id=selected_trial.candidate_id if selected_trial else None, experiment_id=experiment_id,
+    )
     try:
         trials = verified_report.final_candidate_selection
         selected = next((trial for trial in trials if trial.selected), None)
@@ -783,12 +821,19 @@ def evaluate_holdout_once(
             evaluation_id=attempt["evaluation_id"],
             report=asdict(evaluation),
         )
+        holdout_attempt.finish(
+            {"selected_candidate": asdict(evaluation.selected_candidate) if evaluation.selected_candidate else None},
+            attempts.sharpe_like([trade.net_pnl / initial_equity for trade in selected_result.trades])
+            if selected_result
+            else None,
+        )
         return evaluation
     except Exception as exc:
         store.fail_holdout_evaluation(
             evaluation_id=attempt["evaluation_id"],
             error_type=type(exc).__name__,
         )
+        holdout_attempt.fail(exc)
         raise
 
 

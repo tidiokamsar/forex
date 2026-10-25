@@ -21,6 +21,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from .attempts import AttemptLog, promotion_trial_failures, scope_for_plan
 from .governance import Action, Actor, PermissionGuard
 from .storage import BacktestStore
 
@@ -304,7 +305,10 @@ class ModelRegistry:
                         raise PromotionError(
                             f"holdout evaluation already backs {other['model_id']}@{other['version']}; one version per holdout"
                         )
-            evidence = {**evidence, PROVENANCE_KEY: {"holdout_evaluation_id": holdout_evaluation_id}}
+            evidence = {
+                **evidence,
+                PROVENANCE_KEY: {"holdout_evaluation_id": holdout_evaluation_id, **self._trial_snapshot(model_id, version)},
+            }
         evaluation_id = str(uuid.uuid4())
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -390,6 +394,10 @@ class ModelRegistry:
             variants = number("variants_tested")
             if pbo is None or dsr is None or variants is None or variants < 1:
                 failures.append("overfitting_check_missing")
+            # The trial count must cover every relevant attempt in the store, not one plan's grid,
+            # and the append-only attempt log must be intact.
+            with self._connect() as db:
+                failures.extend(promotion_trial_failures(db, json.loads(row["manifest_json"]), variants))
             if pbo is not None and pbo > criteria.max_pbo:
                 failures.append("pbo_above_threshold")
             if dsr is not None and dsr < criteria.min_deflated_sharpe_probability:
@@ -486,6 +494,18 @@ class ModelRegistry:
                 "SELECT * FROM model_status_events WHERE model_id = ? ORDER BY occurred_at, rowid", (model_id,)
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def _trial_snapshot(self, model_id: str, version: str) -> dict[str, Any]:
+        """Store-wide trial count and attempt-chain head when holdout evidence is recorded (informative)."""
+
+        with self._connect() as db:
+            manifest = json.loads(self._version(db, model_id, version)["manifest_json"])
+            plan_row = db.execute(
+                "SELECT plan_json FROM research_protocols WHERE protocol_id = ?", (manifest.get("plan_sha256"),)
+            ).fetchone()
+        log = AttemptLog(self.path)
+        stats = log.trial_statistics(scope_for_plan(json.loads(plan_row["plan_json"]) if plan_row else None))
+        return {"store_trial_count_at_record": stats.count, "attempt_chain_head_at_record": log.chain_head()["row_hash"]}
 
     # -- audit sink and internals -------------------------------------------------
 

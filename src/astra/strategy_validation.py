@@ -28,7 +28,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from . import features, models, regimes, research, risk, signal_backtest, strategies, validation
+from . import attempts, features, models, regimes, research, risk, signal_backtest, strategies, validation
 from .models import BacktestConfig, BacktestResult, CostModel, MarketBar
 from .registry import EVIDENCE_FIELDS
 from .research import _prepare_bars
@@ -320,14 +320,31 @@ def evaluate_strategy_walk_forward(
     cost_model: CostModel | None = None,
     dataset_sha256: str | None = None,
     store=None,
+    experiment_id: str | None = None,
 ) -> StrategyWalkForwardReport:
     """Select on validation windows across families and score disjoint tests.
 
     With ``store`` the plan is sealed before any window is scored; a different
     plan for the same canonical dataset identity is rejected by the store. No
-    metric is computed over the reserved final holdout here.
+    metric is computed over the reserved final holdout here. With ``store``
+    every variant of every fold, and of the run as a whole, is also appended to
+    the attempt registry (``astra.attempts``), selected, rejected or failed.
     """
 
+    recorder = attempts.WalkForwardAttempts.for_store(store, experiment_id=experiment_id)
+    try:
+        return _evaluate_strategy_walk_forward(
+            bars, candidates, hypothesis=hypothesis, protocol=protocol, initial_equity=initial_equity,
+            cost_model=cost_model, dataset_sha256=dataset_sha256, store=store, recorder=recorder,
+        )
+    except BaseException as exc:
+        recorder.abort(exc)
+        raise
+
+
+def _evaluate_strategy_walk_forward(
+    bars, candidates, *, hypothesis, protocol, initial_equity, cost_model, dataset_sha256, store, recorder
+) -> StrategyWalkForwardReport:
     history, chosen, cost_model = _prepare(bars, candidates, protocol, initial_equity, cost_model)
     if not isinstance(hypothesis, str) or not hypothesis.strip():
         raise ValueError("a falsifiable, non-empty hypothesis is required")
@@ -415,6 +432,7 @@ def evaluate_strategy_walk_forward(
             protocol_version=protocol.version,
             plan_manifest=plan,
         )
+        recorder.begin(plan_hash, plan, descriptors)
 
     ids = tuple(candidate.candidate_id for candidate in chosen)
     folds: list[StrategyFold] = []
@@ -423,6 +441,7 @@ def evaluate_strategy_walk_forward(
     validation_trades: dict[str, list[float]] = {cid: [] for cid in ids}
     test_trades: dict[str, list[float]] = {cid: [] for cid in ids}
     for ordinal, (vs, ve, ts, te) in enumerate(ranges, start=1):
+        recorder.start_fold(ordinal)
         # 1) Validation only, then selection. Test results do not exist yet.
         validation_results = {
             candidate.candidate_id: _simulate(
@@ -467,6 +486,7 @@ def evaluate_strategy_walk_forward(
             )
             for candidate in chosen
         )
+        recorder.finish_fold(ordinal, trials, {cid: _trade_returns(validation_results[cid], initial_equity) for cid in ids})
         selected_metrics = _result_metrics(test_results[selected_id]) if selected_id else None
         folds.append(
             StrategyFold(
@@ -503,6 +523,7 @@ def evaluate_strategy_walk_forward(
 
     final_selection = _final_selection(chosen, folds, protocol.minimum_candidate_trades)
     final_id = next((item.candidate_id for item in final_selection if item.selected), None)
+    recorder.finish_run(final_selection)
     trial_sharpes = [value for value in (_sharpe(validation_trades[cid]) for cid in ids) if value is not None]
     overfitting = assess_overfitting(
         matrix,
@@ -555,6 +576,9 @@ def evaluate_strategy_holdout_once(
     initial_equity: float = 10_000.0,
     cost_model: CostModel | None = None,
     dataset_sha256: str | None = None,
+    experiment_id: str | None = None,
+    model_id: str | None = None,
+    model_version: str | None = None,
 ) -> StrategyHoldoutEvaluation | dict:
     """Score the reserved final block once, after a durable STARTED record.
 
@@ -609,6 +633,10 @@ def evaluate_strategy_holdout_once(
     if attempt["status"] == "COMPLETED":
         return attempt["report"]
 
+    holdout_attempt = attempts.HoldoutAttempt.start(
+        store, protocol_id=report.plan_sha256, plan=report.plan_manifest, candidate_id=verified.selected_candidate_id,
+        experiment_id=experiment_id, model_id=model_id, model_version=model_version,
+    )
     try:
         by_id = {candidate.candidate_id: candidate for candidate in chosen}
         selected = by_id.get(verified.selected_candidate_id) if verified.selected_candidate_id else None
@@ -688,9 +716,14 @@ def evaluate_strategy_holdout_once(
             evaluation_classification="ONE_TIME_HOLDOUT_NOT_PROMOTABLE",
         )
         store.complete_holdout_evaluation(evaluation_id=attempt["evaluation_id"], report=asdict(evaluation))
+        holdout_attempt.finish(
+            holdout_evidence(evaluation),
+            _sharpe(_trade_returns(selected_result, initial_equity)) if selected_result else None,
+        )
         return evaluation
     except Exception as exc:
         store.fail_holdout_evaluation(evaluation_id=attempt["evaluation_id"], error_type=type(exc).__name__)
+        holdout_attempt.fail(exc)
         raise
 
 

@@ -12,6 +12,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .attempts import AttemptLog, AttemptStatus, TrialScope
 from .brokers.base import BrokerRequestError, BrokerTimeout, BrokerUnavailable
 from .config import AppConfig, ModeUnavailableError
 from .data import load_bars_csv
@@ -106,6 +107,26 @@ def build_parser() -> argparse.ArgumentParser:
     orders.add_argument("--price", type=float, help="Prix moyen d'exécution si FILLED")
     orders.add_argument("--operator", help="Identifiant de l'opérateur humain")
     commands.add_parser("models", help="Lister le registre des modèles et expériences")
+    attempts_cmd = commands.add_parser(
+        "attempts", help="Registre des tentatives de recherche (lecture seule): lister, compter, vérifier la chaîne"
+    )
+    attempt_actions = attempts_cmd.add_subparsers(dest="attempts_action", required=True)
+    attempts_list = attempt_actions.add_parser("list", help="Lister l'état courant des tentatives")
+    attempts_list.add_argument("--protocol", help="Filtrer sur un plan scellé (protocol_id)")
+    attempts_list.add_argument("--instrument")
+    attempts_list.add_argument("--status", choices=[status.value for status in AttemptStatus])
+    attempts_list.add_argument("--limit", type=int, default=100)
+    attempts_count = attempt_actions.add_parser(
+        "count", help="Nombre d'essais distincts à l'échelle du store (tous plans, tous statuts)"
+    )
+    attempts_count.add_argument("--protocol", help="Portée: instrument et période du plan scellé")
+    attempts_count.add_argument("--instrument", help="Portée explicite (sans --protocol)")
+    attempts_count.add_argument("--start", help="Début de période ISO 8601 (sans --protocol)")
+    attempts_count.add_argument("--end", help="Fin de période ISO 8601 (sans --protocol)")
+    attempts_verify = attempt_actions.add_parser("verify", help="Vérifier la chaîne de hachage des tentatives")
+    attempts_verify.add_argument(
+        "--expected-head", help="Tête de chaîne conservée hors de la base (row_hash), pour détecter une réécriture"
+    )
     service = commands.add_parser("service", help="Service de trading continu (courtier simulé dans cette version)")
     service_actions = service.add_subparsers(dest="service_action", required=True)
     service_run = service_actions.add_parser("run", help="Lancer la boucle continue sur le courtier simulé")
@@ -252,6 +273,9 @@ def _run(args: argparse.Namespace) -> int:
         if args.command in ("orders", "controls", "models"):
             return _operations_command(args, config)
 
+        if args.command == "attempts":
+            return _attempts_command(args, config)
+
         defaultable = ("paper-replay", "ml-baseline", "evaluate-strategies")
         if args.command in defaultable and args.csv is not None and args.source_type is None:
             raise ValueError("--source-type is required with --csv")
@@ -338,6 +362,9 @@ def _run(args: argparse.Namespace) -> int:
                 BacktestConfig(fast_window=fast, slow_window=slow)
                 for fast, slow in (_parse_candidate(value) for value in candidate_pairs)
             )
+            store = BacktestStore(config.database_path)
+            store.initialize()
+            # The store seals the plan before scoring and records every attempt.
             report = evaluate_walk_forward(
                 dataset.bars,
                 candidates,
@@ -350,14 +377,7 @@ def _run(args: argparse.Namespace) -> int:
                     minimum_candidate_trades=args.minimum_candidate_trades,
                 ),
                 dataset_sha256=dataset.sha256,
-            )
-            store = BacktestStore(config.database_path)
-            store.initialize()
-            store.seal_research_protocol(
-                protocol_id=report.plan_sha256,
-                dataset_identity_sha256=report.dataset_identity_sha256,
-                protocol_version=report.protocol_version,
-                plan_manifest=report.plan_manifest,
+                store=store,
             )
             holdout_result = None
             if args.evaluate_holdout:
@@ -682,6 +702,7 @@ def _evaluate_strategies(args: argparse.Namespace, config: AppConfig, dataset) -
             protocol=protocol,
             dataset_sha256=dataset.sha256,
             store=store,
+            experiment_id=experiment_id,
         )
         selected = next((item for item in report.final_candidate_selection if item.selected), None)
         registered = None
@@ -722,6 +743,9 @@ def _evaluate_strategies(args: argparse.Namespace, config: AppConfig, dataset) -
                 protocol=protocol,
                 store=store,
                 dataset_sha256=dataset.sha256,
+                experiment_id=experiment_id,
+                model_id=registered["model_id"] if registered else None,
+                model_version=registered["version"] if registered else None,
             )
             holdout_payload = holdout if isinstance(holdout, dict) else asdict(holdout)
             evidence = holdout_evidence(holdout)
@@ -794,6 +818,43 @@ def _evaluate_strategies(args: argparse.Namespace, config: AppConfig, dataset) -
         "exploratory_warning": " ".join(warnings),
         "external_orders": False,
     }
+
+
+def _attempts_command(args: argparse.Namespace, config: AppConfig) -> int:
+    """Read-only views of the attempt registry; the database is opened read-only."""
+
+    import sqlite3
+
+    log = AttemptLog(config.database_path)
+    try:
+        if args.attempts_action == "list":
+            items = log.attempts(protocol_id=args.protocol, instrument=args.instrument, status=args.status,
+                                 limit=max(1, min(int(args.limit), 1000)))
+            _write_json({"attempts": items, "count": len(items), "chain_head": log.chain_head()})
+            return 0
+        if args.attempts_action == "count":
+            if args.protocol:
+                stats = log.trial_statistics_for_protocol(args.protocol)
+            else:
+                stats = log.trial_statistics(
+                    TrialScope(instrument=args.instrument, period_start=args.start, period_end=args.end)
+                )
+            _write_json({"trials": asdict(stats), "chain_head": log.chain_head()})
+            return 0
+        verification = log.verify_chain(args.expected_head)
+        _write_json(
+            {
+                "verification": asdict(verification),
+                "chain_head": log.chain_head(),
+                "limit": (
+                    "Tamper-evidence only: whoever can write the SQLite file can rewrite the whole chain. "
+                    "Keep the printed chain head outside the database and pass it as --expected-head."
+                ),
+            }
+        )
+        return 0 if verification.ok else 1
+    except (sqlite3.Error, KeyError) as exc:
+        raise ValueError(f"attempt registry unavailable: {exc}") from exc
 
 
 def _service_command(args: argparse.Namespace, config: AppConfig) -> int:
