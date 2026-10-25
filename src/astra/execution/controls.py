@@ -21,6 +21,7 @@ class FreezeReason(StrEnum):
     DAILY_LOSS_LIMIT = "daily_loss_limit"
     CLOCK_INCONSISTENT = "clock_inconsistent"
     OPERATOR = "operator"
+    SERVICE_DEGRADED = "service_degraded"
 
 
 # Reasons that only a successful reconciliation may clear.

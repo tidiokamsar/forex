@@ -185,6 +185,11 @@ class ExecutionStore:
                     status TEXT NOT NULL CHECK (status IN ('CONSISTENT', 'DIVERGENT', 'FAILED')),
                     details_json TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS service_state (
+                    state_key TEXT PRIMARY KEY,
+                    value_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 CREATE INDEX IF NOT EXISTS idx_orders_state ON orders(state);
                 CREATE INDEX IF NOT EXISTS idx_order_transitions_intent
                     ON order_transitions(intent_id, occurred_at);
@@ -356,6 +361,30 @@ class ExecutionStore:
                 "SELECT value_json FROM trading_controls WHERE control_key = ?", (key,)
             ).fetchone()
         return json.loads(row["value_json"]) if row else default
+
+    def get_state(self, key: str, default: Any = None) -> Any:
+        """Operational state (heartbeats, cursors); not a control, so not audited."""
+
+        with self._connect() as db:
+            row = db.execute("SELECT value_json FROM service_state WHERE state_key = ?", (key,)).fetchone()
+        return json.loads(row["value_json"]) if row else default
+
+    def put_state(self, key: str, value: Any) -> None:
+        with self._connect() as db:
+            db.execute(
+                """INSERT INTO service_state (state_key, value_json, updated_at) VALUES (?, ?, ?)
+                   ON CONFLICT(state_key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at""",
+                (key, json.dumps(value, sort_keys=True, default=str), _now()),
+            )
+
+    def states_with_prefix(self, prefix: str) -> list[tuple[str, Any, str]]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT state_key, value_json, updated_at FROM service_state "
+                "WHERE substr(state_key, 1, ?) = ? ORDER BY state_key",
+                (len(prefix), prefix),
+            ).fetchall()
+        return [(row["state_key"], json.loads(row["value_json"]), row["updated_at"]) for row in rows]
 
     def controls_with_prefix(self, prefix: str) -> list[tuple[str, Any]]:
         """The control ``prefix`` itself plus every ``prefix:<scope>`` key."""

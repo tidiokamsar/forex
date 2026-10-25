@@ -81,6 +81,16 @@ def build_parser() -> argparse.ArgumentParser:
     orders.add_argument("--price", type=float, help="Prix moyen d'exécution si FILLED")
     orders.add_argument("--operator", help="Identifiant de l'opérateur humain")
     commands.add_parser("models", help="Lister le registre des modèles et expériences")
+    service = commands.add_parser("service", help="Service de trading continu (courtier simulé dans cette version)")
+    service_actions = service.add_subparsers(dest="service_action", required=True)
+    service_run = service_actions.add_parser("run", help="Lancer la boucle continue sur le courtier simulé")
+    service_run.add_argument("--strategy", choices=("sma", "momentum", "breakout"), default="sma")
+    service_run.add_argument("--timeframe", type=int, default=60, help="Durée des barres en secondes")
+    service_run.add_argument("--max-ticks", type=int, help="Arrêt après N ticks (défaut: jusqu'à Ctrl+C)")
+    service_run.add_argument("--tick-seconds", type=float, default=5.0, help="Pas du flux synthétique")
+    service_run.add_argument("--realtime", action="store_true", help="Attendre réellement entre deux ticks")
+    service_run.add_argument("--seed", type=int, default=7)
+    service_actions.add_parser("status", help="Afficher le dernier battement de cœur de chaque service")
     backup = commands.add_parser("backup", help="Sauvegarde, vérification et restauration de la base")
     backup_actions = backup.add_subparsers(dest="backup_action", required=True)
     backup_create = backup_actions.add_parser("create", help="Créer une sauvegarde cohérente vérifiée")
@@ -188,6 +198,9 @@ def _run(args: argparse.Namespace) -> int:
         if args.command == "ctrader-check":
             _write_json(ctrader_check(args.operator, config))
             return 0
+
+        if args.command == "service":
+            return _service_command(args, config)
 
         if args.command == "backup":
             from dataclasses import asdict as _asdict
@@ -571,6 +584,56 @@ def _ml_baseline(args: argparse.Namespace, config: AppConfig, dataset) -> dict:
         ),
         "external_orders": False,
     }
+
+
+def _service_command(args: argparse.Namespace, config: AppConfig) -> int:
+    import signal
+    from dataclasses import asdict as _asdict
+
+    from .brokers.simulated import SimulatedBroker
+    from .service import SyntheticQuoteFeed, TradingService, service_status
+
+    store = ExecutionStore(config.database_path)
+    store.initialize()
+    if args.service_action == "status":
+        _write_json({"services": service_status(store)})
+        return 0
+    # This build runs the service only against the in-process simulator with
+    # a SYNTHETIC feed; no external connector is wired into the service yet.
+    account_ref = "SIM-SERVICE-CLI"
+    holder: dict = {}
+    broker = SimulatedBroker(account_ref=account_ref, clock=lambda: holder["feed"].clock())
+    feed = SyntheticQuoteFeed(broker, step_seconds=args.tick_seconds, seed=args.seed)
+    holder["feed"] = feed
+    service = TradingService(
+        store=store,
+        broker=broker,
+        decide=strategy_decisions(args.strategy),
+        account_ref=account_ref,
+        timeframe_seconds=args.timeframe,
+        clock=feed.clock,
+        reconnect=broker.reconnect,
+    )
+    for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), lambda *_: service.stop())
+    stats = service.run(
+        advance=feed.advance,
+        max_ticks=args.max_ticks,
+        tick_interval_seconds=args.tick_seconds if args.realtime else 0.0,
+    )
+    _write_json(
+        {
+            "mode": "SIMULATION",
+            "broker": "astra-simulated-broker",
+            "feed": feed.label,
+            "stats": _asdict(stats),
+            "positions": [[p.instrument, p.net_units] for p in broker.open_positions()],
+            "note": "Simulated broker and synthetic quotes only. The in-memory broker does not survive a restart.",
+            "external_orders": False,
+        }
+    )
+    return 0
 
 
 def _operations_command(args: argparse.Namespace, config: AppConfig) -> int:

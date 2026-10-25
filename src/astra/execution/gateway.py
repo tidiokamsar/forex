@@ -134,6 +134,7 @@ class OrderGateway:
         self._clock = clock
         self._skew = max_clock_skew_seconds
         self._tolerance = position_tolerance_units
+        self._cursor: int | None = None
 
     @property
     def controls(self) -> TradingControls:
@@ -485,7 +486,11 @@ class OrderGateway:
     def process_events(self) -> int:
         """Apply provider events; out-of-order or stale events are ignored."""
 
-        cursor = int(self._store.get_control(_EVENT_CURSOR, 0))
+        # Each adapter numbers its own events, so the cursor is per account.
+        cursor_key = _EVENT_CURSOR if self._account_ref is None else f"{_EVENT_CURSOR}:{self._account_ref}"
+        if self._cursor is None:
+            self._cursor = int(self._store.get_state(cursor_key, 0))
+        cursor = self._cursor
         try:
             events = self._broker.poll_events(cursor)
         except BrokerRequestError as exc:
@@ -510,9 +515,8 @@ class OrderGateway:
             after = self._apply_report(record.intent_id, event.report)
             applied += int(after.state is not before or after.last_broker_sequence != record.last_broker_sequence)
         if highest != cursor:
-            self._store.set_control(
-                _EVENT_CURSOR, highest, actor="system", audit_type="execution.event_cursor", details={"cursor": highest}
-            )
+            self._store.put_state(cursor_key, highest)
+            self._cursor = highest
         return applied
 
     # -- connection and reconciliation ----------------------------------------

@@ -57,6 +57,16 @@ class CliOperationsTests(unittest.TestCase):
                 self.assertEqual(code, 0)
                 self.assertEqual(replay["replay"]["reconciliation_end"], "CONSISTENT")
 
+    def test_service_run_and_status_on_simulator(self):
+        with workspace_tempdir() as temp:
+            env = {"ASTRA_DATABASE": str(Path(temp) / "state.sqlite3")}
+            code, result = self.run_cli(env, "service", "run", "--max-ticks", "120")
+            self.assertEqual(code, 0)
+            self.assertEqual((result["mode"], result["feed"], result["external_orders"]), ("SIMULATION", "SYNTHETIC", False))
+            self.assertEqual(result["stats"]["ticks"], 120)
+            code, status = self.run_cli(env, "service", "status")
+            self.assertEqual(status["services"][0]["status"], "stopped")
+
     def test_paper_replay_with_csv_requires_source_type(self):
         with workspace_tempdir() as temp:
             env = {"ASTRA_DATABASE": str(Path(temp) / "state.sqlite3")}
