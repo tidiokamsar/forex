@@ -1,5 +1,13 @@
 # Changelog
 
+## Lot 4 independent review, quantitative integrity, attempt registry · branch `feat/lot4-integrite-quant` · 2026-10-25
+
+- `attempts.py`: append-only, hash-chained research attempt registry (every fold trial, run and holdout; selected, rejected, failed, interrupted, abandoned); store-wide trial count over every period of the instrument; CLI `attempts list|count|verify`.
+- `overfitting.py` 1.1.0 and `strategy_validation.py` 1.1.0: mark-to-market PBO matrix, CSCV selection with the ASTRA rule, conservative in-sample ties, abstention, `TrialUniverse`; holdout DSR uses the store-wide count; guards for indistinguishable variants, trades per PBO variant and trades in the DSR sample; `rederive_holdout_evidence`.
+- `holdout_reuse.py`: refusal of holdouts that reuse a sealed price path (label, dates, scale, quote and time direction, two-bar resampling); seal requires the holdout returns; minimum 16 returns.
+- Registry: re-derivation of holdout evidence from bars at promotion (`holdout_bars`), report binding to plan, code and attempt log, one version per holdout at promotion, append-only triggers.
+- Limits: synthetic data only; residuals in `reports/LOT_04_REPORT.md`.
+
 ## Lot 3 quantitative validation (P-02, Q-01) · branch `feat/validation-quant` · 2026-10-25
 
 Independent QA review pending; not accepted yet.

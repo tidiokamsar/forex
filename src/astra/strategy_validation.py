@@ -80,6 +80,9 @@ PBO_PERIOD_BARS = 5
 # Minimum information before the statistics are trusted (otherwise the gate stays unmet):
 # the deflated Sharpe needs a real sample, and the PBO matrix must not be mostly empty or repetitive.
 MIN_DSR_RETURNS = 30
+# Mark-to-market bars of one held position are not independent observations: the DSR also
+# needs this many trades in its sample, and each PBO variant at least one trade per slice (Lot 4, N-1).
+MIN_DSR_TRADES = 30
 MIN_PBO_NONZERO_ROW_FRACTION = 0.5
 # C(2, 1) = 2 combinations can only give PBO 0, 0.5 or 1; at least 4 slices (6 combinations) are required.
 MIN_PBO_SLICES = 4
@@ -280,6 +283,7 @@ class OverfittingAssessment:
     n_trials_used: int | None = None
     trial_resolution: dict | None = None
     deflated_sharpe_probability_plan_only: float | None = None
+    dsr_trade_count: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -487,6 +491,7 @@ def _evaluate_strategy_walk_forward(
     labels: list[str] = []
     validation_bar_returns: dict[str, list[float]] = {cid: [] for cid in ids}
     test_bar_returns: dict[str, list[float]] = {cid: [] for cid in ids}
+    test_trades: dict[str, int] = dict.fromkeys(ids, 0)
     for ordinal, (vs, ve, ts, te) in enumerate(ranges, start=1):
         recorder.start_fold(ordinal)
         # 1) Validation only, then selection. Test results do not exist yet.
@@ -514,6 +519,8 @@ def _evaluate_strategy_walk_forward(
             )
             for candidate in chosen
         }
+        for cid in ids:
+            test_trades[cid] += test_results[cid].trade_count
         reference = _simulate(
             SMA_REFERENCE, history, ts, te, initial_equity, cost_model, 1.0, "WALK_FORWARD_REFERENCE_NOT_PROMOTABLE"
         )
@@ -591,6 +598,7 @@ def _evaluate_strategy_walk_forward(
         trial_sharpes=trial_sharpes,
         bar_seconds=_bar_seconds(history),
         trial_universe=trial_universe,
+        dsr_trade_count=test_trades[final_id] if final_id else None,
     )
     denominator = initial_equity * len(folds)
     return StrategyWalkForwardReport(
@@ -702,37 +710,9 @@ def evaluate_strategy_holdout_once(
         experiment_id=experiment_id, model_id=model_id, model_version=model_version,
     )
     try:
-        by_id = {candidate.candidate_id: candidate for candidate in chosen}
-        selected = by_id.get(verified.selected_candidate_id) if verified.selected_candidate_id else None
         end = len(history)
-        selected_result = (
-            _simulate(selected, history, holdout_start_index, end, initial_equity, cost_model, 1.0,
-                      "ONE_TIME_HOLDOUT_NOT_PROMOTABLE")
-            if selected
-            else None
-        )
-        reference = _simulate(
-            SMA_REFERENCE, history, holdout_start_index, end, initial_equity, cost_model, 1.0,
-            "ONE_TIME_HOLDOUT_REFERENCE",
-        )
-        flat = _flat_metrics(holdout_start, holdout_end, protocol.holdout_bars, initial_equity)
-        sensitivity = tuple(
-            StrategyCostSensitivity(
-                cost_multiplier=multiplier,
-                selected_candidate=(
-                    _result_metrics(
-                        _simulate(selected, history, holdout_start_index, end, initial_equity, cost_model,
-                                  multiplier, "ONE_TIME_HOLDOUT_COST_STRESS")
-                    )
-                    if selected
-                    else None
-                ),
-                sma_reference=_result_metrics(
-                    _simulate(SMA_REFERENCE, history, holdout_start_index, end, initial_equity, cost_model,
-                              multiplier, "ONE_TIME_HOLDOUT_COST_STRESS")
-                ),
-            )
-            for multiplier in protocol.cost_stress_multipliers
+        selected, selected_result, reference, flat, sensitivity = _score_holdout_block(
+            history, chosen, verified.selected_candidate_id, protocol, initial_equity, cost_model
         )
         dev = verified.overfitting
         universe = _store_trial_universe(store, report.plan_sha256, dev.bar_seconds, trial_universe)
@@ -754,6 +734,9 @@ def evaluate_strategy_holdout_once(
             trial_sharpes=dev.trial_sharpes,
             bar_seconds=dev.bar_seconds,
             trial_universe=universe,
+            dsr_trade_count=(
+                (dev.dsr_trade_count or 0) + selected_result.trade_count if selected_result else None
+            ),
         )
         selected_metrics = _result_metrics(selected_result) if selected_result else None
         evaluation = StrategyHoldoutEvaluation(
@@ -776,7 +759,8 @@ def evaluate_strategy_holdout_once(
             cost_sensitivity=sensitivity,
             overfitting=overfitting,
             # Store-wide trials (attempt registry), never fewer than this plan's variants.
-            variants_tested=overfitting.n_trials_used or verified.variants_tested,
+            # Independent of whether the DSR could be computed (Lot 4 regression, s42/s45).
+            variants_tested=max(universe.n_trials, verified.variants_tested),
             holdout_start=holdout_start,
             holdout_end=holdout_end,
             holdout_observations=protocol.holdout_bars,
@@ -801,6 +785,109 @@ def evaluate_strategy_holdout_once(
         store.fail_holdout_evaluation(evaluation_id=attempt["evaluation_id"], error_type=type(exc).__name__)
         holdout_attempt.fail(exc)
         raise
+
+
+def _score_holdout_block(history, chosen, selected_id, protocol, initial_equity, cost_model):
+    """Simulate the reserved final block for the selected candidate, the SMA reference and cost stress."""
+
+    holdout_start_index = len(history) - protocol.holdout_bars
+    end = len(history)
+    by_id = {candidate.candidate_id: candidate for candidate in chosen}
+    selected = by_id.get(selected_id) if selected_id else None
+    selected_result = (
+        _simulate(selected, history, holdout_start_index, end, initial_equity, cost_model, 1.0,
+                  "ONE_TIME_HOLDOUT_NOT_PROMOTABLE")
+        if selected
+        else None
+    )
+    reference = _simulate(
+        SMA_REFERENCE, history, holdout_start_index, end, initial_equity, cost_model, 1.0,
+        "ONE_TIME_HOLDOUT_REFERENCE",
+    )
+    flat = _flat_metrics(
+        history[holdout_start_index].timestamp, history[-1].timestamp, protocol.holdout_bars, initial_equity
+    )
+    sensitivity = tuple(
+        StrategyCostSensitivity(
+            cost_multiplier=multiplier,
+            selected_candidate=(
+                _result_metrics(
+                    _simulate(selected, history, holdout_start_index, end, initial_equity, cost_model,
+                              multiplier, "ONE_TIME_HOLDOUT_COST_STRESS")
+                )
+                if selected
+                else None
+            ),
+            sma_reference=_result_metrics(
+                _simulate(SMA_REFERENCE, history, holdout_start_index, end, initial_equity, cost_model,
+                          multiplier, "ONE_TIME_HOLDOUT_COST_STRESS")
+            ),
+        )
+        for multiplier in protocol.cost_stress_multipliers
+    )
+    return selected, selected_result, reference, flat, sensitivity
+
+
+REDERIVED_FIELDS = (
+    "trade_count", "net_pnl", "profit_factor", "max_drawdown_pct", "edge_vs_baseline", "cost_stress_net_pnl"
+)
+
+
+def _tuples(value: Any) -> Any:
+    return tuple(_tuples(item) for item in value) if isinstance(value, list) else value
+
+
+def rederive_holdout_evidence(bars: Iterable[MarketBar], plan_manifest: Mapping[str, Any]) -> dict[str, Any]:
+    """Recompute a sealed plan's holdout result from market bars, without any store.
+
+    The plan is rebuilt from the bars (it must hash to the same manifest, so the
+    same data, candidates, protocol, costs and code), the candidate is reselected
+    on validation windows and the holdout is simulated again. Returns the
+    selected candidate id and the ``REDERIVED_FIELDS`` of ``holdout_evidence``.
+    The overfitting statistics are not recomputed: they depend on the store-wide
+    trial count at the time the holdout was scored.
+    """
+
+    plan = dict(plan_manifest)
+    protocol = WalkForwardProtocol(**{key: _tuples(value) for key, value in plan["protocol"].items()})
+    candidates = []
+    for descriptor in plan["candidates"]:
+        config_type = _FAMILY_SPECS[descriptor["family"]][0]
+        config = config_type(**{key: _tuples(value) for key, value in descriptor["config"].items()})
+        candidates.append(StrategyCandidate(descriptor["family"], config))
+    cost_model = CostModel(**plan["cost_model"])
+    initial_equity = plan["initial_equity"]
+    provided_hash = plan["dataset_sha256"] if plan.get("dataset_hash_kind") == "source_bytes_sha256" else None
+    history, chosen, cost_model = _prepare(bars, candidates, protocol, initial_equity, cost_model)
+    verified = evaluate_strategy_walk_forward(
+        history,
+        chosen,
+        hypothesis=plan["hypothesis"],
+        protocol=protocol,
+        initial_equity=initial_equity,
+        cost_model=cost_model,
+        dataset_sha256=provided_hash,
+    )
+    if verified.plan_sha256 != _sha256(_canonical_json(plan)):
+        raise ValueError("these bars do not reproduce the sealed plan")
+    _selected, selected_result, reference, flat, sensitivity = _score_holdout_block(
+        history, chosen, verified.selected_candidate_id, protocol, initial_equity, cost_model
+    )
+    metrics = _result_metrics(selected_result) if selected_result else None
+    stressed = [
+        item.selected_candidate.net_pnl
+        for item in sensitivity
+        if item.cost_multiplier > 1.0 and item.selected_candidate is not None
+    ]
+    return {
+        "selected_candidate_id": verified.selected_candidate_id,
+        "trade_count": metrics.trade_count if metrics else 0,
+        "net_pnl": metrics.net_pnl if metrics else None,
+        "profit_factor": metrics.profit_factor if metrics else None,
+        "max_drawdown_pct": metrics.max_drawdown_pct if metrics else None,
+        "edge_vs_baseline": metrics.net_pnl - max(flat.net_pnl, reference.net_pnl) if metrics else None,
+        "cost_stress_net_pnl": min(stressed) if stressed else None,
+    }
 
 
 def _distinct_variant_count(matrix) -> int:
@@ -965,6 +1052,7 @@ def assess_overfitting(
     trial_sharpes: Iterable[float] = (),
     bar_seconds: int | None = None,
     trial_universe: Any = None,
+    dsr_trade_count: int | None = None,
 ) -> OverfittingAssessment:
     """Call the statistics module on ``performance[t][v]`` and the DSR sample.
 
@@ -1001,6 +1089,7 @@ def assess_overfitting(
         "initial_equity": initial_equity,
         "trial_sharpes": sharpes,
         "bar_seconds": bar_seconds,
+        "dsr_trade_count": dsr_trade_count,
     }
     try:
         from .overfitting import (
@@ -1041,6 +1130,10 @@ def assess_overfitting(
     elif distinct_variants < 2:
         # Identical, noise-level or rescaled copies: any PBO would come from tie-breaking (Lot 4 QA, D-16 to D-18).
         low_information.append(f"pbo: {distinct_variants} distinguishable variant(s) of {columns}")
+    elif count_matrix and (
+        thin := sum(1 for column in range(columns) if sum(row[column] for row in count_matrix) < n_slices)
+    ):
+        low_information.append(f"pbo: {thin} of {columns} variants have fewer trades than slices ({n_slices})")
     elif inactive_variants:
         # A variant that barely trades makes its rank, and therefore the PBO, arbitrary.
         low_information.append(
@@ -1071,6 +1164,11 @@ def assess_overfitting(
     active_returns = sum(1 for value in returns if value != 0.0)
     if len(returns) < MIN_DSR_RETURNS:
         low_information.append(f"deflated_sharpe: {len(returns)} returns (need at least {MIN_DSR_RETURNS})")
+    elif count_matrix and (dsr_trade_count is None or dsr_trade_count < MIN_DSR_TRADES):
+        low_information.append(
+            f"deflated_sharpe: {dsr_trade_count if dsr_trade_count is not None else 'unknown'} trades in the sample "
+            f"(need at least {MIN_DSR_TRADES})"
+        )
     elif active_returns < MIN_DSR_RETURNS:
         # Flat bars are real zero returns, but too few non-zero ones carry almost no information.
         low_information.append(

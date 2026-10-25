@@ -340,8 +340,13 @@ class ModelRegistry:
             self._audit(db, "model.evaluation_recorded", {"model_id": model_id, "version": version, "kind": kind})
         return evaluation_id
 
-    def check_promotion(self, model_id: str, version: str) -> tuple[str, ...]:
-        """Return failed criteria; an empty tuple means the gates are met."""
+    def check_promotion(self, model_id: str, version: str, *, holdout_bars: Any = None) -> tuple[str, ...]:
+        """Return failed criteria; an empty tuple means the gates are met.
+
+        With the default verifier, holdout evidence is re-derived from
+        ``holdout_bars`` (the sealed plan's market bars); without them the gate
+        fails with ``holdout_not_rederived_from_market_data``.
+        """
 
         with self._connect() as db:
             row = self._version(db, model_id, version)
@@ -367,7 +372,10 @@ class ModelRegistry:
             return (f"missing_{decisive_kind}_evaluation",)
         if decisive_kind == "holdout":
             with self._connect() as db:
-                failures.extend(self._verify_evidence(db, row, evidence))
+                if self._verify_evidence is verify_holdout_provenance:
+                    failures.extend(verify_holdout_provenance(db, row, evidence, holdout_bars=holdout_bars))
+                else:
+                    failures.extend(self._verify_evidence(db, row, evidence))
                 # One version per holdout, re-checked here: evidence copied to a sibling row bypasses
                 # record_evaluation (Lot 4 QA, D-9).
                 # The first version recorded against a holdout owns it.
@@ -424,16 +432,17 @@ class ModelRegistry:
             # The trial count must cover every relevant attempt in the store, not one plan's grid,
             # and the append-only attempt log must be intact.
             with self._connect() as db:
-                failures.extend(promotion_trial_failures(db, json.loads(row["manifest_json"]), variants))
+                anchor = (evidence.get(PROVENANCE_KEY) or {}).get("attempt_chain_head_at_record")
+                failures.extend(promotion_trial_failures(db, json.loads(row["manifest_json"]), variants, anchor))
             if pbo is not None and pbo > criteria.max_pbo:
                 failures.append("pbo_above_threshold")
             if dsr is not None and dsr < criteria.min_deflated_sharpe_probability:
                 failures.append("deflated_sharpe_below_threshold")
         return tuple(failures)
 
-    def promote(self, *, actor: Actor, model_id: str, version: str, reason: str) -> None:
+    def promote(self, *, actor: Actor, model_id: str, version: str, reason: str, holdout_bars: Any = None) -> None:
         self._guard.require(actor, Action.PROMOTE_MODEL, target=f"{model_id}@{version}")
-        failures = self.check_promotion(model_id, version)
+        failures = self.check_promotion(model_id, version, holdout_bars=holdout_bars)
         if failures:
             with self._connect() as db:
                 self._audit(
@@ -608,7 +617,9 @@ class ModelRegistry:
             db.close()
 
 
-def verify_holdout_provenance(db: sqlite3.Connection, version_row: sqlite3.Row, evidence: dict[str, Any]) -> tuple[str, ...]:
+def verify_holdout_provenance(
+    db: sqlite3.Connection, version_row: sqlite3.Row, evidence: dict[str, Any], *, holdout_bars: Any = None
+) -> tuple[str, ...]:
     """Check that holdout evidence comes from a sealed, completed holdout of this very candidate.
 
     The evidence must reference a COMPLETED holdout evaluation whose protocol is
@@ -650,6 +661,7 @@ def verify_holdout_provenance(db: sqlite3.Connection, version_row: sqlite3.Row, 
     if plan.get("implementation_sha256") != manifest.get("code_sha256"):
         failures.append("manifest_code_differs_from_sealed_plan")
     failures.extend(_report_binding_failures(db, holdout["protocol_id"], plan, plan_row, report, manifest))
+    failures.extend(_rederivation_failures(plan, report, holdout_bars))
     identity = manifest.get("dataset_identity")
     canonical = identity.get("canonical_sha256") if isinstance(identity, dict) else None
     if canonical is None or canonical != plan.get("dataset_identity_sha256"):
@@ -675,6 +687,50 @@ def _current_implementation_sha256(plan: dict[str, Any]) -> str:
     else:
         from .validation import _implementation_sha256
     return _implementation_sha256()
+
+
+def _rederivation_failures(plan: dict[str, Any], report: dict[str, Any], holdout_bars: Any) -> list[str]:
+    """Recompute the holdout from market bars and compare it with the stored report (Lot 4, A-4 and D-1).
+
+    A stored report, however consistent with the plan and the attempt log, is
+    only trusted once the same numbers come out of the sealed plan run again on
+    the bars it was sealed for.
+    """
+
+    if holdout_bars is None:
+        return ["holdout_not_rederived_from_market_data"]
+    if "strategy_validation_version" not in plan:
+        return ["holdout_rederivation_unsupported_for_this_plan"]
+    from .strategy_validation import REDERIVED_FIELDS, rederive_holdout_evidence
+
+    try:
+        derived = rederive_holdout_evidence(holdout_bars, plan)
+    except (ValueError, TypeError, KeyError) as exc:
+        return [f"holdout_rederivation_failed:{type(exc).__name__}"]
+    if derived["selected_candidate_id"] != report.get("selected_candidate_id"):
+        return ["holdout_report_differs_from_rederivation"]
+    selected = report.get("selected_candidate") or {}
+    stressed = [
+        scenario["selected_candidate"]["net_pnl"]
+        for scenario in report.get("cost_sensitivity", ())
+        if isinstance(scenario, dict) and scenario.get("cost_multiplier", 0) > 1.0 and scenario.get("selected_candidate")
+    ]
+    stored = {
+        "trade_count": selected.get("trade_count", 0),
+        "net_pnl": selected.get("net_pnl"),
+        "profit_factor": selected.get("profit_factor"),
+        "max_drawdown_pct": selected.get("max_drawdown_pct"),
+        "edge_vs_baseline": report.get("edge_vs_baseline"),
+        "cost_stress_net_pnl": min(stressed) if stressed else None,
+    }
+    for key in REDERIVED_FIELDS:
+        recorded, value = stored.get(key), derived.get(key)
+        if isinstance(recorded, (int, float)) and isinstance(value, (int, float)):
+            if not math.isclose(float(recorded), float(value), rel_tol=EVIDENCE_TOLERANCE, abs_tol=EVIDENCE_TOLERANCE):
+                return ["holdout_report_differs_from_rederivation"]
+        elif recorded != value:
+            return ["holdout_report_differs_from_rederivation"]
+    return []
 
 
 def _report_binding_failures(

@@ -796,7 +796,7 @@ class CliBypassTests(CliMixin):
         code, error = self.run_cli(self.env, "evaluate-strategies", "--csv", str(copy), "--source-type",
                                    "SYNTHETIC", "--evaluate-holdout")
         self.assertEqual(code, 1, error)
-        self.assertIn("already sealed", error["reason"])
+        self.assertRegex(error["reason"], "already sealed|already scored")
 
     # FIXED IN LOT 4 (was BASELINE FAIL D-15): CLI end-to-end version of D-3: the bundled fixture moved 30 days later and nudged
     # by 0.00001 on one holdout bar is scored a second time and a fresh version is registered against it.

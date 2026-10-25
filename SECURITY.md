@@ -23,6 +23,7 @@
 - Limitation of the permit: it stops accidental, strategy and LLM bypasses inside ASTRA. Code that deliberately imports the private permit authority could forge one; that requires a reviewed code change.
 
 - Research attempt registry (`attempts`): every scored variant (selected, rejected, failed, interrupted) is appended to `research_attempt_events` with a hash chain (`prev_hash`, `row_hash`). Triggers refuse UPDATE, DELETE and unlinked INSERT; `astra attempts verify` detects edited, removed and reordered rows, missing triggers and a truncated tail. Promotion is refused with `attempt_log_tampered` if the chain does not verify and with `trial_count_understated` if the evidence's `variants_tested` is below the store-wide trial count.
+- Research integrity (lot 4): sealed plans, holdout signatures, finished holdout evaluations, model evaluations and experiments are append-only through SQLite triggers. Promotion re-derives holdout evidence from the market bars (`holdout_bars`), binds the report to its plan, the running code and the attempt log, and allows one version per holdout. A new holdout that reuses a sealed price path is refused (heuristic detector, see RESEARCH_PROTOCOL.md).
 
 ## Known gaps
 
@@ -32,6 +33,7 @@
 - Reconciliation is implemented and tested against the simulated broker only. Backup and restore are tested locally with the simulator only; backups are unencrypted copies of the database and must be protected like it. No dependency scanner, SBOM, secure token store, or external service supervisor has been implemented.
 - The local SQLite audit trail is not tamper-proof or externally replicated.
 - The attempt hash chain is tamper-evident, not tamper-proof: whoever can write the database file can drop the triggers and rewrite the whole chain consistently (hashes included), or replace the file. Only a chain head kept outside the database (from `astra attempts list|count|verify`, stored elsewhere) and passed as `--expected-head` detects that, and only for rows up to the anchor. Attempts run without a store or against another database file are not recorded.
+- Lot 4 residuals: the triggers live in the same file and can be dropped by its owner; restoring an older backup brings a spent holdout back; the reuse detector is heuristic (noise, resampling factors other than two, short runs); `ModelRegistry(evidence_verifier=...)` lets in-process code replace the default verifier (and with it the re-derivation); re-derivation proves numbers follow from the bars, not that the bars are genuine.
 
 ## Reporting a security issue
 

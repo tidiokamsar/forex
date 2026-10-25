@@ -515,15 +515,21 @@ def _verify(db: sqlite3.Connection, expected_head: str | None = None) -> ChainVe
 
 
 def promotion_trial_failures(
-    db: sqlite3.Connection, manifest: Mapping[str, Any], variants_tested: float | None
+    db: sqlite3.Connection,
+    manifest: Mapping[str, Any],
+    variants_tested: float | None,
+    anchored_head: str | None = None,
 ) -> tuple[str, ...]:
     """Registry gate: the attempt chain is intact and the evidence does not understate the trial count.
 
     The scope is the plan named by the manifest's ``plan_sha256``; without a known plan
-    the whole store is the scope (the most conservative count).
+    the whole store is the scope (the most conservative count). ``anchored_head`` (the
+    chain head recorded with the evidence) must still be in the chain, and every sealed
+    plan of the same instrument must have its trials in the log, so a chain rewritten
+    without an explored plan is refused (Lot 4, N-2).
     """
 
-    verification = _verify(db)
+    verification = _verify(db, anchored_head)
     if not verification.ok:
         return ("attempt_log_tampered",)
     failures = []
@@ -538,7 +544,17 @@ def promotion_trial_failures(
         candidates = plan.get("candidates") or ()
         if not candidates or len(own) < len(candidates):
             failures.append("attempt_log_missing_for_plan")
-    stats = _statistics(db, scope_for_plan(plan))
+    scope = scope_for_plan(plan)
+    logged = {state.get("protocol_id") for state in _attempt_states(_event_rows(db)).values()
+              if state["kind"] in TRIAL_KINDS}
+    for other_id, other_json in db.execute("SELECT protocol_id, plan_json FROM research_protocols").fetchall():
+        other = json.loads(other_json)
+        if scope.instrument and other.get("instrument") not in (None, scope.instrument):
+            continue
+        if other.get("candidates") and other_id not in logged:
+            failures.append("attempt_log_missing_for_sealed_plan")
+            break
+    stats = _statistics(db, scope)
     # A missing count is already reported by the registry as ``overfitting_check_missing``.
     if variants_tested is not None and variants_tested < stats.count:
         failures.append("trial_count_understated")

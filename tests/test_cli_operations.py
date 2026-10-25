@@ -84,7 +84,7 @@ class CliOperationsTests(unittest.TestCase):
             # A different plan for the same dataset is refused.
             code, error = self.run_cli(env, "evaluate-strategies", "--folds", "1")
             self.assertEqual(code, 1)
-            self.assertIn("already sealed", error["reason"])
+            self.assertRegex(error["reason"], "already sealed|already scored")
 
     def test_paper_replay_accepts_strategy_families(self):
         with workspace_tempdir() as temp:

@@ -222,12 +222,11 @@ class LegacyPlanTests(_StoreCase):
 class FabricatedHoldoutTests(_StoreCase):
     """A-4: public store and attempt-log helpers can still mint a COMPLETED holdout with any report."""
 
-    # CONFIRMED DEFECT A-4 (phase 2: mitigated, not fixed). The phase 1 version of this test stopped at
+    # FIXED IN LOT 4 ROUND 2 (was CONFIRMED DEFECT A-4) (phase 2: mitigated, not fixed). The phase 1 version of this test stopped at
     # seal on 9eae4a6 (content_sha256 now required), which expectedFailure counts as a failure too, so it
     # was rewritten. Minimal mint now: one honest walk-forward (real plan, real fold trials in the
     # attempt log), then begin_holdout_evaluation + HoldoutAttempt.start().finish() +
     # complete_holdout_evaluation with a made-up report. No SQL, no trigger, no chain forgery.
-    @unittest.expectedFailure
     def test_holdout_minted_through_the_store_api_cannot_promote(self):
         registry = ModelRegistry(self.database)  # default (strict) verifier
         registry.initialize()
@@ -258,7 +257,10 @@ class FabricatedHoldoutTests(_StoreCase):
         self.store.complete_holdout_evaluation(evaluation_id=attempt["evaluation_id"], report=fake)
         registry.record_evaluation(actor=AGENT, model_id="minted", version="1", kind="holdout",
                                    evidence=holdout_evidence(fake), holdout_evaluation_id=attempt["evaluation_id"])
-        self.assertNotEqual(registry.check_promotion("minted", "1"), ())
+        self.assertIn("holdout_not_rederived_from_market_data", registry.check_promotion("minted", "1"))
+        # Lot 4 round 2: with the plan's real bars the re-derivation exposes the minted numbers.
+        self.assertIn("holdout_report_differs_from_rederivation",
+                      registry.check_promotion("minted", "1", holdout_bars=BARS))
 
 
 class VerifierOverrideTests(_StoreCase):
@@ -403,10 +405,9 @@ class CorrelationDetectorEvasionTests(_StoreCase):
         super().setUp()
         self.seal_original()
 
-    # CONFIRMED DEFECT B-1: the same M15 prices resampled to M30 (2-bar aggregation). The new 40-bar
+    # FIXED IN LOT 4 ROUND 2 (was CONFIRMED DEFECT B-1): the same M15 prices resampled to M30 (2-bar aggregation). The new 40-bar
     # holdout contains every sealed holdout close, but its returns are sums of pairs, so no aligned
     # window reaches the r >= 0.94 threshold.
-    @unittest.expectedFailure
     def test_two_bar_aggregation_of_the_sealed_prices_is_refused(self):
         aggregated = [
             MarketBar(instrument="EURUSD.M30", timestamp=first.timestamp, open=first.open,
@@ -416,9 +417,8 @@ class CorrelationDetectorEvasionTests(_StoreCase):
         ]
         self.assert_reuse_refused(aggregated)
 
-    # CONFIRMED DEFECT B-1: up-sampling. A bar inserted before every sealed holdout bar keeps every sealed
+    # FIXED IN LOT 4 ROUND 2 (was CONFIRMED DEFECT B-1): up-sampling. A bar inserted before every sealed holdout bar keeps every sealed
     # close at its own time, but each sealed return is split in two and nothing correlates.
-    @unittest.expectedFailure
     def test_interleaved_copy_of_the_sealed_holdout_is_refused(self):
         rng = random.Random(3)
         returns, stamps = [], []
@@ -436,20 +436,17 @@ class CorrelationDetectorEvasionTests(_StoreCase):
         rng = random.Random(7)
         self.assert_reuse_refused(with_holdout_returns([v + rng.gauss(0.0, 0.7 * RETURN_SD) for v in OLD_RETURNS]))
 
-    # CONFIRMED DEFECT B-3: the sealed path played backwards is not compared; only forward alignments are tried.
-    @unittest.expectedFailure
+    # FIXED IN LOT 4 ROUND 2 (was CONFIRMED DEFECT B-3): the sealed path played backwards is not compared; only forward alignments are tried.
     def test_time_reversed_copy_is_refused(self):
         self.assert_reuse_refused(with_holdout_returns([-value for value in reversed(OLD_RETURNS)]))
 
-    # CONFIRMED DEFECT B-4: a holdout of 7 bars (fewer returns than MIN_WINDOW = 8) is never compared,
+    # FIXED IN LOT 4 ROUND 2 (was CONFIRMED DEFECT B-4): a holdout of 7 bars (fewer returns than MIN_WINDOW = 8) is never compared,
     # so the sealed 40-bar holdout can be re-scored in 7-bar slices under new labels.
-    @unittest.expectedFailure
     def test_short_holdout_slice_of_the_sealed_holdout_is_refused(self):
         self.assert_reuse_refused(relabel(BARS[:-10]), protocol=replace(PROTOCOL, holdout_bars=7))
 
-    # CONFIRMED DEFECT B-4: half of the sealed holdout (20 consecutive returns) spliced into fresh data at
+    # FIXED IN LOT 4 ROUND 2 (was CONFIRMED DEFECT B-4): half of the sealed holdout (20 consecutive returns) spliced into fresh data at
     # offset 5 is missed; runs shorter than about 1.5 windows are missed at most offsets (probe: 16 of 21).
-    @unittest.expectedFailure
     def test_half_of_the_sealed_holdout_spliced_into_fresh_data_is_refused(self):
         fresh = holdout_returns([bar.close for bar in make_synthetic_bars(41, seed=33)])
         self.assert_reuse_refused(with_holdout_returns([*fresh[:5], *OLD_RETURNS[3:23], *fresh[25:40]]))
@@ -484,11 +481,10 @@ class DetectorFalsePositiveAndCostTests(_StoreCase):
         (store or self.store).seal_research_protocol(protocol_id=protocol_id, dataset_identity_sha256=identity,
                                                      protocol_version="x", plan_manifest=plan, holdout_returns=returns)
 
-    # CONFIRMED DEFECT B-6: false positives on independent sparse data (90% zero returns: quiet sessions,
+    # FIXED IN LOT 4 ROUND 2 (was CONFIRMED DEFECT B-6): false positives on independent sparse data (90% zero returns: quiet sessions,
     # quantised quotes, managed or pegged pairs). The MAD is 0, the mean-abs fallback keeps the zeros at
     # the centre, and two windows that each hold one lone move at an alignable position correlate near 1.
     # Independent plans on other instruments and periods are refused (scratch probe: 19% of pairs).
-    @unittest.expectedFailure
     def test_independent_sparse_holdouts_are_not_refused(self):
         refused = 0
         for seed in range(20):

@@ -8,11 +8,19 @@ windows of up to ``WINDOW`` consecutive returns, at every alignment offset, are
 compared with a robust correlation (returns clipped at ``CLIP`` scale units so
 one aligned outlier cannot create a match). An absolute correlation whose
 t-statistic reaches ``MIN_T_STATISTIC`` counts as reuse; the sign is ignored so
-an inverted quote matches too.
+an inverted quote matches too, the old path is also tried reversed in time, and
+both sides are also tried resampled over two bars.
 
-Limits: a shared run shorter than about 1.5 windows, or a copy perturbed with noise
-comparable to the returns themselves, is not detected; independent data could
-in principle match by chance (at most about 2e-6 per window pair under a normal null).
+This is a heuristic, not a proof of independence. Not detected (Lot 4 review,
+documented): a shared run shorter than about 1.25 windows; a copy with added
+noise above roughly 0.4 times the return scale (B-2); resampling by factors
+other than two; windows that are mostly flat (fewer than
+``MIN_INFORMATIVE_SHARE`` real moves), which are skipped to avoid false matches
+on sparse data. Independent data could in principle match by chance (at most
+about 2e-6 per window pair under a normal null). The cost is roughly
+``12 * len(new) * len(old)`` operations per sealed plan, computed before the
+store's write lock is taken. The lasting control is data provenance (holdouts
+from an attested broker history), not similarity search.
 """
 
 from __future__ import annotations
@@ -25,9 +33,14 @@ from itertools import pairwise
 
 WINDOW = 20
 MIN_WINDOW = 8
+MIN_HOLDOUT_RETURNS = 16
 MIN_T_STATISTIC = 12.0
 CLIP = 3.0
 RETURN_DECIMALS = 12
+# A window is compared only when this share of its standardized returns is a real move, so
+# sparse (mostly flat) independent data cannot match on one or two lone moves (Lot 4, B-6).
+MIN_INFORMATIVE_SHARE = 0.6
+INFORMATIVE = 0.25
 
 
 def holdout_returns(closes: Sequence[float]) -> list[float]:
@@ -59,41 +72,59 @@ def _correlation_threshold(window: int) -> float:
     return MIN_T_STATISTIC / math.sqrt(MIN_T_STATISTIC**2 + degrees)
 
 
-def _window_stats(values: Sequence[float], first: int, window: int) -> tuple[list[float], float]:
+def _window_stats(values: Sequence[float], first: int, window: int) -> tuple[list[float], float] | None:
     chunk = values[first:first + window]
+    if sum(1 for value in chunk if abs(value) > INFORMATIVE) < MIN_INFORMATIVE_SHARE * window:
+        return None
     mean = sum(chunk) / window
     centered = [value - mean for value in chunk]
-    return centered, sum(value * value for value in centered)
+    energy = sum(value * value for value in centered)
+    return (centered, energy) if energy > 1e-12 else None
 
 
-def shares_price_path(new: Sequence[float], old: Sequence[float]) -> bool:
-    """True when a window of ``new`` is (anti-)correlated beyond chance with an aligned window of ``old``.
+def _aggregated(values: Sequence[float], phase: int) -> list[float]:
+    """Log returns over two bars (the same path at half the frequency), starting at ``phase``."""
 
-    Windows of ``new`` start every ``window // 2`` returns and are compared with
-    every window of ``old``, so any shared run of at least 1.5 windows is found
-    whatever the offset, at a cost of about ``2 * len(new) * len(old)``.
-    """
+    return [values[index] + values[index + 1] for index in range(phase, len(values) - 1, 2)]
 
+
+def _aligned_match(new: Sequence[float], old: Sequence[float]) -> bool:
     x, y = _standardized(new), _standardized(old)
     if x is None or y is None:
         return False
     window = min(WINDOW, max(MIN_WINDOW, min(len(x), len(y)) // 2))
     if min(len(x), len(y)) < window:
-        return False  # too short to compare; the exact fingerprint and time overlap still apply
+        return False
     threshold = _correlation_threshold(window)
-    step = max(1, window // 2)
+    step = max(1, window // 4)
     starts = list(range(0, len(x) - window + 1, step))
     if starts[-1] != len(x) - window:
         starts.append(len(x) - window)
-    old_windows = [_window_stats(y, first, window) for first in range(len(y) - window + 1)]
+    old_windows = [stats for first in range(len(y) - window + 1) if (stats := _window_stats(y, first, window))]
     for first in starts:
-        xs, sxx = _window_stats(x, first, window)
-        if sxx <= 1e-12:
+        stats = _window_stats(x, first, window)
+        if stats is None:
             continue
+        xs, sxx = stats
         for ys, syy in old_windows:
-            if syy <= 1e-12:
-                continue
             sxy = sum(a * b for a, b in zip(xs, ys, strict=True))
             if abs(sxy) / math.sqrt(sxx * syy) >= threshold:
                 return True
     return False
+
+
+def shares_price_path(new: Sequence[float], old: Sequence[float]) -> bool:
+    """True when ``new`` reuses the price path of ``old``, at the same or half/double frequency or reversed.
+
+    Windows of ``new`` start every ``window // 4`` returns and are compared with
+    every window of ``old``, so any shared run of at least 1.25 windows is found
+    whatever the offset. The sign is ignored (inverted quotes), ``old`` is also
+    tried reversed in time, and each side is also tried aggregated over two bars
+    at both phases (a copy resampled from M15 to M30, or the reverse).
+    """
+
+    pairs = [(new, old), (new, list(reversed(old)))]
+    for phase in (0, 1):
+        pairs.append((_aggregated(new, phase), old))
+        pairs.append((new, _aggregated(old, phase)))
+    return any(_aligned_match(a, b) for a, b in pairs)

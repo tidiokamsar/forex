@@ -65,3 +65,15 @@ Synthetic data only. Not DONE until the independent QA review passes.
 |---|---|---|---|
 | P-02 | Generic sealed walk-forward across SMA, momentum and breakout: causal per-block signals, validation-only selection, flat and SMA reference baselines, 1.5x/2x holdout cost stress, one sealed plan per dataset per store, once-only holdout, `holdout_evidence`, CLI `evaluate-strategies` (never promotes). Mean reversion excluded | DONE (local, synthetic data only) | `strategy_validation.py`; `test_strategy_validation` (15), `test_cli_operations.test_evaluate_strategies_seals_plan_and_records_inactive_candidate` |
 | Q-01 | Overfitting gates: CSCV PBO and deflated Sharpe ratio (`overfitting.py`), PBO matrix and DSR inputs from the walk-forward, registry fields `pbo`, `deflated_sharpe_probability`, `variants_tested` and criteria `max_pbo`, `min_deflated_sharpe_probability`, `require_overfitting_check`; evidence provenance, policy floor, holdout reuse refusal | DONE (local, synthetic data only) | `test_overfitting` (18), `test_registry` (14, of which 5 added in lot 3), `test_strategy_validation.OverfittingModuleIntegrationTests`. On the bundled fixture DSR is `INCOMPLETE` in development and PBO uses a sparse matrix (RESEARCH_PROTOCOL.md) |
+
+## Lot 4 review, quantitative integrity and attempt registry (branch `feat/lot4-integrite-quant`)
+
+Synthetic data only. Verified by independent agents (A security review, D adversarial QA), see `reports/LOT_04_REPORT.md`.
+
+| ID | Scope | Status | Evidence |
+|---|---|---|---|
+| L4-A | Independent review of the holdout fingerprint and promotion floor; holdout reuse detection; report binding; re-derivation of holdout evidence from bars at promotion | DONE (local, synthetic data only); residuals documented | `holdout_reuse.py`, `storage.py`, `registry.py`; `test_lot4_security_review`, `test_lot4_integration` |
+| L4-B | PBO/CSCV and DSR checked against the papers: mark-to-market matrix, CSCV with the ASTRA selection rule, conservative ties, `TrialUniverse`; trade-count and distinguishable-variant guards | DONE (local, synthetic data only) | `overfitting.py`, `strategy_validation.py`, `docs/references/QUANT_REFERENCES.md`; `test_overfitting`, `test_strategy_validation` |
+| L4-C | Append-only, hash-chained attempt registry; store-wide trial count fed into the holdout DSR and evidence; CLI `attempts list\|count\|verify` | DONE (local) | `attempts.py`; `test_attempts` |
+| L4-D | Adversarial and verification suites | DONE | `test_lot4_adversarial`, `test_lot4_verification` |
+| L4-R | Residuals: store-less exploration not counted; restore of an older backup re-opens a holdout; heuristic detector limits; legacy plans without returns; verifier override; label-literal trial scope | OPEN (documented) | `reports/LOT_04_REPORT.md` section E/F |

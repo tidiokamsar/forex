@@ -157,6 +157,10 @@ class BacktestStore:
         if not isinstance(holdout, dict) or not holdout.get("start") or not holdout.get("end"):
             raise ValueError("protocol manifest must include final holdout boundaries")
 
+        returns = [float(value) for value in holdout_returns] if holdout_returns is not None else []
+        # The similarity search is slow (see astra.holdout_reuse), so it runs before the write lock;
+        # plans sealed in between are compared again inside the lock.
+        checked = self._refuse_shared_price_path(protocol_id, dataset_identity_sha256, returns)
         now = _now()
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -172,9 +176,23 @@ class BacktestStore:
             content = holdout.get("content_sha256")
             if not content or holdout_returns is None:
                 raise ValueError("a new plan must include holdout.content_sha256 and the holdout returns")
-            returns = [float(value) for value in holdout_returns]
+            if len(returns) < holdout_reuse.MIN_HOLDOUT_RETURNS:
+                raise ValueError(
+                    f"a holdout needs at least {holdout_reuse.MIN_HOLDOUT_RETURNS} returns to be checked for reuse"
+                )
             if holdout_reuse.content_sha256(returns) != content:
                 raise ValueError("holdout returns do not match holdout.content_sha256")
+            # The attempt log outlives deleted seal rows: a holdout it records as scored stays spent (Lot 4, N-5).
+            spent = db.execute(
+                "SELECT protocol_id FROM research_attempt_events WHERE kind = 'holdout' "
+                "AND holdout_content_sha256 = ? AND protocol_id <> ? LIMIT 1",
+                (content, protocol_id),
+            ).fetchone()
+            if spent is not None:
+                raise ValueError(
+                    "the attempt log records this holdout price path as already scored "
+                    f"({spent['protocol_id'][:12]}); a holdout can be scored only once"
+                )
             existing_for_dataset = db.execute(
                 "SELECT protocol_id FROM research_protocols WHERE dataset_sha256 = ? LIMIT 1",
                 (dataset_identity_sha256,),
@@ -199,7 +217,9 @@ class BacktestStore:
                 other_plan = json.loads(other["plan_json"])
                 other_returns = json.loads(other["returns_json"]) if other["returns_json"] else None
                 if (other_plan.get("holdout") or {}).get("content_sha256") == content or (
-                    other_returns is not None and holdout_reuse.shares_price_path(returns, other_returns)
+                    other_returns is not None
+                    and other["protocol_id"] not in checked
+                    and holdout_reuse.shares_price_path(returns, other_returns)
                 ):
                     # Same price path relabelled, shifted, rescaled, inverted or nudged: the holdout is spent.
                     raise ValueError(
@@ -263,6 +283,28 @@ class BacktestStore:
                         ),
                     ),
                 )
+
+    def _refuse_shared_price_path(self, protocol_id: str, dataset_identity_sha256: str, returns: list[float]) -> set:
+        """Compare ``returns`` with every sealed holdout's stored returns outside any write lock."""
+
+        if not returns:
+            return set()
+        with self._connect() as db:
+            if db.execute("SELECT 1 FROM research_protocols WHERE protocol_id = ?", (protocol_id,)).fetchone():
+                return set()  # idempotent re-seal: checked when it was first sealed
+            rows = db.execute(
+                """SELECT p.protocol_id, s.returns_json FROM research_protocols p
+                   JOIN holdout_signatures s ON s.protocol_id = p.protocol_id
+                   WHERE p.dataset_sha256 <> ? AND p.protocol_id <> ?""",
+                (dataset_identity_sha256, protocol_id),
+            ).fetchall()
+        for row in rows:
+            if holdout_reuse.shares_price_path(returns, json.loads(row["returns_json"])):
+                raise ValueError(
+                    "the holdout price path matches the holdout of an already sealed plan "
+                    f"({row['protocol_id'][:12]}); a holdout can be scored only once"
+                )
+        return {row["protocol_id"] for row in rows}
 
     def begin_holdout_evaluation(
         self, *, protocol_id: str, dataset_identity_sha256: str

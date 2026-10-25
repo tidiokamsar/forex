@@ -47,7 +47,7 @@ def result():
     )
 
 
-HOLDOUT_RETURNS = [0.001, -0.002, 0.0015, -0.0005]
+HOLDOUT_RETURNS = [0.001, -0.002, 0.0015, -0.0005] * 4
 HOLDOUT_SHA256 = holdout_reuse.content_sha256(HOLDOUT_RETURNS)
 
 class BacktestStoreTests(unittest.TestCase):
