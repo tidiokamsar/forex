@@ -28,6 +28,8 @@ from ..brokers.base import (
 from ..governance import Action, Actor, PermissionGuard
 from ..instruments import DEFAULT_SPECS, InstrumentSpec, required_margin
 from ..models import Direction, OrderIntent, RiskContext, RunMode
+from ..permits import _AUTHORITY as _PERMITS
+from ..permits import ExecutionRefused
 from ..risk import RiskEngine
 from .controls import FreezeReason, RECONCILIATION_OWNED, TradingControls
 from .mode import verify_mode
@@ -196,8 +198,18 @@ class OrderGateway:
             stop_loss=command.stop_price,
             reduce_only=command.purpose == "EXIT",
         )
+        permit = _PERMITS.issue(request, self._mode, self._clock())
         try:
-            report = self._broker.submit_order(request)
+            report = self._broker.submit_order(request, permit)
+        except ExecutionRefused as exc:
+            # Refused at the adapter boundary: nothing left the process.
+            final = self._store.transition(
+                record.intent_id,
+                OrderState.BROKER_REJECTED,
+                reason="refused_at_execution_boundary",
+                updates={"reason_codes": (f"execution_refused:{exc}",)},
+            )
+            return GatewayResult(final.intent_id, final.client_order_id, final.state, final.reason_codes)
         except BrokerTimeout:
             self._controls.freeze(FreezeReason.UNKNOWN_ORDER_STATE, context=record.intent_id)
             final = self._store.transition(

@@ -285,6 +285,19 @@ class IdempotencyAndRecoveryTests(ExecutionTestCase):
         self.assertEqual(order.state, OrderState.FILLED)
         self.assertIn("order.stale_event_ignored", self.event_types())
 
+    def test_refusal_at_adapter_boundary_is_recorded_and_nothing_sent(self):
+        class RefusingBroker(SimulatedBroker):
+            def _environment_guard(self, request, permit):
+                return "test_boundary_refusal"
+
+        broker = RefusingBroker(clock=self.clock)
+        broker.set_quote("EURUSD", 1.10000, 1.10010)
+        result = self.make_gateway(broker).submit(self.command(), SYSTEM)
+        self.assertEqual(result.state, OrderState.BROKER_REJECTED)
+        self.assertIn("execution_refused:test_boundary_refusal", result.reason_codes)
+        self.assertEqual(broker.submit_calls, 0)
+        self.assertEqual(broker.open_positions(), ())
+
     def test_broker_rejection_is_terminal(self):
         self.broker.script_next_submit("reject")
         result = self.gateway.submit(self.command(), SYSTEM)

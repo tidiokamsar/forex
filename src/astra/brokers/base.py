@@ -145,7 +145,48 @@ class BrokerEvent:
 
 
 class BrokerAdapter(ABC):
-    """Interface every connector implements; strategies never see it."""
+    """Interface every connector implements; strategies never see it.
+
+    ``submit_order`` is the single execution boundary and is not overridable:
+    it verifies the gateway's execution permit, then the adapter's own
+    environment guard, and only then calls ``_send_order``.
+    """
+
+    def __init_subclass__(cls, **kwargs) -> None:
+        super().__init_subclass__(**kwargs)
+        if "submit_order" in cls.__dict__:
+            raise TypeError(f"{cls.__name__} must implement _send_order, not override submit_order")
+
+    def submit_order(self, request: BrokerOrderRequest, permit: object = None) -> BrokerOrderReport:
+        from ..permits import ExecutionRefused, verify_permit
+
+        reason = verify_permit(permit, request, self._boundary_now())
+        if reason is None:
+            reason = self._environment_guard(request, permit)
+        if reason is not None:
+            self.refused_orders.append((request.client_order_id, reason))
+            raise ExecutionRefused(reason)
+        return self._send_order(request)
+
+    @property
+    def refused_orders(self) -> list[tuple[str, str]]:
+        if "_refused_orders" not in self.__dict__:
+            self.__dict__["_refused_orders"] = []
+        return self.__dict__["_refused_orders"]
+
+    def _boundary_now(self) -> datetime:
+        from datetime import timezone
+
+        return datetime.now(timezone.utc)
+
+    def _environment_guard(self, request: BrokerOrderRequest, permit: object) -> str | None:
+        """Adapter-specific refusal reason, or None to allow. Fails closed by default."""
+
+        return "adapter_has_no_environment_guard"
+
+    @abstractmethod
+    def _send_order(self, request: BrokerOrderRequest) -> BrokerOrderReport:
+        """Provider call. Only ``submit_order`` may invoke it."""
 
     @abstractmethod
     def capabilities(self) -> Capabilities: ...
@@ -158,9 +199,6 @@ class BrokerAdapter(ABC):
 
     @abstractmethod
     def quote(self, instrument: str) -> Quote: ...
-
-    @abstractmethod
-    def submit_order(self, request: BrokerOrderRequest) -> BrokerOrderReport: ...
 
     @abstractmethod
     def lookup_order(self, client_order_id: str) -> BrokerOrderReport | None: ...

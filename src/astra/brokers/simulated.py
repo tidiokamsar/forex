@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from threading import RLock
 
 from ..instruments import DEFAULT_SPECS, InstrumentSpec
-from ..models import Direction
+from ..models import Direction, RunMode
 from .base import (
     AccountSnapshot,
     BrokerAdapter,
@@ -235,7 +235,19 @@ class SimulatedBroker(BrokerAdapter):
                 raise BrokerUnavailable(f"no simulated quote for {instrument}")
             return quote
 
-    def submit_order(self, request: BrokerOrderRequest) -> BrokerOrderReport:
+    def _boundary_now(self) -> datetime:
+        return self._clock()
+
+    def _environment_guard(self, request: BrokerOrderRequest, permit) -> str | None:
+        # The simulator only executes permits issued for SIMULATION, and only
+        # while it declares itself a simulator.
+        if permit.mode is not RunMode.SIMULATION:
+            return "simulator_requires_simulation_permit"
+        if self._declared_environment is not BrokerEnvironment.SIMULATION:
+            return "simulator_not_in_simulation_environment"
+        return None
+
+    def _send_order(self, request: BrokerOrderRequest) -> BrokerOrderReport:
         with self._lock:
             self.submit_calls += 1
             self._require_connection()

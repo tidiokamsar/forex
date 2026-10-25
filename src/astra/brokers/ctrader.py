@@ -33,7 +33,7 @@ from typing import Any, Protocol
 
 from ..governance import SecretValue
 from ..instruments import InstrumentSpec
-from ..models import Direction
+from ..models import Direction, RunMode
 from .base import (
     AccountSnapshot,
     BrokerAdapter,
@@ -302,8 +302,11 @@ class CTraderAdapter(BrokerAdapter):
         request_timeout: float = 10.0,
         clock: Callable[[], datetime] = _utc_now,
         heartbeat_seconds: float = HEARTBEAT_SECONDS,
+        allow_demo_orders: bool = False,
     ) -> None:
         self._credentials = credentials
+        # A second, explicit opt-in on top of EXECUTABLE_MODES; False by default.
+        self._allow_demo_orders = allow_demo_orders is True
         self._transport = transport if transport is not None else create_demo_transport(request_timeout)
         self._instruments = tuple(name.upper() for name in instruments)
         self._timeout = request_timeout
@@ -494,7 +497,32 @@ class CTraderAdapter(BrokerAdapter):
             raise BrokerUnavailable(f"no complete cTrader quote yet for {instrument}")
         return Quote(instrument.upper(), state["bid"], state["ask"], state["timestamp"], "PROVIDER_API:CTRADER_SPOT")
 
-    def submit_order(self, request: BrokerOrderRequest) -> BrokerOrderReport:
+    def _boundary_now(self) -> datetime:
+        return self._clock()
+
+    def demo_orders_authorized(self) -> tuple[bool, tuple[str, ...]]:
+        """Every condition that must hold before a DEMO order may leave the process."""
+
+        from ..execution.mode import EXECUTABLE_MODES
+
+        reasons = []
+        if self._is_live is not False:
+            reasons.append("account_status_not_confirmed_demo")
+        if RunMode.DEMO not in EXECUTABLE_MODES:
+            reasons.append("demo_not_executable_in_this_build")
+        if not self._allow_demo_orders:
+            reasons.append("demo_orders_not_explicitly_allowed")
+        if self.connection_state() is not ConnectionState.CONNECTED:
+            reasons.append("not_connected")
+        return (not reasons, tuple(reasons))
+
+    def _environment_guard(self, request: BrokerOrderRequest, permit) -> str | None:
+        if permit.mode is not RunMode.DEMO:
+            return "ctrader_adapter_requires_demo_permit"
+        allowed, reasons = self.demo_orders_authorized()
+        return None if allowed else ",".join(reasons)
+
+    def _send_order(self, request: BrokerOrderRequest) -> BrokerOrderReport:
         self._require_connection()
         if request.order_type != "MARKET":
             raise CapabilityNotSupported("only MARKET orders are implemented")
