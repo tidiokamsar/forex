@@ -12,17 +12,22 @@ Secure behaviour is asserted. Scenarios that fail on 9eae4a6 carry ``@unittest.e
 and a ``# VERIFY FAIL N-n`` comment (severity in the comment). All data is SYNTHETIC.
 """
 
+import inspect
 import math
 import random
+import shutil
 import sqlite3
 import statistics
 import unittest
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import timedelta
+from pathlib import Path
 from typing import ClassVar
+from unittest.mock import patch
 
 from _support import workspace_tempdir
-from astra import attempts
+from astra import attempts, holdout_reuse
+from astra.anchoring import LocalFileAnchor, verify_store_against_anchor
 from astra.attempts import AttemptLog
 from astra.governance import Actor, Role
 from astra.holdout_reuse import holdout_returns, shares_price_path
@@ -37,6 +42,12 @@ from astra.overfitting import (
     selection_score_metric,
 )
 from astra.registry import ModelRegistry, PromotionCriteria, PromotionError
+from astra.research_policy import (
+    HOLDOUT_REUSE_POLICY,
+    STATISTICAL_POLICY,
+    HoldoutReusePolicy,
+    reuse_policy_looser_than_floor,
+)
 from astra.storage import BacktestStore
 from astra.strategy_validation import DSR_SHARPE_UNIT, assess_overfitting, holdout_evidence
 from astra.validation import evaluate_walk_forward
@@ -310,18 +321,18 @@ class AttemptRegistryTamperTests(TempStoreMixin):
         reinitialize(self.path)
         self.assertIn("attempt_log_tampered", self.registry.check_promotion("wf", "1"))
 
-    # VERIFY FAIL N-2 (Medium; DB write needed, documented as a limit): rewriting the chain consistently
-    # without an earlier exploration plan lowers the store-wide count from 9 to 2 and passes promotion's
-    # trial gate, although research_protocols still lists the explored plan (no cross-check).
-    @unittest.expectedFailure
+    # FIXED in round 2 (was VERIFY FAIL N-2): a chain rewritten without an explored plan is refused with
+    # attempt_log_missing_for_sealed_plan (the evidence itself still declares only 2 variants).
     def test_consistent_chain_rewrite_cannot_hide_an_explored_plan(self):
         explored = evaluate(store=self.store)
         self.assertGreater(rewrite_attempt_chain_without(self.path, explored.plan_sha256), 0)
         self.assertTrue(attempts.verify_attempt_chain(self.path).ok)
         _report, holdout, _ = self.register_score_record(bars=INDEPENDENT_BARS, candidates=TWO_CANDIDATES)
         failures = set(self.registry.check_promotion("wf", "1"))
-        self.assertTrue(failures & {"attempt_log_tampered", "attempt_log_missing_for_plan", "trial_count_understated"},
-                        f"explored plan hidden; evidence variants_tested={holdout_evidence(holdout)['variants_tested']}")
+        self.assertTrue(failures & {"attempt_log_tampered", "attempt_log_missing_for_plan", "trial_count_understated",
+                                    "attempt_log_missing_for_sealed_plan"},
+                        f"explored plan hidden; evidence variants_tested={holdout_evidence(holdout)['variants_tested']}; "
+                        f"failures={sorted(failures)}")
 
     # VERIFY FAIL N-2b (Medium): the chain head snapshotted into the evidence at record time is never
     # checked; a consistent rewrite after recording passes as an intact chain.
@@ -541,6 +552,484 @@ class MarkToMarketInformationTests(unittest.TestCase):
             report = evaluate(store=store)
         overfitting = report.overfitting
         self.assertEqual(len(overfitting.trade_count_matrix), len(overfitting.performance_matrix))
+
+
+# =====================================================================================================
+# Phase 3 (QA agent D) against 0ef781b: research policy, reuse verdicts, re-derivation, evidence anchor.
+# Expected failures are marked ``# PHASE3 FAIL P-n`` with a severity.
+# =====================================================================================================
+
+
+class AnchoredStoreMixin(unittest.TestCase):
+    """A store and registry bound to a LocalFileAnchor, on the full promotion path (bars re-derived)."""
+
+    def setUp(self):
+        self._tmp = workspace_tempdir()
+        self.temp = self._tmp.__enter__()
+        self.path = f"{self.temp}/astra.sqlite3"
+        self.anchor = LocalFileAnchor(f"{self.temp}/anchor.jsonl")
+        self.store = BacktestStore(self.path, anchor=self.anchor)
+        self.store.initialize()
+        self.registry = ModelRegistry(self.path, anchor=self.anchor)
+        self.registry.initialize()
+
+    def tearDown(self):
+        self._tmp.__exit__(None, None, None)
+
+    def register_score_record(self, bars=BARS, version="1"):
+        report = evaluate(bars=bars, store=self.store)
+        self.registry.register_candidate(actor=AGENT, model_id="wf", version=version,
+                                         manifest=bound_manifest(report), criteria=PromotionCriteria())
+        holdout = score_holdout(self.store, report, bars=bars)
+        evaluation_id = self.store.holdout_for_protocol(report.plan_sha256)["evaluation_id"]
+        self.registry.record_evaluation(actor=AGENT, model_id="wf", version=version, kind="holdout",
+                                        evidence=holdout_evidence(holdout), holdout_evaluation_id=evaluation_id)
+        return report, holdout, evaluation_id
+
+    def failures(self, bars=BARS, version="1"):
+        return set(self.registry.check_promotion("wf", version, holdout_bars=bars))
+
+
+INTEGRITY_CODES = {
+    "evidence_anchor_missing", "evidence_anchor_unreadable", "holdout_not_anchored", "holdout_reuse_check_missing",
+    "holdout_reuse_suspected", "holdout_reuse_undetermined", "holdout_reuse_policy_below_floor",
+    "holdout_not_rederived_from_market_data", "holdout_report_differs_from_rederivation", "attempt_log_tampered",
+}
+
+
+def integrity(failures):
+    return {item for item in failures if item in INTEGRITY_CODES or item.startswith("evidence_anchor")
+            or item.startswith("holdout_rederivation")}
+
+
+def cli_help_texts():
+    from astra.cli import build_parser
+
+    parser = build_parser()
+    texts = [parser.format_help()]
+    pending = [parser]
+    while pending:
+        current = pending.pop()
+        for action in current._actions:
+            for sub in (getattr(action, "choices", None) or {}).values() if isinstance(
+                    getattr(action, "choices", None), dict) else ():
+                texts.append(sub.format_help())
+                pending.append(sub)
+    return " ".join(texts).lower()
+
+
+class ResearchPolicyTests(AnchoredStoreMixin):
+    def test_policy_objects_reject_inconsistent_thresholds_and_are_frozen(self):
+        for kwargs in ({"suspect_abs_correlation": 0.99}, {"conflict_abs_correlation": 1.0},
+                       {"min_holdout_returns": 4}, {"min_window": 2}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                HoldoutReusePolicy(**kwargs)
+        with self.assertRaises((AttributeError, TypeError)):
+            HOLDOUT_REUSE_POLICY.conflict_abs_correlation = 0.5
+        self.assertEqual((HOLDOUT_REUSE_POLICY.conflict_abs_correlation, HOLDOUT_REUSE_POLICY.suspect_abs_correlation,
+                          HOLDOUT_REUSE_POLICY.min_holdout_returns, STATISTICAL_POLICY.min_dsr_trades),
+                         (0.98, 0.95, 16, 30))
+
+    def test_every_looser_or_malformed_recorded_threshold_is_flagged(self):
+        floor = asdict(HOLDOUT_REUSE_POLICY)
+        looser = {"conflict_abs_correlation": 0.99, "suspect_abs_correlation": 0.97, "min_holdout_returns": 10,
+                  "min_informative_share": 0.7, "informative_threshold": 0.5, "match_tolerance": 0.01,
+                  "conflict_match_share": 0.9}
+        for name, value in looser.items():
+            with self.subTest(name=name):
+                self.assertIn(name, reuse_policy_looser_than_floor({**floor, name: value}))
+        for value in (True, "0.98", None):
+            with self.subTest(value=value):
+                self.assertIn("conflict_abs_correlation",
+                              reuse_policy_looser_than_floor({**floor, "conflict_abs_correlation": value}))
+        self.assertEqual(reuse_policy_looser_than_floor(floor), ())
+
+    def test_no_cli_flag_or_seal_argument_exposes_a_threshold(self):
+        text = cli_help_texts()
+        self.assertIn("evaluate-strategies", text)
+        for word in ("conflict", "suspect", "min-dsr", "dsr-trades", "correlation", "policy"):
+            self.assertNotIn(word, text)
+        parameters = inspect.signature(BacktestStore.seal_research_protocol).parameters
+        self.assertFalse({"policy", "threshold"} & {name.lower() for name in parameters})
+
+    def test_monkeypatched_seal_policy_is_recorded_and_blocks_promotion(self):
+        loose = replace(HOLDOUT_REUSE_POLICY, conflict_abs_correlation=0.999, suspect_abs_correlation=0.999)
+        with patch("astra.storage.HOLDOUT_REUSE_POLICY", loose):
+            self.register_score_record()
+        self.assertIn("holdout_reuse_policy_below_floor", self.failures())
+
+    # PHASE3 FAIL P-4 (Low; needs in-process code): the statistical floors are module constants read at run
+    # time and the policy actually applied is not recorded in the plan, report or evidence. Lowering
+    # MIN_DSR_TRADES / MIN_PBO_TRADES_PER_SLICE in-process publishes statistics from a handful of trades and
+    # promotion cannot tell.
+    @unittest.expectedFailure
+    def test_lowered_statistical_floor_is_visible_at_promotion(self):
+        with patch("astra.strategy_validation.MIN_DSR_TRADES", 0), \
+                patch("astra.strategy_validation.MIN_PBO_TRADES_PER_SLICE", 0):
+            _report, holdout, _ = self.register_score_record()
+        self.assertLess(holdout.overfitting.dsr_trade_count, STATISTICAL_POLICY.min_dsr_trades)
+        self.assertIsNotNone(holdout.overfitting.pbo)
+        failures = self.failures()
+        self.assertTrue(failures & {"overfitting_check_missing", "statistical_policy_below_floor"}, failures)
+
+
+def _seal_returns(store, returns, label, start_year):
+    from astra.validation import _canonical_json, _sha256
+
+    manifest = {"dataset_identity_sha256": label * 64, "instrument": "EURUSD",
+                "holdout": {"start": f"{start_year}-01-01T00:00:00+00:00", "end": f"{start_year}-01-02T00:00:00+00:00",
+                            "content_sha256": holdout_reuse.content_sha256(returns)}}
+    protocol_id = _sha256(_canonical_json(manifest))
+    store.seal_research_protocol(protocol_id=protocol_id, dataset_identity_sha256=label * 64, protocol_version="t",
+                                 plan_manifest=manifest, holdout_returns=returns)
+    return protocol_id
+
+
+def _suspect_copy(base):
+    for seed in range(400):
+        noise = random.Random(seed)
+        candidate = [round(0.955 * v + 0.296 * noise.gauss(0, 1e-4), 12) for v in base]
+        if holdout_reuse.assess_reuse(candidate, base).verdict == holdout_reuse.SUSPECT:
+            return candidate
+    raise AssertionError("no SUSPECT candidate found")
+
+
+def _sparse(seed):
+    rng = random.Random(seed)
+    return [round(rng.gauss(0, 1e-4), 12) if rng.random() < 0.1 else 0.0 for _ in range(40)]
+
+
+class ReuseVerdictPathTests(TempStoreMixin):
+    def setUp(self):
+        super().setUp()
+        rng = random.Random(4)
+        self.base = [round(rng.gauss(0, 1e-4), 12) for _ in range(40)]
+        _seal_returns(self.store, self.base, "a", 2030)
+
+    def test_conflict_is_refused_at_seal(self):
+        with self.assertRaisesRegex(ValueError, "price path matches"):
+            _seal_returns(self.store, [round(v + 1e-9, 12) for v in self.base], "b", 2031)
+
+    def test_suspect_is_sealed_but_cannot_be_scored(self):
+        protocol_id = _seal_returns(self.store, _suspect_copy(self.base), "c", 2032)
+        self.assertEqual(self.store.reuse_check(protocol_id)["verdict"], holdout_reuse.SUSPECT)
+        with self.assertRaisesRegex(ValueError, "suspect"):
+            self.store.begin_holdout_evaluation(protocol_id=protocol_id, dataset_identity_sha256="c" * 64)
+
+    def test_undetermined_is_sealed_but_cannot_be_scored(self):
+        protocol_id = _seal_returns(self.store, _sparse(8), "d", 2033)
+        self.assertEqual(self.store.reuse_check(protocol_id)["verdict"], holdout_reuse.UNDETERMINED)
+        with self.assertRaisesRegex(ValueError, "undetermined"):
+            self.store.begin_holdout_evaluation(protocol_id=protocol_id, dataset_identity_sha256="d" * 64)
+
+    def test_verdict_rows_are_append_only(self):
+        protocol_id = _seal_returns(self.store, _suspect_copy(self.base), "c", 2032)
+        for statement in ("UPDATE holdout_reuse_checks SET verdict = 'CLEAR'", "DELETE FROM holdout_reuse_checks"):
+            with self.subTest(statement=statement), self.assertRaises(WriteRefused):
+                sql(self.path, statement)
+        self.assertEqual(self.store.reuse_check(protocol_id)["verdict"], holdout_reuse.SUSPECT)
+
+    # PHASE3 FAIL P-3 (Low-Medium; needs a DB write): scoring is refused only when a SUSPECT/UNDETERMINED row
+    # exists. With the triggers dropped and the verdict row deleted, a suspect holdout is scored (leaked) again;
+    # promotion still fails with holdout_reuse_check_missing, but the holdout information has leaked.
+    @unittest.expectedFailure
+    def test_missing_verdict_row_blocks_scoring(self):
+        protocol_id = _seal_returns(self.store, _suspect_copy(self.base), "c", 2032)
+        drop_all_triggers(self.path)
+        sql(self.path, "DELETE FROM holdout_reuse_checks WHERE protocol_id = ?", (protocol_id,))
+        reinitialize(self.path)
+        with self.assertRaises(ValueError):
+            self.store.begin_holdout_evaluation(protocol_id=protocol_id, dataset_identity_sha256="c" * 64)
+
+    # PHASE3 FAIL P-5 (Low, availability): independent mostly-flat holdouts (forward-filled or quiet bars) are
+    # always UNDETERMINED: sealed but never scored or promoted. N-8 was closed by moving the false CONFLICT to
+    # UNDETERMINED; the calibration suite counts UNDETERMINED as "not flagged".
+    @unittest.expectedFailure
+    def test_independent_sparse_holdout_is_clear(self):
+        protocol_id = _seal_returns(self.store, _sparse(8), "d", 2033)
+        self.assertEqual(self.store.reuse_check(protocol_id)["verdict"], holdout_reuse.CLEAR)
+
+
+def _quantized(closes):
+    return holdout_returns([round(value, 5) for value in closes])
+
+
+def _pairs(make, count):
+    return [(_quantized(make(random.Random(2 * k))), _quantized(make(random.Random(2 * k + 1)))) for k in range(count)]
+
+
+def _flagged(pairs, verdicts=(holdout_reuse.CONFLICT, holdout_reuse.SUSPECT)):
+    return sum(holdout_reuse.assess_reuse(new, old).verdict in verdicts for new, old in pairs)
+
+
+def _ticks(rng):
+    price, closes = 1.1, [1.1]
+    for _ in range(40):
+        price += rng.choice((-1, 1)) * (2 if rng.random() < 0.15 else 1) * 1e-5 * (rng.random() < 0.8)
+        closes.append(price)
+    return closes
+
+
+def _weekend(rng):
+    price, closes = 1.1, [1.1]
+    for index in range(40):
+        if index == 25:
+            price += rng.choice((-1, 1)) * 0.003
+        elif not 10 <= index < 25:
+            price += rng.gauss(0, 2e-4)
+        closes.append(price)
+    return closes
+
+
+def _trend(drift, noise):
+    def make(rng):
+        price, closes = 1.1, [1.1]
+        for _ in range(40):
+            price += drift + rng.gauss(0, noise)
+            closes.append(price)
+        return closes
+
+    return make
+
+
+class ReuseFalsePositiveTests(unittest.TestCase):
+    """Second statistic (match share) and correlation on real-like independent data, prices quantized to 1e-5."""
+
+    # PHASE3 FAIL P-9 (Low, availability): tick-quantized independent random walks (moves of 1 or 2 ticks of
+    # 1e-5) hit the match-share threshold (exactly 0.8) by chance: 1 of 600 pairs is a CONFLICT (pair 108 here),
+    # so with K sealed holdouts a fresh independent seal is refused with probability of about K * 0.17%.
+    @unittest.expectedFailure
+    def test_tick_quantized_random_walks_are_not_flagged(self):
+        self.assertEqual(_flagged(_pairs(_ticks, 150)), 0)
+
+    def test_weekend_gap_paths_are_not_flagged(self):
+        self.assertEqual(_flagged(_pairs(_weekend, 150)), 0)
+
+    def test_realistic_trending_paths_are_not_flagged(self):
+        self.assertEqual(_flagged(_pairs(_trend(1e-4, 3e-4), 100)), 0)
+        self.assertEqual(_flagged(_pairs(_trend(2e-5, 1e-5), 100)), 0)
+
+    # PHASE3 FAIL P-6 (Low, availability; documented as "near-constant paths"): two independent smooth trends
+    # with noise below the 1e-5 tick (+2 ticks per bar, noise 0.2 tick) are a CONFLICT by match share in every
+    # pair: the seal of an independent dataset is refused.
+    @unittest.expectedFailure
+    def test_independent_sub_tick_trends_are_not_a_conflict(self):
+        self.assertEqual(_flagged(_pairs(_trend(2e-5, 2e-6), 20), (holdout_reuse.CONFLICT,)), 0)
+
+    # PHASE3 FAIL P-7 (Low, availability): long holdouts (400 returns) of independent but serially correlated
+    # data are SUSPECT in a few percent of pairs (AR(1) 0.7: 6 of 200); every new seal is compared with every
+    # sealed holdout, so the per-seal rate grows with the store. The calibration uses 40 iid returns only.
+    @unittest.expectedFailure
+    def test_long_autocorrelated_independent_holdouts_are_not_flagged(self):
+        rng = random.Random("ar1_0.7")
+
+        def ar1():
+            out, x = [], 0.0
+            for _ in range(400):
+                x = 0.7 * x + rng.gauss(0, 1e-4)
+                out.append(x)
+            return out
+
+        self.assertEqual(sum(holdout_reuse.assess_reuse(ar1(), ar1()).verdict != holdout_reuse.CLEAR
+                             for _ in range(200)), 0)
+
+
+class RederivationAndAnchorTests(AnchoredStoreMixin):
+    def test_clean_anchored_path_has_no_integrity_failure_and_anchor_is_not_production(self):
+        self.register_score_record()
+        self.assertEqual(integrity(self.failures()), set())
+        self.assertFalse(self.anchor.production_grade)
+        self.assertFalse(verify_store_against_anchor(self.path, self.anchor).production_grade)
+
+    def test_no_anchor_and_no_bars_are_refused(self):
+        self.register_score_record()
+        with patch.dict("os.environ", {}, clear=True):
+            bare = ModelRegistry(self.path)
+        failures = set(bare.check_promotion("wf", "1"))
+        self.assertIn("evidence_anchor_missing", failures)
+        self.assertIn("holdout_not_rederived_from_market_data", failures)
+
+    def test_forged_money_fields_are_caught_by_rederivation(self):
+        # Strengthened N-3: the phase 2 test now also passes merely because the anchor and the bars are missing.
+        _report, _holdout, evaluation_id = self.register_score_record()
+        drop_all_triggers(self.path)
+
+        def improve(report):
+            if report.get("selected_candidate"):
+                report["selected_candidate"].update(net_pnl=5_000.0, trade_count=120)
+            report["edge_vs_baseline"] = 4_500.0
+            return report
+
+        forged = rewrite_json(self.path, "holdout_evaluations", "report_json", "evaluation_id", evaluation_id, improve)
+        row = sql(self.path, "SELECT evaluation_id FROM model_evaluations WHERE version = '1'")[0][0]
+        rewrite_json(self.path, "model_evaluations", "evidence_json", "evaluation_id", row,
+                     lambda payload: {**payload, **holdout_evidence(forged)})
+        reinitialize(self.path)
+        self.assertIn("holdout_report_differs_from_rederivation", self.failures())
+
+    # PHASE3 FAIL P-1 (Medium; needs a DB write): re-derivation compares only the money fields; the overfitting
+    # statistics (pbo, deflated Sharpe) are taken from the stored report. Forging them in the report and the
+    # evidence (triggers dropped, then recreated) removes the overfitting failures and adds none, although the
+    # hash-chained holdout attempt still records the genuine values.
+    @unittest.expectedFailure
+    def test_forged_overfitting_statistics_are_caught(self):
+        _report, _holdout, evaluation_id = self.register_score_record()
+        before = self.failures()
+        drop_all_triggers(self.path)
+
+        def improve(report):
+            report["overfitting"].update(status="COMPLETED", pbo=0.05, deflated_sharpe_probability=0.99)
+            return report
+
+        forged = rewrite_json(self.path, "holdout_evaluations", "report_json", "evaluation_id", evaluation_id, improve)
+        row = sql(self.path, "SELECT evaluation_id FROM model_evaluations WHERE version = '1'")[0][0]
+        rewrite_json(self.path, "model_evaluations", "evidence_json", "evaluation_id", row,
+                     lambda payload: {**payload, **holdout_evidence(forged)})
+        reinitialize(self.path)
+        after = self.failures()
+        self.assertTrue(before & {"overfitting_check_missing", "pbo_above_threshold", "deflated_sharpe_below_threshold"})
+        self.assertTrue(after - before, f"forged statistics accepted: before={sorted(before)} after={sorted(after)}")
+
+    def test_chain_divergence_is_reported_against_the_anchor(self):
+        explored = evaluate(store=self.store)
+        self.store.anchor_now()
+        rewrite_attempt_chain_without(self.path, explored.plan_sha256)
+        verification = verify_store_against_anchor(self.path, self.anchor)
+        self.assertFalse(verification.ok)
+        self.assertTrue({"attempt_chain_diverged", "store_behind_anchor", "experiment_missing"}
+                        & set(verification.errors), verification.errors)
+        with self.assertRaisesRegex(ValueError, "inconsistent with the evidence anchor"):
+            self.store.require_anchor_consistency()
+
+    def test_restored_old_backup_cannot_rescore(self):
+        report, _holdout, _ = self.register_score_record()
+        old = f"{self.temp}/old.sqlite3"
+        with patch.dict("os.environ", {}, clear=True):
+            old_store = BacktestStore(old)
+        old_store.initialize()
+        evaluate(store=old_store)  # same plan, holdout never scored: an older backup
+        shutil.copyfile(old, self.path)
+        restored = BacktestStore(self.path, anchor=self.anchor)
+        with self.assertRaisesRegex(ValueError, "evidence anchor"):
+            score_holdout(restored, report)
+
+    # PHASE3 FAIL P-2 (Medium; documented limit of LocalFileAnchor, but not surfaced): promotion accepts any
+    # anchor, production grade or not, and records nothing about it. A fresh database with a fresh local anchor
+    # file re-scores a nudged, time-shifted copy of a holdout already consumed elsewhere, and its promotion
+    # check shows no integrity failure and no production-grade warning.
+    @unittest.expectedFailure
+    def test_fresh_store_with_fresh_local_anchor_is_flagged(self):
+        self.register_score_record()  # holdout consumed in the original store and anchor
+        other = Path(self.temp) / "other"
+        other.mkdir()
+        anchor = LocalFileAnchor(other / "anchor.jsonl")
+        store = BacktestStore(other / "astra.sqlite3", anchor=anchor)
+        store.initialize()
+        registry = ModelRegistry(other / "astra.sqlite3", anchor=anchor)
+        registry.initialize()
+        bars = time_shift(perturb_holdout(BARS, delta=2e-5), days=400)
+        report = evaluate(bars=bars, store=store)
+        registry.register_candidate(actor=AGENT, model_id="wf", version="1", manifest=bound_manifest(report),
+                                    criteria=PromotionCriteria())
+        holdout = score_holdout(store, report, bars=bars)
+        registry.record_evaluation(actor=AGENT, model_id="wf", version="1", kind="holdout",
+                                   evidence=holdout_evidence(holdout),
+                                   holdout_evaluation_id=store.holdout_for_protocol(report.plan_sha256)["evaluation_id"])
+        failures = set(registry.check_promotion("wf", "1", holdout_bars=bars))
+        self.assertTrue(integrity(failures) | {item for item in failures if "production" in item}, failures)
+
+
+class SealDeletionReuseTests(AnchoredStoreMixin):
+    def wipe_seal_tables(self):
+        drop_all_triggers(self.path)
+        for table in ("holdout_evaluations", "holdout_signatures", "holdout_reuse_checks", "research_protocols"):
+            sql(self.path, f"DELETE FROM {table}")
+        reinitialize(self.path)
+
+    def test_with_anchor_a_wiped_store_cannot_score_a_nudged_copy(self):
+        score_holdout(self.store, evaluate(store=self.store))
+        self.wipe_seal_tables()
+        bars = time_shift(perturb_holdout(BARS, delta=2e-5), days=400)
+        with self.assertRaises(ValueError):
+            score_holdout(self.store, evaluate(bars=bars, store=self.store), bars=bars)
+
+    # PHASE3 FAIL P-10 (Medium without an anchor, Low with one; needs a DB write): the attempt log keeps only
+    # the exact holdout_content_sha256. After the seal tables are wiped (triggers dropped), a nudged and
+    # time-shifted copy has no stored returns to be compared with and a different content hash: it is sealed
+    # and scored again. Promotion still fails (evidence_anchor_missing), but the holdout leaks.
+    @unittest.expectedFailure
+    def test_without_anchor_a_wiped_store_cannot_score_a_nudged_copy(self):
+        with patch.dict("os.environ", {}, clear=True):
+            store = BacktestStore(f"{self.temp}/bare.sqlite3")
+        store.initialize()
+        path = store.path
+        score_holdout(store, evaluate(store=store))
+        drop_all_triggers(path)
+        for table in ("holdout_evaluations", "holdout_signatures", "holdout_reuse_checks", "research_protocols"):
+            sql(path, f"DELETE FROM {table}")
+        reinitialize(path)
+        bars = time_shift(perturb_holdout(BARS, delta=2e-5), days=400)
+        with self.assertRaises(ValueError):
+            score_holdout(store, evaluate(bars=bars, store=store), bars=bars)
+
+
+class ExperimentIdTests(TempStoreMixin):
+    def test_every_attempt_has_a_global_experiment_id(self):
+        report = evaluate(store=self.store)
+        score_holdout(self.store, report)
+        legacy = time_shift(make_synthetic_bars(400, seed=21), days=60)
+        evaluate_walk_forward(legacy, (BacktestConfig(fast_window=5, slow_window=13),
+                                       BacktestConfig(fast_window=8, slow_window=21)),
+                              hypothesis="legacy grid", protocol=PROTOCOL, store=self.store)
+        states = AttemptLog(self.path).attempts()
+        self.assertTrue(states)
+        self.assertFalse([state for state in states if not state.get("experiment_id")])
+        plan = {state["experiment_id"] for state in states
+                if state.get("protocol_id") == report.plan_sha256 and state["kind"] != attempts.KIND_HOLDOUT}
+        holdout = {state["experiment_id"] for state in states
+                   if state.get("protocol_id") == report.plan_sha256 and state["kind"] == attempts.KIND_HOLDOUT}
+        self.assertEqual(len(plan), 1)
+        self.assertEqual(holdout, plan)
+
+
+class LowInformationTests(unittest.TestCase):
+    def test_fixture_publishes_no_statistic_below_the_floors(self):
+        with workspace_tempdir() as temp:
+            store = BacktestStore(f"{temp}/astra.sqlite3")
+            store.initialize()
+            holdout = score_holdout(store, evaluate(store=store))
+        overfitting = holdout.overfitting
+        if overfitting.dsr_trade_count is None or overfitting.dsr_trade_count < STATISTICAL_POLICY.min_dsr_trades:
+            self.assertIsNone(overfitting.deflated_sharpe_probability)
+            self.assertIsNone(holdout_evidence(holdout)["deflated_sharpe_probability"])
+        if overfitting.pbo is None or overfitting.deflated_sharpe_probability is None:
+            self.assertNotEqual(overfitting.status, "COMPLETED")
+
+    def test_too_few_slices_or_observations_publish_nothing(self):
+        rng = random.Random(2)
+        for rows, returns in ((6, 60), (32, 10)):
+            matrix = [[rng.gauss(0, 1) for _ in range(4)] for _ in range(rows)]
+            counts = [[3] * 4 for _ in range(rows)]
+            with self.subTest(rows=rows, returns=returns):
+                try:
+                    result = assess_overfitting(matrix, [f"p{i}" for i in range(rows)], variants_tested=4,
+                                                dsr_returns=[0.001 + 0.01 * rng.gauss(0, 1) for _ in range(returns)],
+                                                trade_counts=counts, dsr_trade_count=100, initial_equity=10_000.0)
+                except ValueError:
+                    continue
+                self.assertNotEqual(result.status, "COMPLETED")
+                self.assertTrue(result.pbo is None or result.deflated_sharpe_probability is None)
+
+    # PHASE3 FAIL P-8 (Low; public API only, production paths pass trade counts): without trade_counts the DSR
+    # trade guard is skipped, so one held position (60 mark-to-market bars) still yields a confident DSR (1.0).
+    @unittest.expectedFailure
+    def test_dsr_without_trade_information_is_not_published(self):
+        rng = random.Random(9)
+        matrix = [[rng.gauss(0, 5) for _ in range(4)] for _ in range(64)]
+        returns = [0.0] * 100 + [0.0004 + rng.gauss(0, 0.0003) for _ in range(60)]
+        result = assess_overfitting(matrix, [f"p{i}" for i in range(64)], variants_tested=4, dsr_returns=returns,
+                                    initial_equity=10_000.0)
+        self.assertIsNone(result.deflated_sharpe_probability)
 
 
 if __name__ == "__main__":
