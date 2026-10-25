@@ -427,13 +427,18 @@ class HoldoutProvenanceTests(unittest.TestCase):
                           "manifest_params_differ_from_evaluated_candidate", "manifest_code_differs_from_sealed_plan",
                           "manifest_dataset_differs_from_sealed_plan"}
             self.assertFalse(provenance & set(failures), failures)
-            # Rewriting the recorded numbers is detected against the stored report.
+            # Rewriting the recorded numbers is refused by SQLite (Lot 4 triggers); with the trigger
+            # dropped by the file owner it is still detected against the stored report.
             db = sqlite3.connect(database)
             try:
                 with db:
                     row = db.execute("SELECT evaluation_id, evidence_json FROM model_evaluations").fetchone()
                     payload = json.loads(row[1])
                     payload["net_pnl"] = 1e9
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        db.execute("UPDATE model_evaluations SET evidence_json = ? WHERE evaluation_id = ?",
+                                   (json.dumps(payload), row[0]))
+                    db.execute("DROP TRIGGER model_evaluations_no_update")
                     db.execute("UPDATE model_evaluations SET evidence_json = ? WHERE evaluation_id = ?",
                                (json.dumps(payload), row[0]))
             finally:

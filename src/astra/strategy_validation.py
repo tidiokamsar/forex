@@ -803,6 +803,24 @@ def evaluate_strategy_holdout_once(
         raise
 
 
+def _distinct_variant_count(matrix) -> int:
+    """Variants whose standardized period column differs from every other one (constant columns are one class)."""
+
+    classes: set[tuple[float, ...]] = set()
+    for column in range(len(matrix[0]) if matrix else 0):
+        values = [float(row[column]) for row in matrix]
+        if not all(math.isfinite(value) for value in values):
+            return 0
+        mean = sum(values) / len(values)
+        spread = math.sqrt(sum((value - mean) ** 2 for value in values) / len(values))
+        scale = max(abs(value) for value in values) or 1.0
+        if spread <= 1e-9 * scale:
+            classes.add(())
+        else:
+            classes.add(tuple(round((value - mean) / spread, 6) for value in values))
+    return len(classes)
+
+
 def _store_trial_universe(store, protocol_id: str, bar_seconds: int | None, given: Any) -> Any:
     """Trials of the whole store relevant to this plan, merged with a caller-supplied universe.
 
@@ -1015,8 +1033,14 @@ def assess_overfitting(
     inactive_variants = sum(
         1 for column in range(columns) if sum(1 for row in matrix if row[column] != 0.0) < min_active
     )
+    distinct_variants = _distinct_variant_count(matrix)
+    # The matrix has one column per variant tried; a smaller declared count cannot lower the DSR's N.
+    variants_tested = max(variants_tested, columns)
     if n_slices < MIN_PBO_SLICES:
         low_information.append(f"pbo: {n_slices} slices (need at least {MIN_PBO_SLICES})")
+    elif distinct_variants < 2:
+        # Identical, noise-level or rescaled copies: any PBO would come from tie-breaking (Lot 4 QA, D-16 to D-18).
+        low_information.append(f"pbo: {distinct_variants} distinguishable variant(s) of {columns}")
     elif inactive_variants:
         # A variant that barely trades makes its rank, and therefore the PBO, arbitrary.
         low_information.append(

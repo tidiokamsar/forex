@@ -25,13 +25,13 @@ relevant to a candidate. Scope: every ``fold_trial`` and ``walk_forward_run``
 attempt in the store, across every plan, run, experiment and status
 (``STARTED``/``INTERRUPTED``, ``FAILED`` and ``ABANDONED`` included), on the
 candidate's instrument (attempts or scopes without an instrument match every
-instrument) whose dataset period overlaps the candidate's dataset period
-(missing periods match every period). Holdout scorings are excluded: they
+instrument), over every data period of that instrument (an explicit
+``TrialScope`` may still restrict the period). Holdout scorings are excluded: they
 re-score an already counted candidate. Trials are distinct by
 ``(family, params_sha256, dataset fingerprint)``; the fingerprint is the
 canonical market-bar identity (source-byte hash when absent), so retrying the
-same plan does not inflate the count while the same grid on another
-(overlapping) dataset counts again. Creating a new plan can only add trials.
+same plan does not inflate the count while the same grid on another dataset
+counts again. Creating a new plan can only add trials.
 """
 
 from __future__ import annotations
@@ -75,8 +75,8 @@ TRIAL_KINDS = (KIND_FOLD, KIND_RUN)
 TRIAL_SCOPE_DEFINITION = (
     "distinct (family, params_sha256, dataset fingerprint) over every fold_trial and walk_forward_run attempt "
     "in the store, all plans and all statuses (failed, interrupted and abandoned included), same instrument "
-    "(unknown instrument matches all), dataset period overlapping the candidate's (unknown period matches all); "
-    "holdout scorings excluded"
+    "(unknown instrument matches all), any data period (Lot 4: exploration on earlier or later data of the "
+    "instrument informs the choice too); holdout scorings excluded"
 )
 
 # Hashed columns, in order. ``row_hash`` covers all of them (``seq`` included, so reordering breaks the chain).
@@ -440,18 +440,16 @@ def _statistics(db: sqlite3.Connection, scope: TrialScope) -> TrialStatistics:
 
 
 def scope_for_plan(plan: Mapping[str, Any] | None, *, source: str = "plan") -> TrialScope:
-    """Instrument and whole dataset period (first training bar to holdout end) of a sealed plan."""
+    """The instrument of a sealed plan, over every data period.
+
+    A grid explored on earlier or later data of the same instrument informs the
+    choice as much as one on this dataset (Lot 4 QA, D-10), so no period filter
+    is applied; ``TrialScope`` still accepts one for explicit queries.
+    """
 
     if not plan:
         return TrialScope(source="whole_store")
-    folds = plan.get("folds") or []
-    holdout = plan.get("holdout") or {}
-    return TrialScope(
-        instrument=plan.get("instrument"),
-        period_start=folds[0].get("train_start") if folds else None,
-        period_end=holdout.get("end"),
-        source=source,
-    )
+    return TrialScope(instrument=plan.get("instrument"), source=source)
 
 
 def _plan(db: sqlite3.Connection, protocol_id: str | None) -> dict | None:
@@ -537,7 +535,8 @@ def promotion_trial_failures(
             for state in _attempt_states(_event_rows(db)).values()
             if state["kind"] in TRIAL_KINDS and state.get("protocol_id") == protocol_id
         }
-        if len(own) < len(plan.get("candidates") or ()):
+        candidates = plan.get("candidates") or ()
+        if not candidates or len(own) < len(candidates):
             failures.append("attempt_log_missing_for_plan")
     stats = _statistics(db, scope_for_plan(plan))
     # A missing count is already reported by the registry as ``overfitting_check_missing``.

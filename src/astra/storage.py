@@ -86,6 +86,14 @@ class BacktestStore:
                     protocol_id TEXT PRIMARY KEY REFERENCES research_protocols(protocol_id),
                     returns_json TEXT NOT NULL
                 );
+                CREATE TRIGGER IF NOT EXISTS research_protocols_no_update BEFORE UPDATE ON research_protocols
+                BEGIN SELECT RAISE(ABORT, 'sealed research protocols are append-only: UPDATE refused'); END;
+                CREATE TRIGGER IF NOT EXISTS research_protocols_no_delete BEFORE DELETE ON research_protocols
+                BEGIN SELECT RAISE(ABORT, 'sealed research protocols are append-only: DELETE refused'); END;
+                CREATE TRIGGER IF NOT EXISTS holdout_signatures_no_update BEFORE UPDATE ON holdout_signatures
+                BEGIN SELECT RAISE(ABORT, 'holdout signatures are append-only: UPDATE refused'); END;
+                CREATE TRIGGER IF NOT EXISTS holdout_signatures_no_delete BEFORE DELETE ON holdout_signatures
+                BEGIN SELECT RAISE(ABORT, 'holdout signatures are append-only: DELETE refused'); END;
                 CREATE TABLE IF NOT EXISTS holdout_evaluations (
                     evaluation_id TEXT PRIMARY KEY,
                     protocol_id TEXT NOT NULL REFERENCES research_protocols(protocol_id),
@@ -104,6 +112,11 @@ class BacktestStore:
                     ON audit_events(occurred_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_research_protocols_dataset
                     ON research_protocols(dataset_sha256);
+                CREATE TRIGGER IF NOT EXISTS holdout_evaluations_no_delete BEFORE DELETE ON holdout_evaluations
+                BEGIN SELECT RAISE(ABORT, 'holdout evaluations are append-only: DELETE refused'); END;
+                CREATE TRIGGER IF NOT EXISTS holdout_evaluations_final BEFORE UPDATE ON holdout_evaluations
+                WHEN OLD.status <> 'STARTED'
+                BEGIN SELECT RAISE(ABORT, 'a completed or failed holdout evaluation cannot be changed'); END;
                 """
             )
             # Append-only, hash-chained attempt registry (see astra.attempts).

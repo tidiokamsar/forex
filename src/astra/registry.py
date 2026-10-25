@@ -176,6 +176,17 @@ class ModelRegistry:
                     decision TEXT,
                     decided_at TEXT
                 );
+                -- Evidence and the experiment log are append-only through SQLite (Lot 4). The file
+                -- owner can still drop these triggers; see SECURITY.md.
+                CREATE TRIGGER IF NOT EXISTS model_evaluations_no_update BEFORE UPDATE ON model_evaluations
+                BEGIN SELECT RAISE(ABORT, 'model evaluations are append-only: UPDATE refused'); END;
+                CREATE TRIGGER IF NOT EXISTS model_evaluations_no_delete BEFORE DELETE ON model_evaluations
+                BEGIN SELECT RAISE(ABORT, 'model evaluations are append-only: DELETE refused'); END;
+                CREATE TRIGGER IF NOT EXISTS experiments_no_delete BEFORE DELETE ON experiments
+                BEGIN SELECT RAISE(ABORT, 'experiments are append-only: DELETE refused'); END;
+                CREATE TRIGGER IF NOT EXISTS experiments_decided_once BEFORE UPDATE ON experiments
+                WHEN OLD.decision IS NOT NULL
+                BEGIN SELECT RAISE(ABORT, 'a decided experiment cannot be changed'); END;
                 """
             )
 
@@ -357,6 +368,22 @@ class ModelRegistry:
         if decisive_kind == "holdout":
             with self._connect() as db:
                 failures.extend(self._verify_evidence(db, row, evidence))
+                # One version per holdout, re-checked here: evidence copied to a sibling row bypasses
+                # record_evaluation (Lot 4 QA, D-9).
+                # The first version recorded against a holdout owns it.
+                reference = (evidence.get(PROVENANCE_KEY) or {}).get("holdout_evaluation_id")
+                backers = sorted(
+                    (other["recorded_at"], other["evaluation_id"], other["model_id"], other["version"])
+                    for other in db.execute(
+                        "SELECT evaluation_id, model_id, version, evidence_json, recorded_at "
+                        "FROM model_evaluations WHERE kind = 'holdout'"
+                    ).fetchall()
+                    if reference
+                    and (json.loads(other["evidence_json"]).get(PROVENANCE_KEY) or {}).get("holdout_evaluation_id")
+                    == reference
+                )
+                if backers and backers[0][2:] != (model_id, version):
+                    failures.append("holdout_backs_another_version")
         if criteria.require_shadow and "shadow" not in by_kind:
             failures.append("missing_shadow_evaluation")
         if row["status"] not in (ModelStatus.CANDIDATE, ModelStatus.SHADOW):
@@ -617,11 +644,12 @@ def verify_holdout_provenance(db: sqlite3.Connection, version_row: sqlite3.Row, 
     if report.get("selected_config") != manifest.get("params"):
         failures.append("manifest_params_differ_from_evaluated_candidate")
     plan_row = db.execute(
-        "SELECT plan_json FROM research_protocols WHERE protocol_id = ?", (holdout["protocol_id"],)
+        "SELECT plan_json, dataset_sha256 FROM research_protocols WHERE protocol_id = ?", (holdout["protocol_id"],)
     ).fetchone()
     plan = json.loads(plan_row["plan_json"]) if plan_row else {}
     if plan.get("implementation_sha256") != manifest.get("code_sha256"):
         failures.append("manifest_code_differs_from_sealed_plan")
+    failures.extend(_report_binding_failures(db, holdout["protocol_id"], plan, plan_row, report, manifest))
     identity = manifest.get("dataset_identity")
     canonical = identity.get("canonical_sha256") if isinstance(identity, dict) else None
     if canonical is None or canonical != plan.get("dataset_identity_sha256"):
@@ -639,6 +667,64 @@ def verify_holdout_provenance(db: sqlite3.Connection, version_row: sqlite3.Row, 
             failures.append("evidence_does_not_match_holdout_report")
             break
     return tuple(failures)
+
+
+def _current_implementation_sha256(plan: dict[str, Any]) -> str:
+    if "strategy_validation_version" in plan:
+        from .strategy_validation import _implementation_sha256
+    else:
+        from .validation import _implementation_sha256
+    return _implementation_sha256()
+
+
+def _report_binding_failures(
+    db: sqlite3.Connection,
+    protocol_id: str,
+    plan: dict[str, Any],
+    plan_row: sqlite3.Row | None,
+    report: dict[str, Any],
+    manifest: dict[str, Any],
+) -> list[str]:
+    """Bind a stored holdout report to its sealed plan, the current code and the attempt log (Lot 4, A-4).
+
+    These checks raise the bar for a report minted through the public store API:
+    the report must name its own plan and dataset, select one of the plan's
+    sealed candidates with that candidate's parameters, come from the code that
+    runs now, and appear in the hash-chained attempt log together with the
+    plan's fold trials. In-process code that also writes consistent attempt
+    events can still mint one; only re-deriving the holdout from the market
+    data closes that, and it is not implemented.
+    """
+
+    if plan_row is None:
+        return ["holdout_plan_not_sealed"]
+    failures = []
+    if report.get("protocol_id") != protocol_id or report.get("plan_sha256") != protocol_id:
+        failures.append("holdout_report_names_another_plan")
+    if report.get("dataset_identity_sha256") != plan_row["dataset_sha256"]:
+        failures.append("holdout_report_dataset_differs_from_plan")
+    candidates = {item.get("candidate_id"): item for item in plan.get("candidates") or () if isinstance(item, dict)}
+    sealed = candidates.get(manifest.get("candidate_id"))
+    sealed_params = {key: value for key, value in sealed.items() if key != "candidate_id"} if sealed else None
+    if sealed_params is None or sealed_params != report.get("selected_config"):
+        failures.append("holdout_candidate_not_in_sealed_plan")
+    try:
+        current = _current_implementation_sha256(plan)
+    except (OSError, ImportError):
+        current = None
+    if plan.get("implementation_sha256") != current:
+        failures.append("code_changed_since_holdout")
+    try:
+        recorded = db.execute(
+            "SELECT 1 FROM research_attempt_events WHERE kind = 'holdout' AND protocol_id = ? "
+            "AND status LIKE 'COMPLETED%' LIMIT 1",
+            (protocol_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        recorded = None
+    if recorded is None:
+        failures.append("holdout_attempt_missing_from_log")
+    return failures
 
 
 def _version_dict(row: sqlite3.Row) -> dict[str, Any]:
