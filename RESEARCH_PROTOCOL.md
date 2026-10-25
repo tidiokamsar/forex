@@ -125,23 +125,45 @@ Lot 4 round 4 (P-4, P-8). Every `OverfittingAssessment` records `statistical_pol
 
 ### Holdout reuse detection and calibration (`holdout_reuse`)
 
-At seal time every new holdout is compared with every sealed holdout of the store: exact fingerprint, holdout period (same instrument), the attempt log's scored holdouts, the external anchor's consumed holdouts, and `assess_reuse`. `assess_reuse` compares robust-standardized log returns (not raw prices) over aligned windows at every offset, ignoring the sign, also against the reversed path and against two-bar aggregations of either side. The verdict is recorded, append-only, in `holdout_reuse_checks` with the policy used: `CONFLICT` refuses the plan; `SUSPECT` (correlated beyond 0.95) and `UNDETERMINED` (no comparable window, or a plan sealed before lot 4 without stored returns) are sealed but promotion fails (`holdout_reuse_suspected`, `holdout_reuse_undetermined`); no statement by an agent can clear them, only a new independent holdout. A verdict recorded under a looser policy fails (`holdout_reuse_policy_below_floor`).
+At seal time every new holdout is compared with every sealed holdout of the store: exact fingerprint, holdout period (same instrument), the attempt log's scored holdouts, the external anchor's consumed holdouts, and `assess_reuse`. Each pair is tried as is, against the reversed old path, against two-bar aggregations of either side, and with the sign ignored. Two statistics decide (policy `astra-research-policy-0.2.0-provisional`, lot 4 round 4):
 
-Calibration (`tests/test_holdout_reuse_calibration.py`, 40 synthetic pairs per set, 40 returns, fixed seeds; synthetic data, so these rates say nothing about real markets):
+- Window correlation of robust-standardized log returns (median, median absolute deviation floored at the match tolerance, clipped at 3) over aligned 20-return windows at every offset. A pair of windows counts only if it is also correlated after both windows are prewhitened by the mean lag-1 autocorrelation of the two paths, so serially correlated independent data does not create matches. `CONFLICT` from 0.98, `SUSPECT` from 0.95.
+- Match share: the share of aligned informative returns equal within 5% of the new holdout's return scale. Returns are compared as they are, or minus each path's median when one path of the pair drifts (half its returns at the median), so a shared constant drift is not a match. Spans are dense windows and the whole overlap of each offset (at least 3 informative returns), so sparse (mostly flat) holdouts are compared on their moves and positions. A span with a share of at least 0.8 is judged by the binomial probability of its matches at the pair's own chance match rate (measured over every alignment, which absorbs tick grids and discrete moves), multiplied by the number of spans of its kind tested (per transform and sign): `CONFLICT` at most 1e-4 (a sparse span then counts runs of consecutive moves, not points); a whole-overlap span is `SUSPECT` at most 1e-2 (a dense window is a `CONFLICT` or nothing).
+- An old holdout with fewer than 3 informative returns is recorded as `old_holdout_uninformative` and does not taint unrelated plans. If it is entirely constant (the bundled fixture's -12 tick ramp) it still matches a new holdout that repeats the constant (returns and price level) over 80% of its length: the fixture holdout with one close moved by 0.00001 is a `CONFLICT`.
 
-| Set | Conflict | Suspect | Undetermined | Clear |
+The verdict is recorded, append-only, in `holdout_reuse_checks` with the policy used: `CONFLICT` refuses the plan; `SUSPECT` and `UNDETERMINED` (the NEW holdout has fewer than 3 informative returns, so it cannot be compared with anything, or a plan sealed before lot 4 without stored returns) are sealed but cannot be scored and promotion fails (`holdout_reuse_suspected`, `holdout_reuse_undetermined`); no statement by an agent can clear them, only a new independent holdout. A verdict recorded under a looser policy fails (`holdout_reuse_policy_below_floor`). Policy 0.2.0 replaces 0.1.0 (round 3): `UNDETERMINED` no longer depends on the old holdout (C-5: one flat sealed holdout made every later plan unscorable), sparse holdouts are compared instead of always being `UNDETERMINED` (C-6, P-5), and the match share is chance-adjusted and drift-free (P-6, P-9). New fields: `conflict_match_chance_probability` 1e-4, `suspect_match_chance_probability` 1e-2, `min_informative_points` 3, `scale_floor_fraction` 0.01 (returns below 1% of the largest one do not set the return scale).
+
+Calibration (`tests/test_holdout_reuse_calibration.py`, fixed seeds, counts asserted exactly; synthetic data, so these rates say nothing about real markets). Positive sets are 200 sealed holdouts of 40 returns each (gaussian unless named); negative sets are N independent pairs. `UNDETERMINED` is listed apart: it blocks scoring, so it is neither a detection nor a pass. For 0 flagged pairs out of N, the one-sided 95% upper bound on the false-positive rate is 1 - 0.05^(1/N) (0.5% for N = 600, 2.0% for 150, 4.9% for 60).
+
+| Positive set (200) | Conflict | Suspect | Undetermined | Clear |
 |---|---|---|---|---|
-| exact copy, nudge 1e-9, offset 1 or 3 bars, inverted quote, time reversed, resampled x2, noise 0.1x | 40 | 0 | 0 | 0 |
-| noise 0.2x the return scale | 30 | 10 | 0 | 0 |
-| noise 0.3x | 7 | 27 | 0 | 6 |
-| noise 0.5x | 0 | 8 | 0 | 32 |
-| distinct path, correlation 0.98 | 30 | 10 | 0 | 0 |
-| distinct path, correlation 0.95 | 3 | 30 | 0 | 7 |
-| distinct path, correlation 0.90 | 0 | 9 | 0 | 31 |
-| independent gaussian / heavy-tailed | 0 | 0 | 0 | 40 |
-| independent sparse (90% flat) | 0 | 0 | 40 | 0 |
+| exact copy, nudge 1e-9, offset 1 or 3 bars, inverted quote, time reversed, resampled x2, noise 0.1x | 200 | 0 | 0 | 0 |
+| tick-quantized walk, offset 1 bar; AR(1) 0.7, offset 1 bar | 200 | 0 | 0 | 0 |
+| noise 0.2x the return scale | 152 | 48 | 0 | 0 |
+| noise 0.3x | 25 | 154 | 0 | 21 |
+| noise 0.5x | 0 | 28 | 0 | 172 |
+| distinct path, correlation 0.98 | 141 | 59 | 0 | 0 |
+| distinct path, correlation 0.95 | 14 | 138 | 0 | 48 |
+| distinct path, correlation 0.90 | 0 | 35 | 0 | 165 |
+| sparse gaussian (90% flat), nudged 1e-9 | 147 | 13 | 40 | 0 |
+| sparse binary (90% flat, moves of one size), nudged 1e-9 | 89 | 62 | 49 | 0 |
+| sparse binary, inverted and reversed | 88 | 68 | 44 | 0 |
+| sub-tick trend (+2 ticks per bar), one close nudged 1 tick | 2 | 45 | 0 | 153 |
 
-False negatives: copies with noise from about 0.3x the return scale upward are increasingly missed, and an arbitrarily noisy copy cannot be told apart from independent data; resampling factors other than two, shared runs shorter than about 1.25 windows and mostly flat windows are not compared. False positives: distinct but strongly correlated data (correlated pairs, overlapping baskets) is flagged like a copy, by design; sparse data is always `UNDETERMINED`, which blocks promotion (fail closed). Cost: two statistics over every alignment, about 8 s for 1000 x 1000 returns in pure Python, per sealed plan, computed before the write lock (it grows with every sealed plan). The second statistic, the share of aligned non-flat returns equal within 5% of the median absolute return (conflict at 80%), catches near-constant paths that keep little signal once centred (Lot 4 regression s52).
+| Negative set | N | Conflict | Suspect | Undetermined | Clear | 95% bound, flagged |
+|---|---|---|---|---|---|---|
+| independent gaussian, 40 returns | 600 | 0 | 0 | 0 | 600 | 0.5% |
+| independent heavy-tailed, 40 | 600 | 0 | 0 | 0 | 600 | 0.5% |
+| independent AR(1) 0.7, 40 | 600 | 0 | 0 | 0 | 600 | 0.5% |
+| independent tick-quantized walks, 40 | 600 | 0 | 0 | 0 | 600 | 0.5% |
+| independent sparse gaussian (90% flat), 40 | 600 | 0 | 0 | 130 | 470 | 0.5% |
+| independent sparse binary (90% flat), 40 | 600 | 0 | 2 | 139 | 459 | 1.1% |
+| independent sub-tick trends, 40 | 600 | 0 | 8 | 47 | 545 | 2.4% |
+| independent gaussian, 200 | 150 | 0 | 0 | 0 | 150 | 2.0% |
+| independent tick-quantized walks, 200 | 150 | 0 | 0 | 0 | 150 | 2.0% |
+| independent AR(1) 0.7, 400 | 60 | 0 | 0 | 0 | 60 | 4.9% |
+
+False negatives, stated plainly: copies with noise from about 0.3x the return scale upward are increasingly missed (0.3x: 10% clear, 0.5x: 86% clear) and an arbitrarily noisy copy cannot be told apart from independent data (B-2: noise at 0.5x to 0.7x evades and stays documented, not fixed); a distinct path correlated 0.90 is mostly clear. A copy of a sparse holdout is never cleared, but with 3 or 4 moves it is often only `SUSPECT` (its moves are not improbable enough by chance to refuse the seal), and with fewer than 3 moves it is `UNDETERMINED`. Not compared: an old holdout with one or two moves (a copy of it passes), a nudged copy of a near-constant trend whose old holdout has a few moves (77% clear above), resampling factors other than two, shared runs shorter than about one window (20 returns; noisy copies need about 1.25 windows), and noisy copies of sparse paths. False positives: distinct but strongly correlated data (correlated pairs, overlapping baskets) is flagged like a copy, by design; two independent paths that both repeat the same constant return are a conflict (a constant path carries only its drift); independent pairs were never a `CONFLICT` in the sets above, but sparse binary and sub-tick-trend pairs are `SUSPECT` in up to 1.3% of pairs, and independent sparse holdouts with fewer than 3 moves are `UNDETERMINED` (about 22% of the 10%-sparse pairs). Every new seal is compared with every sealed holdout, so these per-pair rates accumulate with the size of the store. Cost (pure Python, QA machine under load, one sealed plan, before the write lock): about 0.02 s for 40 x 40 returns, 0.6 s for 500 x 500, 2.1 s for 1000 x 1000 and 4.2 s for 1500 x 1500 (round 3: 8 s and 65 s for the last two); the window correlations of one new window with every old window are computed as one big-integer product (Kronecker substitution, error below 3e-4, every pair near a threshold recomputed exactly) and match-share offsets are grouped by a sort. It is still quadratic and grows with every sealed plan.
 
 ### Evidence anchoring (`anchoring`)
 

@@ -508,11 +508,12 @@ class DetectorFalsePositiveAndCostTests(_StoreCase):
                 refused += 1
         self.assertEqual(refused, 0)
 
-    # CONFIRMED DEFECT B-7: the comparison is quadratic in pure Python, for every sealed plan. Phase 2: 1500 vs
-    # 1500 returns about 5 s inside BEGIN IMMEDIATE. Phase 3 (0ef781b): moved before the write lock but about
-    # 12x slower (reversed, 2-bar aggregated, negated, match-share passes): 1500 vs 1500 took 65 s. Sized to
-    # 500 here to keep the suite fast; one seal still costs seconds per long sealed holdout in the store.
-    @unittest.expectedFailure
+    # FIXED IN LOT 4 ROUND 4 (was CONFIRMED DEFECT B-7): the comparison is quadratic in pure Python, for every
+    # sealed plan. Phase 2: 1500 vs 1500 returns about 5 s inside BEGIN IMMEDIATE. Phase 3 (0ef781b): moved
+    # before the write lock but about 12x slower (reversed, 2-bar aggregated, negated, match-share passes):
+    # 1500 vs 1500 took 65 s. Round 4: the window correlations of one new window with every old window are
+    # one big-integer product, and match-share offsets are grouped by a sort (no per-offset rescan). Still
+    # quadratic (about 5 s for 1500 x 1500 on the QA machine), so it grows with every sealed plan.
     def test_sealing_a_long_holdout_against_a_long_sealed_one_is_fast(self):
         rng = random.Random(1)
         self.seal([round(rng.gauss(0.0, 1e-4), 12) for _ in range(500)], "AAA", 2030, "a" * 64)
@@ -715,20 +716,20 @@ class ReuseVerdictPolicyTests(_Phase3Case):
                                           protocol_version="x", plan_manifest=plan, holdout_returns=returns)
         return protocol_id
 
-    # CONFIRMED DEFECT C-5 (high, permanent denial of service): one sealed plan whose holdout is mostly flat
-    # makes every later, unrelated plan UNDETERMINED (no comparable window on the old side), and UNDETERMINED
-    # blocks scoring and promotion. holdout_reuse_checks and research_protocols are append-only, so any
-    # research agent can poison a store for good with one seal.
-    @unittest.expectedFailure
+    # FIXED IN LOT 4 ROUND 4 (was CONFIRMED DEFECT C-5, high, permanent denial of service): one sealed plan
+    # whose holdout is mostly flat made every later, unrelated plan UNDETERMINED (no comparable window on the
+    # old side), and UNDETERMINED blocks scoring and promotion. UNDETERMINED now depends on the new holdout
+    # only; an uninformative old holdout is recorded as old_holdout_uninformative and compared on its moves.
     def test_one_flat_sealed_holdout_does_not_block_unrelated_plans(self):
         self.seal_direct(self.sparse(1), "FLAT", 2030, "a" * 64)
         rng = random.Random(9)
         normal = self.seal_direct([rng.gauss(0.0, 1e-4) for _ in range(40)], "LIVELY", 2031, "b" * 64)
         self.assertEqual(self.store.reuse_check(normal)["verdict"], "CLEAR")
 
-    # CONFIRMED DEFECT C-6 (medium, false positive moved, not removed): independent sparse holdouts are no
-    # longer refused at seal (B-6 test passes) but are sealed UNDETERMINED, so they can never be scored.
-    @unittest.expectedFailure
+    # FIXED IN LOT 4 ROUND 4 (was CONFIRMED DEFECT C-6, medium, false positive moved, not removed): independent
+    # sparse holdouts were no longer refused at seal (B-6 test passes) but were sealed UNDETERMINED, so they
+    # could never be scored. Sparse paths are now compared on their moves and positions (match share over the
+    # whole overlap, judged against the chance match rate).
     def test_independent_sparse_holdouts_can_be_scored(self):
         self.seal_direct(self.sparse(2), "OLD", 2030, "a" * 64)
         new = self.seal_direct(self.sparse(1002), "NEW", 2130, "b" * 64)

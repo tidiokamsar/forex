@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, fields
 
-RESEARCH_POLICY_VERSION = "astra-research-policy-0.1.0-provisional"
+RESEARCH_POLICY_VERSION = "astra-research-policy-0.2.0-provisional"
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,10 +30,23 @@ class HoldoutReusePolicy:
     min_informative_share: float = 0.6  # share of real moves a window needs to be compared
     informative_threshold: float = 0.25  # |standardized return| counted as a real move
     clip: float = 3.0  # robust z-scores are clipped so one aligned outlier cannot create a match
-    # Second statistic, independent of correlation: share of aligned non-flat returns that are equal
-    # within match_tolerance times the median absolute return (catches near-constant paths).
+    # Second statistic, independent of correlation: share of aligned informative returns that are equal
+    # within match_tolerance times the new holdout's return scale. When a path of the pair drifts (half
+    # its returns at the median), each path's median is removed first (a shared drift is not a match);
+    # a return is informative when it is further than the tolerance from that centre.
     match_tolerance: float = 0.05
     conflict_match_share: float = 0.8
+    # The match share must also be improbable by chance: binomial tail of the matches given the chance
+    # match rate measured over every alignment of the pair (quantization grids, discrete moves),
+    # Bonferroni-corrected by the number of spans of the same kind tested (per transform and sign).
+    conflict_match_chance_probability: float = 1e-4  # the plan is refused
+    suspect_match_chance_probability: float = 1e-2  # whole-overlap spans only: sealed, not scoreable
+    # Fewest informative returns a NEW holdout needs to be compared at all (else UNDETERMINED), and
+    # fewest matched informative returns a span needs to be a match.
+    min_informative_points: int = 3
+    # Returns smaller than this fraction of the largest absolute return do not set the return scale
+    # (a nudged zero is not a move).
+    scale_floor_fraction: float = 0.01
 
     def __post_init__(self) -> None:
         if not 0.0 < self.suspect_abs_correlation <= self.conflict_abs_correlation < 1.0:
@@ -46,6 +59,12 @@ class HoldoutReusePolicy:
             raise ValueError("invalid informative share, threshold or clip")
         if not 0.0 < self.match_tolerance < 1.0 or not 0.5 <= self.conflict_match_share <= 1.0:
             raise ValueError("invalid match tolerance or share")
+        if not 0.0 < self.conflict_match_chance_probability <= self.suspect_match_chance_probability < 1.0:
+            raise ValueError("require 0 < conflict_match_chance_probability <= suspect_match_chance_probability < 1")
+        if self.min_informative_points < 2:
+            raise ValueError("min_informative_points must be at least 2")
+        if not 0.0 <= self.scale_floor_fraction < 1.0:
+            raise ValueError("invalid scale floor fraction")
 
     def payload(self) -> dict:
         return {"version": RESEARCH_POLICY_VERSION, **asdict(self)}
@@ -98,6 +117,10 @@ _STRICTER_WHEN = {
     "clip": "any",
     "match_tolerance": "higher",
     "conflict_match_share": "lower",
+    "conflict_match_chance_probability": "higher",
+    "suspect_match_chance_probability": "higher",
+    "min_informative_points": "any",
+    "scale_floor_fraction": "any",
 }
 
 
