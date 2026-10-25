@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 from collections.abc import Sequence
 from dataclasses import asdict
@@ -17,6 +18,7 @@ from .data import load_bars_csv
 from .engine import run_paper_replay, strategy_decisions
 from .execution import ExecutionStore, TradingControls
 from .governance import Actor, PermissionDenied, Role
+from .logs import configure_logging
 from .models import BacktestConfig
 from .registry import ModelRegistry, PromotionCriteria
 from .research import run_sma_backtest
@@ -135,6 +137,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    # Logs go to stderr (and optionally a rotating file); stdout stays JSON output.
+    configure_logging(
+        level=os.environ.get("ASTRA_LOG_LEVEL", "WARNING"),
+        log_dir=os.environ.get("ASTRA_LOG_DIR") or None,
+        stream=sys.stderr,
+    )
     try:
         config = AppConfig.from_env()
         if args.command == "status":

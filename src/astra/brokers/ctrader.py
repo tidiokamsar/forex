@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import contextlib
 import itertools
+import logging
 import threading
 import uuid
 from collections.abc import Callable
@@ -33,6 +34,7 @@ from typing import Any, Protocol
 
 from ..governance import SecretValue
 from ..instruments import InstrumentSpec
+from ..logs import get_logger, log_event
 from ..models import Direction, RunMode
 from .base import (
     AccountSnapshot,
@@ -53,6 +55,7 @@ from .base import (
     Quote,
 )
 
+_LOG = get_logger("brokers.ctrader")
 DEMO_HOST = "demo.ctraderapi.com"
 JSON_PORT = 5036
 DOCS_URL = "https://help.ctrader.com/open-api/"
@@ -305,6 +308,7 @@ class CTraderSession:
     def _fail(self, reason: str) -> None:
         if not self.alive:
             return
+        log_event(_LOG, "ctrader.session_failed", level=logging.WARNING, reason=reason)
         self.failure = reason
         self.alive = False
         self._stop.set()
@@ -429,9 +433,17 @@ class CTraderAdapter(BrokerAdapter):
                 {"ctidTraderAccountId": account_id, "symbolId": sorted(wanted.values()), "subscribeToSpotTimestamp": True},
                 {PayloadType.SUBSCRIBE_SPOTS_RES},
             )
-        except BaseException:
+        except BaseException as exc:
+            log_event(_LOG, "ctrader.connect_failed", level=logging.WARNING, error=type(exc).__name__, detail=str(exc))
             self.disconnect()
             raise
+        log_event(
+            _LOG,
+            "ctrader.connected",
+            account_ref=f"CTRADER-****{str(account_id)[-4:]}",
+            is_live=self._is_live,
+            symbols=sorted(self._symbols),
+        )
 
     def disconnect(self) -> None:
         if self._session is not None:

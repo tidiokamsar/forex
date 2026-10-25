@@ -10,6 +10,7 @@ call so a crash or timeout leaves a record that must be reconciled.
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -26,8 +27,9 @@ from ..brokers.base import (
     CapabilityNotSupported,
     ConnectionState,
 )
-from ..governance import Action, Actor, PermissionGuard
+from ..governance import Action, Actor, PermissionDenied, PermissionGuard
 from ..instruments import DEFAULT_SPECS, InstrumentSpec, required_margin
+from ..logs import correlation, get_logger, log_event
 from ..models import Direction, OrderIntent, RiskContext, RunMode
 from ..permits import _AUTHORITY as _PERMITS
 from ..permits import ExecutionRefused
@@ -36,6 +38,7 @@ from .controls import RECONCILIATION_OWNED, FreezeReason, TradingControls
 from .mode import verify_mode
 from .orders import TERMINAL_STATES, ExecutionStore, OrderRecord, OrderState
 
+_LOG = get_logger("execution.gateway")
 COMMAND_SCHEMA_VERSION = "astra.execution_command.v1"
 _EVENT_CURSOR = "broker_event_cursor"
 _DAILY_LOSS_DAY = "daily_loss_limit_day"
@@ -139,6 +142,27 @@ class OrderGateway:
     # -- submission -----------------------------------------------------------
 
     def submit(self, command: ExecutionCommand, actor: Actor) -> GatewayResult:
+        correlation_id = getattr(command, "correlation_id", None)
+        with correlation(correlation_id if isinstance(correlation_id, str) else None):
+            try:
+                result = self._submit(command, actor)
+            except PermissionDenied:
+                log_event(_LOG, "order.permission_denied", level=logging.WARNING, role=str(getattr(actor, "role", "")))
+                raise
+            log_event(
+                _LOG,
+                "order.result",
+                level=logging.INFO if result.sent else logging.WARNING,
+                intent_id=result.intent_id,
+                state=result.state.value if result.state else None,
+                reasons=list(result.reason_codes),
+                units=result.approved_units,
+                duplicate=result.duplicate,
+                account_ref=self._account_ref,
+            )
+            return result
+
+    def _submit(self, command: ExecutionCommand, actor: Actor) -> GatewayResult:
         self._guard.require(actor, Action.SUBMIT_ORDER_COMMAND, target=getattr(command, "intent_id", ""))
         schema_errors = _validate_command(command)
         if schema_errors:
@@ -494,6 +518,7 @@ class OrderGateway:
     # -- connection and reconciliation ----------------------------------------
 
     def on_connection_lost(self, context: str = "") -> None:
+        log_event(_LOG, "execution.connection_lost", level=logging.WARNING, context=context, account_ref=self._account_ref)
         self._controls.freeze(FreezeReason.CONNECTION_LOST, context=context)
         self._controls.freeze(FreezeReason.RECONCILIATION_REQUIRED, context=context)
 
@@ -504,6 +529,20 @@ class OrderGateway:
         return state
 
     def reconcile(self) -> ReconciliationResult:
+        result = self._reconcile()
+        log_event(
+            _LOG,
+            "execution.reconciliation",
+            level=logging.INFO if result.status == "CONSISTENT" else logging.WARNING,
+            status=result.status,
+            divergences=list(result.divergences),
+            resolved=list(result.resolved_orders),
+            freezes=list(result.freezes_after),
+            account_ref=self._account_ref,
+        )
+        return result
+
+    def _reconcile(self) -> ReconciliationResult:
         """Compare local records with the adapter before any new entry."""
 
         if self._broker.connection_state() is not ConnectionState.CONNECTED:

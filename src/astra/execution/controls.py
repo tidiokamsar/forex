@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from enum import StrEnum
 
 from ..governance import Action, Actor, PermissionDenied, PermissionGuard
+from ..logs import get_logger, log_event
 from .orders import ExecutionStore
+
+_LOG = get_logger("execution.controls")
 
 
 class FreezeReason(StrEnum):
@@ -56,6 +60,7 @@ class TradingControls:
     def activate_kill_switch(self, actor: Actor | str, reason: str) -> None:
         # Anyone, including automated monitors, may stop trading.
         actor_id = actor.actor_id if isinstance(actor, Actor) else str(actor)
+        log_event(_LOG, "control.kill_switch_activated", level=logging.CRITICAL, actor=actor_id, reason=reason)
         self._store.set_control(
             _KILL_SWITCH,
             {"active": True, "reason": reason},
@@ -109,6 +114,7 @@ class TradingControls:
             audit_type="control.entries_frozen",
             details={"reason": code, "context": context, "scope": self.scope or "*"},
         )
+        log_event(_LOG, "control.entries_frozen", level=logging.WARNING, reason=code, context=context, scope=self.scope or "*")
 
     def clear_freeze(self, reason: FreezeReason | str, actor: Actor | str, *, by_reconciliation: bool = False) -> None:
         code = str(reason)
