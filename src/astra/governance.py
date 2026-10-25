@@ -38,6 +38,7 @@ class Action(StrEnum):
     CHANGE_MODE = "change_mode"
     RELEASE_KILL_SWITCH = "release_kill_switch"
     CLEAR_FREEZE = "clear_freeze"
+    RESOLVE_ORDER = "resolve_order"
     PROMOTE_MODEL = "promote_model"
     ROLLBACK_MODEL = "rollback_model"
     REGISTER_CANDIDATE = "register_candidate"
@@ -54,6 +55,7 @@ _POLICY: dict[Action, frozenset[Role]] = {
     Action.CHANGE_MODE: frozenset({Role.HUMAN_ADMIN}),
     Action.RELEASE_KILL_SWITCH: frozenset({Role.HUMAN_ADMIN, Role.HUMAN_OPERATOR}),
     Action.CLEAR_FREEZE: frozenset({Role.HUMAN_ADMIN, Role.HUMAN_OPERATOR}),
+    Action.RESOLVE_ORDER: frozenset({Role.HUMAN_ADMIN, Role.HUMAN_OPERATOR}),
     Action.PROMOTE_MODEL: frozenset({Role.HUMAN_ADMIN, Role.HUMAN_REVIEWER}),
     Action.ROLLBACK_MODEL: frozenset({Role.HUMAN_ADMIN, Role.HUMAN_OPERATOR, Role.SYSTEM}),
     Action.REGISTER_CANDIDATE: frozenset(

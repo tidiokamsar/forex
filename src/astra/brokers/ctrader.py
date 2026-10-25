@@ -43,6 +43,7 @@ from .base import (
     BrokerOrderRequest,
     BrokerOrderStatus,
     BrokerPosition,
+    BrokerRequestError,
     BrokerTimeout,
     BrokerUnavailable,
     Capabilities,
@@ -137,11 +138,43 @@ class JsonTransport(Protocol):
     def close(self) -> None: ...
 
 
-class CTraderError(BrokerUnavailable):
+class CTraderError(BrokerRequestError):
+    """Provider error response to one request (ProtoOAErrorRes / ProtoErrorRes)."""
+
+
+class CTraderConnectionError(BrokerUnavailable):
+    """Provider error that means the session or authorization is no longer usable."""
+
     def __init__(self, error_code: str, description: str = "") -> None:
         super().__init__(f"{error_code}: {description}".strip(": "))
         self.error_code = error_code
-        self.description = description
+
+
+# Error codes (ProtoOAErrorCode / ProtoErrorCode, docs read 2026-10-25) that
+# mean the session, token or account authorization is unusable.
+CONNECTION_ERROR_CODES = frozenset(
+    {
+        "OA_AUTH_TOKEN_EXPIRED",
+        "ACCOUNT_NOT_AUTHORIZED",
+        "CONNECTIONS_LIMIT_EXCEEDED",
+        "CH_CLIENT_AUTH_FAILURE",
+        "CH_CLIENT_NOT_AUTHENTICATED",
+        "CH_ACCESS_TOKEN_INVALID",
+        "CH_SERVER_NOT_REACHABLE",
+        "SERVER_IS_UNDER_MAINTENANCE",
+        "RET_ACCOUNT_DISABLED",
+    }
+)
+RATE_LIMIT_CODES = frozenset({"BLOCKED_PAYLOAD_TYPE", "REQUEST_FREQUENCY_EXCEEDED"})
+
+
+def provider_error(body: dict[str, Any]) -> Exception:
+    code = str(body.get("errorCode", "UNKNOWN"))
+    description = str(body.get("description", ""))
+    if code in CONNECTION_ERROR_CODES:
+        return CTraderConnectionError(code, description)
+    retry_after = body.get("retryAfter") if code in RATE_LIMIT_CODES else None
+    return CTraderError(code, description, float(retry_after) if retry_after is not None else None)
 
 
 class LiveAccountRefused(BrokerUnavailable):
@@ -227,8 +260,10 @@ class CTraderSession:
             if message is None:
                 raise BrokerUnavailable(self.failure or "cTrader session closed")
             if message.get("payloadType") in _ERROR_TYPES:
-                body = message.get("payload") or {}
-                raise CTraderError(str(body.get("errorCode", "UNKNOWN")), str(body.get("description", "")))
+                error = provider_error(message.get("payload") or {})
+                if isinstance(error, CTraderConnectionError):
+                    self._fail(f"provider error {error.error_code}")
+                raise error
             return message
         finally:
             with self._lock:

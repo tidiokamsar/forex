@@ -58,6 +58,16 @@ class BrokerUnavailable(Exception):
     """The adapter cannot reach the provider."""
 
 
+class BrokerRequestError(Exception):
+    """The provider refused one request; the connection itself is still healthy."""
+
+    def __init__(self, error_code: str, description: str = "", retry_after_seconds: float | None = None) -> None:
+        super().__init__(f"{error_code}: {description}".strip(": "))
+        self.error_code = error_code
+        self.description = description
+        self.retry_after_seconds = retry_after_seconds
+
+
 class CapabilityNotSupported(Exception):
     """The adapter does not support the requested operation."""
 

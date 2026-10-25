@@ -10,7 +10,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .config import AppConfig
-from .execution import ExecutionStore
+from .execution import ExecutionStore, TradingControls
 from .registry import ModelRegistry
 from .storage import BacktestStore
 
@@ -39,13 +39,15 @@ def make_handler(
         if route == "/api/orders":
             return {"mode": "SIMULATION", "orders": [order.to_dict() for order in execution.list_orders(limit=100)]}
         if route == "/api/controls":
-            freezes = list(execution.get_control("entry_freezes", []))
+            by_scope = TradingControls(execution).all_freezes()
+            freezes = sorted({code for codes in by_scope.values() for code in codes})
             kill = execution.get_control("kill_switch", {"active": False})
             return {
                 "mode": "SIMULATION",
                 "live_locked": True,
                 "kill_switch": kill,
                 "entry_freezes": freezes,
+                "entry_freezes_by_account": by_scope,
                 "entries_allowed": not freezes and not kill.get("active", False),
             }
         if route == "/api/reconciliations":

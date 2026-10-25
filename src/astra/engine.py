@@ -150,7 +150,9 @@ def run_paper_replay(
         return clock_state["now"]
 
     broker = SimulatedBroker(initial_balance=initial_balance, account_ref=account_ref, clock=clock)
-    gateway = OrderGateway(store=store, broker=broker, clock=clock, configured_mode=RunMode.SIMULATION)
+    gateway = OrderGateway(
+        store=store, broker=broker, clock=clock, configured_mode=RunMode.SIMULATION, account_ref=account_ref
+    )
     half_spread = spread_pips * pip_size / 2
 
     def quote(price: float, at: datetime) -> None:

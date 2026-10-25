@@ -356,6 +356,17 @@ class ExecutionStore:
             ).fetchone()
         return json.loads(row["value_json"]) if row else default
 
+    def controls_with_prefix(self, prefix: str) -> list[tuple[str, Any]]:
+        """The control ``prefix`` itself plus every ``prefix:<scope>`` key."""
+
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT control_key, value_json FROM trading_controls WHERE control_key = ? "
+                "OR substr(control_key, 1, ?) = ? ORDER BY control_key",
+                (prefix, len(prefix) + 1, prefix + ":"),
+            ).fetchall()
+        return [(row["control_key"], json.loads(row["value_json"])) for row in rows]
+
     def set_control(self, key: str, value: Any, *, actor: str, audit_type: str, details: dict[str, Any]) -> None:
         now = _now()
         with self._connect() as db:

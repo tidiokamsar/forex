@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-from .brokers.base import BrokerTimeout, BrokerUnavailable
+from .brokers.base import BrokerRequestError, BrokerTimeout, BrokerUnavailable
 from .config import AppConfig, ModeUnavailableError
 from .data import load_bars_csv
 from .engine import run_paper_replay, strategy_decisions
@@ -72,7 +72,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Vérification en lecture seule d'un compte démo cTrader (aucun ordre envoyé)",
     )
     check.add_argument("--operator", required=True, help="Identifiant de l'opérateur humain")
-    commands.add_parser("orders", help="Lister les ordres simulés enregistrés")
+    orders = commands.add_parser("orders", help="Lister les ordres, ou résoudre un ordre à l'état inconnu")
+    orders.add_argument("--resolve", metavar="INTENT_ID", help="Résoudre un ordre UNKNOWN (opérateur humain)")
+    orders.add_argument("--outcome", choices=("FILLED", "NOT_EXECUTED"))
+    orders.add_argument("--evidence", help="Référence chez le fournisseur (deal, ordre, relevé)")
+    orders.add_argument("--filled-units", type=float)
+    orders.add_argument("--price", type=float, help="Prix moyen d'exécution si FILLED")
+    orders.add_argument("--operator", help="Identifiant de l'opérateur humain")
     commands.add_parser("models", help="Lister le registre des modèles et expériences")
     controls = commands.add_parser("controls", help="Arrêt d'urgence et gels des entrées")
     control_actions = controls.add_subparsers(dest="control_action", required=True)
@@ -367,7 +373,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ModeUnavailableError as exc:
         _write_json({"status": "rejected", "reason": str(exc), "live_locked": True}, sys.stderr)
         return 2
-    except (BrokerUnavailable, BrokerTimeout) as exc:
+    except (BrokerUnavailable, BrokerTimeout, BrokerRequestError) as exc:
         _write_json({"status": "connector_error", "reason": str(exc), "external_orders": False}, sys.stderr)
         return 4
     except (OSError, ValueError) as exc:
@@ -529,6 +535,32 @@ def _ml_baseline(args: argparse.Namespace, config: AppConfig, dataset) -> dict:
 def _operations_command(args: argparse.Namespace, config: AppConfig) -> int:
     execution_store = ExecutionStore(config.database_path)
     execution_store.initialize()
+    if args.command == "orders" and args.resolve:
+        from .execution.resolution import resolve_unknown_order
+        from .governance import PermissionGuard
+
+        if not (args.outcome and args.evidence and args.operator):
+            raise ValueError("--resolve requires --outcome, --evidence and --operator")
+        # No adapter is attached to the CLI: the operator's evidence is
+        # recorded, and freezes stay until a connected reconciliation is consistent.
+        record = resolve_unknown_order(
+            store=execution_store,
+            guard=PermissionGuard(execution_store),
+            actor=Actor(f"cli:{args.operator}", Role.HUMAN_OPERATOR),
+            intent_id=args.resolve,
+            outcome=args.outcome,
+            evidence=args.evidence,
+            filled_units=args.filled_units,
+            average_fill_price=args.price,
+            broker_lookup="not_performed_cli_has_no_adapter",
+        )
+        _write_json(
+            {
+                "resolved": record.to_dict(),
+                "note": "Entry freezes remain until a reconciliation against the broker is consistent.",
+            }
+        )
+        return 0
     if args.command == "orders":
         _write_json({"mode": "SIMULATION", "orders": [o.to_dict() for o in execution_store.list_orders(limit=100)]})
         return 0
@@ -548,6 +580,7 @@ def _operations_command(args: argparse.Namespace, config: AppConfig) -> int:
         {
             "kill_switch_active": controls.kill_switch_active(),
             "entry_freezes": list(controls.freezes()),
+            "entry_freezes_by_account": controls.all_freezes(),
             "reconciliations": execution_store.reconciliations(limit=5),
         }
     )

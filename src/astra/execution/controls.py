@@ -36,14 +36,18 @@ _FREEZES = "entry_freezes"
 class TradingControls:
     """Kill switch and entry freezes.
 
-    The kill switch blocks every new order, including exits, and can only be
-    released by an authorized human. Entry freezes block new entries but leave
-    risk-reducing exits possible.
+    The kill switch is global: it blocks every new order on every account,
+    including automated exits, and only an authorized human can release it.
+    Entry freezes block new entries but leave risk-reducing exits possible.
+    With ``scope`` (an account reference) freezes are raised and cleared for
+    that account only; reads return global freezes plus the scope's own.
     """
 
-    def __init__(self, store: ExecutionStore, guard: PermissionGuard | None = None) -> None:
+    def __init__(self, store: ExecutionStore, guard: PermissionGuard | None = None, scope: str | None = None) -> None:
         self._store = store
         self._guard = guard or PermissionGuard(store)
+        self.scope = scope
+        self._key = _FREEZES if scope is None else f"{_FREEZES}:{scope}"
 
     def kill_switch_active(self) -> bool:
         state = self._store.get_control(_KILL_SWITCH, {"active": False})
@@ -73,20 +77,37 @@ class TradingControls:
         )
 
     def freezes(self) -> tuple[str, ...]:
-        return tuple(sorted(self._store.get_control(_FREEZES, [])))
+        """Global freezes plus this scope's own."""
+
+        codes = set(self._store.get_control(_FREEZES, []))
+        if self.scope is not None:
+            codes |= set(self._store.get_control(self._key, []))
+        return tuple(sorted(codes))
+
+    def own_freezes(self) -> tuple[str, ...]:
+        return tuple(sorted(self._store.get_control(self._key, [])))
+
+    def all_freezes(self) -> dict[str, list[str]]:
+        """Active freezes per scope; the key "*" holds global freezes."""
+
+        result = {}
+        for key, value in self._store.controls_with_prefix(_FREEZES):
+            if value:
+                result["*" if key == _FREEZES else key.split(":", 1)[1]] = sorted(value)
+        return result
 
     def freeze(self, reason: FreezeReason | str, actor: str = "system", context: str = "") -> None:
-        current = set(self.freezes())
+        current = set(self.own_freezes())
         code = str(reason)
         if code in current:
             return
         current.add(code)
         self._store.set_control(
-            _FREEZES,
+            self._key,
             sorted(current),
             actor=actor,
             audit_type="control.entries_frozen",
-            details={"reason": code, "context": context},
+            details={"reason": code, "context": context, "scope": self.scope or "*"},
         )
 
     def clear_freeze(self, reason: FreezeReason | str, actor: Actor | str, *, by_reconciliation: bool = False) -> None:
@@ -96,16 +117,16 @@ class TradingControls:
         if isinstance(actor, Actor) and not by_reconciliation:
             self._guard.require(actor, Action.CLEAR_FREEZE, target=code)
         actor_id = actor.actor_id if isinstance(actor, Actor) else str(actor)
-        current = set(self.freezes())
+        current = set(self.own_freezes())
         if code not in current:
             return
         current.discard(code)
         self._store.set_control(
-            _FREEZES,
+            self._key,
             sorted(current),
             actor=actor_id,
             audit_type="control.freeze_cleared",
-            details={"reason": code},
+            details={"reason": code, "scope": self.scope or "*"},
         )
 
     def entry_blockers(self) -> tuple[str, ...]:

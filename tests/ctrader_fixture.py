@@ -22,6 +22,7 @@ class FakeCTraderServer:
         self.positions = []
         self.next_order_id = 900
         self.outbox = None
+        self.fail_with = {}
 
     def handle(self, message):
         self.received.append(message)
@@ -30,6 +31,9 @@ class FakeCTraderServer:
         body = message.get("payload", {})
         reply = lambda payload_type, payload: self.push({"clientMsgId": mid, "payloadType": int(payload_type), "payload": payload})
         if kind == P.HEARTBEAT_EVENT:
+            return
+        if kind in self.fail_with:
+            reply(P.OA_ERROR_RES, {"errorCode": self.fail_with[kind], "description": "scripted error"})
             return
         if kind == P.APPLICATION_AUTH_REQ:
             reply(P.APPLICATION_AUTH_RES, {})

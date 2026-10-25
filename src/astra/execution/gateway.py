@@ -20,6 +20,7 @@ from ..brokers.base import (
     BrokerOrderReport,
     BrokerOrderRequest,
     BrokerOrderStatus,
+    BrokerRequestError,
     BrokerTimeout,
     BrokerUnavailable,
     CapabilityNotSupported,
@@ -116,11 +117,15 @@ class OrderGateway:
         clock: Callable[[], datetime] = _utc_now,
         max_clock_skew_seconds: float = 5.0,
         position_tolerance_units: float = 1e-6,
+        account_ref: str | None = None,
     ) -> None:
         self._store = store
         self._broker = broker
         self._guard = guard or PermissionGuard(store)
-        self._controls = controls or TradingControls(store, self._guard)
+        # Freezes are scoped to the account this gateway trades; without an
+        # account reference they are global and block every account.
+        self._account_ref = account_ref
+        self._controls = controls or TradingControls(store, self._guard, scope=account_ref)
         self._risk = risk_engine or RiskEngine()
         self._mode = configured_mode
         self._specs = dict(DEFAULT_SPECS if specs is None else specs)
@@ -210,6 +215,16 @@ class OrderGateway:
                 updates={"reason_codes": (f"execution_refused:{exc}",)},
             )
             return GatewayResult(final.intent_id, final.client_order_id, final.state, final.reason_codes)
+        except BrokerRequestError as exc:
+            # An error response to the order request is a provider rejection.
+            final = self._store.transition(
+                record.intent_id,
+                OrderState.BROKER_REJECTED,
+                reason="provider_error_response",
+                updates={"reason_codes": (f"broker_request_error:{exc.error_code}",)},
+                details={"message": str(exc)},
+            )
+            return GatewayResult(final.intent_id, final.client_order_id, final.state, final.reason_codes)
         except BrokerTimeout:
             self._controls.freeze(FreezeReason.UNKNOWN_ORDER_STATE, context=record.intent_id)
             final = self._store.transition(
@@ -288,6 +303,10 @@ class OrderGateway:
             account = self._broker.account_snapshot()
             quote = self._broker.quote(command.instrument.upper())
             positions = self._broker.open_positions()
+        except BrokerRequestError as exc:
+            # The provider refused a read; the link is fine, so no connection freeze.
+            reasons.append(f"broker_request_error:{exc.error_code}")
+            return tuple(dict.fromkeys(reasons)), 0.0
         except BrokerUnavailable:
             self.on_connection_lost(context=command.intent_id)
             reasons.append("broker_unavailable")
@@ -376,7 +395,7 @@ class OrderGateway:
             reasons.extend(decision.reason_codes)
             if "daily_loss_limit_reached" in decision.reason_codes:
                 self._store.set_control(
-                    _DAILY_LOSS_DAY,
+                    self._daily_loss_key(),
                     now.date().isoformat(),
                     actor="system",
                     audit_type="alert.risk_daily_loss_limit",
@@ -446,6 +465,9 @@ class OrderGateway:
         cursor = int(self._store.get_control(_EVENT_CURSOR, 0))
         try:
             events = self._broker.poll_events(cursor)
+        except BrokerRequestError as exc:
+            self._store.audit("execution.poll_events_refused", {"error_code": exc.error_code})
+            return 0
         except BrokerUnavailable:
             self.on_connection_lost(context="poll_events")
             return 0
@@ -517,6 +539,13 @@ class OrderGateway:
                 if updated.state is not record.state:
                     resolved.append(record.intent_id)
             positions = self._broker.open_positions()
+        except BrokerRequestError as exc:
+            # Incomplete picture: keep entries frozen but do not declare the link lost.
+            rid = self._store.record_reconciliation("FAILED", {"reason": "provider_request_error", "error_code": exc.error_code})
+            self._controls.freeze(FreezeReason.RECONCILIATION_REQUIRED, context=f"reconcile:{exc.error_code}")
+            return ReconciliationResult(
+                "FAILED", (f"provider_request_error:{exc.error_code}",), tuple(resolved), rid, self._controls.freezes()
+            )
         except BrokerUnavailable:
             rid = self._store.record_reconciliation("FAILED", {"reason": "adapter_unavailable"})
             self.on_connection_lost(context="reconcile")
@@ -551,12 +580,54 @@ class OrderGateway:
             self._controls.clear_freeze(reason, "reconciliation", by_reconciliation=True)
         return ReconciliationResult("CONSISTENT", (), tuple(resolved), rid, self._controls.freezes())
 
+    def resolve_unknown(
+        self,
+        intent_id: str,
+        actor: Actor,
+        *,
+        outcome: str,
+        evidence: str,
+        filled_units: float | None = None,
+        average_fill_price: float | None = None,
+    ) -> OrderRecord:
+        """Operator resolution after checking the adapter once more.
+
+        Freezes are not lifted here; call ``reconcile`` afterwards.
+        """
+
+        from .resolution import resolve_unknown_order
+
+        record = self._store.get_order(intent_id)
+        report = None
+        lookup = "not_performed"
+        if record is not None:
+            try:
+                report = self._broker.lookup_order(record.client_order_id)
+                lookup = "found" if report is not None else "not_found"
+            except BrokerUnavailable:
+                lookup = "adapter_unavailable"
+        return resolve_unknown_order(
+            store=self._store,
+            guard=self._guard,
+            actor=actor,
+            intent_id=intent_id,
+            outcome=outcome,
+            evidence=evidence,
+            filled_units=filled_units,
+            average_fill_price=average_fill_price,
+            broker_report=report,
+            broker_lookup=lookup,
+        )
+
+    def _daily_loss_key(self) -> str:
+        return _DAILY_LOSS_DAY if self._account_ref is None else f"{_DAILY_LOSS_DAY}:{self._account_ref}"
+
     def _expire_daily_loss_freeze(self, now: datetime) -> None:
         """The daily-loss freeze lasts for the UTC day in which it was hit."""
 
         if FreezeReason.DAILY_LOSS_LIMIT.value not in self._controls.freezes():
             return
-        frozen_day = self._store.get_control(_DAILY_LOSS_DAY)
+        frozen_day = self._store.get_control(self._daily_loss_key())
         if frozen_day is not None and frozen_day < now.date().isoformat():
             self._controls.clear_freeze(FreezeReason.DAILY_LOSS_LIMIT, "system:new_trading_day")
 
