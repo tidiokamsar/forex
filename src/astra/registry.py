@@ -13,7 +13,7 @@ import json
 import math
 import sqlite3
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -67,6 +67,9 @@ class PromotionCriteria:
             raise ValueError("require_overfitting_check must be a bool")
 
 
+PROVENANCE_KEY = "_provenance"
+EVIDENCE_TOLERANCE = 1e-9
+
 EVIDENCE_FIELDS = (
     "trade_count",
     "net_pnl",
@@ -94,9 +97,17 @@ def _sha256(value: Any) -> str:
 
 
 class ModelRegistry:
-    def __init__(self, database_path: str | Path, guard: PermissionGuard | None = None) -> None:
+    def __init__(
+        self,
+        database_path: str | Path,
+        guard: PermissionGuard | None = None,
+        evidence_verifier: Callable[[sqlite3.Connection, sqlite3.Row, dict[str, Any]], tuple[str, ...]] | None = None,
+    ) -> None:
         self.path = Path(database_path)
         self._guard = guard or PermissionGuard(self)
+        # Holdout evidence is never trusted as numbers: by default it must match
+        # a completed, sealed holdout report stored in the same database.
+        self._verify_evidence = evidence_verifier or verify_holdout_provenance
 
     def initialize(self) -> None:
         BacktestStore(self.path).initialize()
@@ -245,12 +256,26 @@ class ModelRegistry:
             self._status_event(db, model_id, version, None, ModelStatus.CANDIDATE, actor.actor_id, "registered")
         return manifest_sha
 
-    def record_evaluation(self, *, model_id: str, version: str, kind: str, evidence: dict[str, Any]) -> str:
+    def record_evaluation(
+        self,
+        *,
+        actor: Actor,
+        model_id: str,
+        version: str,
+        kind: str,
+        evidence: dict[str, Any],
+        holdout_evaluation_id: str | None = None,
+    ) -> str:
+        self._guard.require(actor, Action.REGISTER_CANDIDATE, target=f"{model_id}@{version}:{kind}")
         if kind not in {"validation", "holdout", "shadow"}:
             raise ValueError("kind must be validation, holdout or shadow")
         unknown = set(evidence) - set(EVIDENCE_FIELDS)
         if unknown:
             raise ValueError(f"unknown evidence fields: {sorted(unknown)}")
+        if kind == "holdout":
+            if not isinstance(holdout_evaluation_id, str) or not holdout_evaluation_id:
+                raise PromotionError("holdout evidence must reference the stored holdout evaluation it comes from")
+            evidence = {**evidence, PROVENANCE_KEY: {"holdout_evaluation_id": holdout_evaluation_id}}
         evaluation_id = str(uuid.uuid4())
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -292,6 +317,9 @@ class ModelRegistry:
         evidence = by_kind.get(decisive_kind)
         if evidence is None:
             return (f"missing_{decisive_kind}_evaluation",)
+        if decisive_kind == "holdout":
+            with self._connect() as db:
+                failures.extend(self._verify_evidence(db, row, evidence))
         if criteria.require_shadow and "shadow" not in by_kind:
             failures.append("missing_shadow_evaluation")
         if row["status"] not in (ModelStatus.CANDIDATE, ModelStatus.SHADOW):
@@ -498,6 +526,60 @@ class ModelRegistry:
             raise
         finally:
             db.close()
+
+
+def verify_holdout_provenance(db: sqlite3.Connection, version_row: sqlite3.Row, evidence: dict[str, Any]) -> tuple[str, ...]:
+    """Check that holdout evidence comes from a sealed, completed holdout of this very candidate.
+
+    The evidence must reference a COMPLETED holdout evaluation whose protocol is
+    the plan in the version's manifest, whose selected candidate is the
+    manifest's candidate, which started after the version (and therefore its
+    criteria) was registered, and whose recomputed evidence equals the recorded
+    numbers. Anyone able to rewrite the SQLite file could still forge both; this
+    stops fabricated or reused evidence through the API.
+    """
+
+    provenance = evidence.get(PROVENANCE_KEY) or {}
+    evaluation_id = provenance.get("holdout_evaluation_id")
+    if not evaluation_id:
+        return ("evidence_provenance_missing",)
+    manifest = json.loads(version_row["manifest_json"])
+    try:
+        holdout = db.execute(
+            "SELECT protocol_id, started_at, status, report_json FROM holdout_evaluations WHERE evaluation_id = ?",
+            (evaluation_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        holdout = None
+    if holdout is None or holdout["status"] != "COMPLETED" or not holdout["report_json"]:
+        return ("holdout_evaluation_not_found_or_incomplete",)
+    failures = []
+    if holdout["protocol_id"] != manifest.get("plan_sha256"):
+        failures.append("holdout_from_another_plan")
+    report = json.loads(holdout["report_json"])
+    if report.get("selected_candidate_id") != manifest.get("candidate_id"):
+        failures.append("holdout_selected_another_candidate")
+    if holdout["started_at"] <= version_row["created_at"]:
+        failures.append("criteria_registered_after_holdout_was_scored")
+    from .strategy_validation import holdout_evidence
+
+    expected = holdout_evidence(report)
+    for key in EVIDENCE_FIELDS:
+        recorded, derived = evidence.get(key), expected.get(key)
+        if isinstance(recorded, (int, float)) and isinstance(derived, (int, float)) and not isinstance(recorded, bool):
+            if not math.isclose(float(recorded), float(derived), rel_tol=EVIDENCE_TOLERANCE, abs_tol=EVIDENCE_TOLERANCE):
+                failures.append("evidence_does_not_match_holdout_report")
+                break
+        elif recorded != derived:
+            failures.append("evidence_does_not_match_holdout_report")
+            break
+    return tuple(failures)
+
+
+def accept_unverified_evidence(_db, _row, _evidence) -> tuple[str, ...]:
+    """TEST ONLY: skip provenance checks to exercise the numeric gates in isolation."""
+
+    return ()
 
 
 def _version_dict(row: sqlite3.Row) -> dict[str, Any]:

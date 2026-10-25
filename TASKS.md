@@ -1,6 +1,6 @@
 # Tasks and acceptance status
 
-Statuses: **DONE** = implemented and verified by tests run in this checkout; **PARTIAL** = implemented with stated gaps; **BLOCKED** = needs a human decision or external access; **TODO** = not implemented.
+Statuses: **DONE** = implemented and verified by tests run in this checkout; **PARTIAL** = implemented with stated gaps; **BLOCKED** = needs a human decision or external access; **TODO** = not implemented; **IN REVIEW** = implemented and tested by the authors, independent QA pending.
 
 | ID | Scope | Status | Evidence / next step |
 |---|---|---|---|
@@ -16,14 +16,14 @@ Statuses: **DONE** = implemented and verified by tests run in this checkout; **P
 | ASTRA-014 | Regime estimates with confidence | PARTIAL | `test_regimes`; transition and event-calendar regimes not implemented |
 | ASTRA-015 | Strategy families with structured decisions and abstention | DONE | `test_strategies`, `test_signal_backtest`; none shown profitable |
 | ASTRA-016 | Baseline ML with purged walk-forward and calibration | DONE | `test_ml`, `ml-baseline` CLI test; no final holdout inside the ML run |
-| ASTRA-012 | Experiment registry, champion/candidate, promotion gates, rollback | DONE | `test_registry` (9) |
+| ASTRA-012 | Experiment registry, champion/candidate, promotion gates, rollback | DONE | `test_registry` (14) |
 | ASTRA-017 | Instrument specs, size rounding, margin | PARTIAL | `instruments.py`; specs are illustrative until a broker supplies them |
 | ASTRA-009a | Broker contract and simulated adapter | DONE | `brokers/`, `test_execution` |
 | ASTRA-009b | cTrader Open API demo adapter (JSON/WebSocket) | PARTIAL | Built and tested offline (`test_ctrader` 32, `test_websocket` 5); read-only `ctrader-check` ready. Waiting for the user to run it on a demo account |
 | ASTRA-009c | Enable DEMO order execution | BLOCKED | After a passing `ctrader-check`, confirm the assumptions in BROKERS.md, then a reviewed change to `EXECUTABLE_MODES` and RiskEngine mode support, plus a supervised one-minimum-size demo order test |
 | ASTRA-010 | Durable order state, idempotency, reconciliation, kill switch, freezes | DONE | `test_execution` (29) |
 | ASTRA-018 | Permission guard, secret access, two-person limit change, LLM validation | DONE | `test_governance` (8) |
-| ASTRA-019 | End-to-end paper replay through the gateway | DONE | `test_engine` (6), `test_cli_operations` (5) |
+| ASTRA-019 | End-to-end paper replay through the gateway | DONE | `test_engine` (6), `test_cli_operations` (6) |
 | ASTRA-011 | Authentication, remote deployment, backup/restore, supervision, alert delivery | PARTIAL | Backup/restore done locally with the simulator (F-04). Authentication, remote deployment, external supervision and alert delivery not implemented |
 | ASTRA-020 | Drift detection and automatic strategy disable | TODO | Needs live or replayed observation stream |
 | ASTRA-021 | Autonomous improvement loop (candidate generation in sandbox) | TODO | Registry and gates exist; generation loop not built |
@@ -56,3 +56,12 @@ DONE here means implemented and tested locally with the simulator, the scripted 
 | F-04 | Backup create/verify/restore with manifest, retention, human-only restore, reconciliation required after restore | DONE (local, simulator) | `backup.py`; `test_backup.BackupRestoreTests` (7). No restore drill against a real broker |
 
 No item is marked DONE from an agent report alone: the coordinator ran the integrated suite (see ACCEPTANCE_REPORT.md).
+
+## Lot 3 quantitative validation (branch `feat/validation-quant`)
+
+Synthetic data only. Not DONE until the independent QA review passes.
+
+| ID | Scope | Status | Evidence |
+|---|---|---|---|
+| P-02 | Generic sealed walk-forward across SMA, momentum and breakout: causal per-block signals, validation-only selection, flat and SMA reference baselines, 1.5x/2x holdout cost stress, one sealed plan per dataset per store, once-only holdout, `holdout_evidence`, CLI `evaluate-strategies` (never promotes). Mean reversion excluded | IN REVIEW | `strategy_validation.py`; `test_strategy_validation` (15), `test_cli_operations.test_evaluate_strategies_seals_plan_and_records_inactive_candidate` |
+| Q-01 | Overfitting gates: CSCV PBO and deflated Sharpe ratio (`overfitting.py`), PBO matrix and DSR inputs from the walk-forward, registry fields `pbo`, `deflated_sharpe_probability`, `variants_tested` and criteria `max_pbo`, `min_deflated_sharpe_probability`, `require_overfitting_check` | IN REVIEW | `test_overfitting` (18), `test_registry` (14, of which 5 added in lot 3), `test_strategy_validation.OverfittingModuleIntegrationTests`. On the bundled fixture DSR is `INCOMPLETE` in development and PBO uses a sparse matrix (RESEARCH_PROTOCOL.md) |

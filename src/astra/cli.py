@@ -688,7 +688,13 @@ def _evaluate_strategies(args: argparse.Namespace, config: AppConfig, dataset) -
         if args.register:
             if selected is None:
                 raise ValueError("no eligible candidate was selected on validation windows; nothing to register")
-            # Criteria are frozen at registration, before the holdout is scored.
+            prior = store.holdout_for_protocol(report.plan_sha256)
+            if prior is not None:
+                # Criteria must be frozen before the holdout is seen; a retry cannot register new versions.
+                raise ValueError(
+                    f"the holdout of this plan is already {prior['status']}; a version can only be registered "
+                    "before its holdout is scored"
+                )
             registry.register_candidate(
                 actor=author,
                 model_id=args.model_id,
@@ -720,8 +726,14 @@ def _evaluate_strategies(args: argparse.Namespace, config: AppConfig, dataset) -
             holdout_payload = holdout if isinstance(holdout, dict) else asdict(holdout)
             evidence = holdout_evidence(holdout)
             if registered is not None:
+                attempt = store.holdout_for_protocol(report.plan_sha256)
                 registry.record_evaluation(
-                    model_id=args.model_id, version=args.version, kind="holdout", evidence=evidence
+                    actor=author,
+                    model_id=args.model_id,
+                    version=args.version,
+                    kind="holdout",
+                    evidence=evidence,
+                    holdout_evaluation_id=attempt["evaluation_id"] if attempt else None,
                 )
     except Exception as exc:
         # Failed runs are kept as rejected experiments, never deleted.

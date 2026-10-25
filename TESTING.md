@@ -56,4 +56,18 @@ No-lookahead coverage: `test_features`, `test_regimes`, `test_strategies` and `t
 | F-03 cTrader reconnect, permanent errors, rate limit, token handling | `test_ctrader_resilience.ResilienceTests`, `test_ctrader_resilience.RateLimiterTests` |
 | F-04 backup, verify, restore, stale backup, human-only restore | `test_backup.BackupRestoreTests` |
 
+## Lot 3 quantitative validation evidence (in review)
+
+Independent QA pending. All inputs are synthetic or hand-built matrices.
+
+| Item | Tests |
+|---|---|
+| Q-01 PBO: hand-computed logits, floor bounds, ties, zero-dispersion windows, noise vs persistent edge, determinism, invalid inputs, combination cap | `test_overfitting.HandComputedPBOTest`, `StatisticalBehaviourPBOTest`, `PBOValidationTest` |
+| Q-01 deflated Sharpe: PSR at `n_trials = 1`, more trials lower probability, numeric check, expected maximum, invalid inputs, JSON output | `test_overfitting.DeflatedSharpeTest`, `SerializationTest` |
+| Q-01 registry overfitting gates, legacy opt-out only at registration | `test_registry.test_missing_overfitting_evidence_blocks_promotion`, `test_high_pbo_blocks_promotion`, `test_low_deflated_sharpe_probability_blocks_promotion`, `test_overfitting_gate_can_be_disabled_only_at_registration`, `test_good_evidence_meets_every_gate` |
+| P-02 trials per family, candidate id, fold layout, no lookahead, validation-only selection, holdout isolation, PBO matrix order and slice count, `UNAVAILABLE` without the statistics module | `test_strategy_validation.StrategyWalkForwardTests` |
+| P-02 sealed plan, once-only and failed holdout attempts, dataset mismatch, evidence fields feeding the gates | `test_strategy_validation.SealedHoldoutTests` |
+| P-02/Q-01 real statistics module on the development matrix | `test_strategy_validation.OverfittingModuleIntegrationTests` |
+| CLI `evaluate-strategies`: register requires holdout, inactive candidate, blockers, retry returns stored holdout, second plan refused | `test_cli_operations.test_evaluate_strategies_seals_plan_and_records_inactive_candidate` |
+
 Record the exact command, exit code, and observed summary in `ACCEPTANCE_REPORT.md`. A skipped, interrupted, or unavailable check is not a pass.

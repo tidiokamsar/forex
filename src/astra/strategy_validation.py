@@ -73,6 +73,10 @@ MAX_PBO_SLICES = 8
 # window is split into periods of this many bars and each candidate's trade
 # P&L is attributed to the period in which the trade exits.
 PBO_PERIOD_BARS = 5
+# Minimum information before the statistics are trusted (otherwise the gate stays unmet):
+# the deflated Sharpe needs a real sample, and the PBO matrix must not be mostly empty or repetitive.
+MIN_DSR_RETURNS = 30
+MIN_PBO_NONZERO_ROW_FRACTION = 0.5
 FLAT_BASELINE_NAME = "NO_POSITION@1"
 FAMILIES = ("sma", "momentum", "breakout")
 EXCLUDED_FAMILIES = {
@@ -366,7 +370,11 @@ def evaluate_strategy_walk_forward(
         "cost_model": _cost_payload(cost_model),
         "cost_stress": "signals use base costs; simulated costs scaled by each protocol multiplier",
         "overfitting": {
-            "pbo_matrix": "net P&L per chronological development slice (fold validation, fold test) and variant",
+            "pbo_matrix": (
+                "net trade P&L per PBO_PERIOD_BARS-bar period of each development window "
+                "(by trade exit time) and variant"
+            ),
+            "pbo_period_bars": PBO_PERIOD_BARS,
             "n_slices": n_slices,
             "max_slices": MAX_PBO_SLICES,
             "dsr_sample": DSR_SAMPLE,
@@ -790,21 +798,41 @@ def assess_overfitting(
             **common,
         )
     errors: list[str] = []
+    low_information: list[str] = []
     pbo = pbo_payload = dsr = dsr_payload = None
-    try:
-        result = probability_of_backtest_overfitting([list(row) for row in matrix], n_slices=n_slices)
-        pbo, pbo_payload = _finite_or_none(result.pbo), _json_safe(result.to_dict())
-    except (ValueError, ArithmeticError) as exc:
-        errors.append(f"pbo: {type(exc).__name__}: {exc}")
-    try:
-        result = deflated_sharpe_ratio(
-            list(returns), n_trials=variants_tested, trial_sharpe_variance=trial_sharpe_variance
+    nonzero_rows = sum(1 for row in matrix if any(value != 0.0 for value in row))
+    distinct_rows = len(set(matrix))
+    if nonzero_rows < MIN_PBO_NONZERO_ROW_FRACTION * len(matrix) or distinct_rows < n_slices:
+        # A mostly empty or repetitive matrix gives a PBO that looks precise but says nothing.
+        low_information.append(
+            f"pbo: {nonzero_rows}/{len(matrix)} non-zero rows and {distinct_rows} distinct rows "
+            f"(need at least {MIN_PBO_NONZERO_ROW_FRACTION:.0%} non-zero and {n_slices} distinct)"
         )
-        dsr, dsr_payload = _finite_or_none(result.probability), _json_safe(result.to_dict())
-    except (ValueError, ArithmeticError) as exc:
-        errors.append(f"deflated_sharpe: {type(exc).__name__}: {exc}")
+    else:
+        try:
+            result = probability_of_backtest_overfitting([list(row) for row in matrix], n_slices=n_slices)
+            pbo, pbo_payload = _finite_or_none(result.pbo), _json_safe(result.to_dict())
+        except (ValueError, ArithmeticError) as exc:
+            errors.append(f"pbo: {type(exc).__name__}: {exc}")
+    if len(returns) < MIN_DSR_RETURNS:
+        low_information.append(f"deflated_sharpe: {len(returns)} returns (need at least {MIN_DSR_RETURNS})")
+    else:
+        try:
+            result = deflated_sharpe_ratio(
+                list(returns), n_trials=variants_tested, trial_sharpe_variance=trial_sharpe_variance
+            )
+            dsr, dsr_payload = _finite_or_none(result.probability), _json_safe(result.to_dict())
+        except (ValueError, ArithmeticError) as exc:
+            errors.append(f"deflated_sharpe: {type(exc).__name__}: {exc}")
+    if pbo is not None and dsr is not None:
+        status = "COMPLETED"
+    elif errors:
+        status = "INCOMPLETE"
+    else:
+        status = "LOW_INFORMATION"
+    errors.extend(low_information)
     return OverfittingAssessment(
-        status="COMPLETED" if pbo is not None and dsr is not None else "INCOMPLETE",
+        status=status,
         pbo=pbo,
         pbo_result=pbo_payload,
         deflated_sharpe_probability=dsr,
@@ -925,7 +953,11 @@ def _sharpe(values: list[float]) -> float | None:
     if len(values) < 2:
         return None
     deviation = statistics.stdev(values)
-    return statistics.fmean(values) / deviation if deviation > 0 else None
+    # Same relative tolerance as astra.overfitting (kept local: that module may be absent).
+    scale = max(abs(value) for value in values)
+    if deviation <= 0 or deviation <= 1e-9 * max(scale, 1e-300):
+        return None
+    return statistics.fmean(values) / deviation
 
 
 def _finite_or_none(value: object) -> float | None:

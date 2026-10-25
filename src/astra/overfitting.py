@@ -92,6 +92,16 @@ class DeflatedSharpeResult:
         return payload
 
 
+# Relative tolerance: a standard deviation this small against the values' scale
+# is float noise, not variability (it would otherwise produce enormous ratios).
+RELATIVE_ZERO_VARIANCE = 1e-9
+
+
+def negligible_deviation(deviation: float, values: Sequence[float]) -> bool:
+    scale = max((abs(value) for value in values), default=0.0)
+    return deviation <= RELATIVE_ZERO_VARIANCE * max(scale, 1e-300)
+
+
 def sharpe_like(values: Sequence[float]) -> float:
     """Per-period ``mean / sample stdev``; ``0.0`` when the sample stdev is zero."""
 
@@ -103,7 +113,7 @@ def sharpe_like(values: Sequence[float]) -> float:
     # Float two-pass variance (math.fsum) instead of statistics.stdev's exact rational arithmetic,
     # which is too slow for the thousands of windows CSCV evaluates.
     variance = math.fsum((value - mean) ** 2 for value in values) / (len(values) - 1)
-    if variance <= 0:
+    if variance <= 0 or negligible_deviation(math.sqrt(variance), values):
         return 0.0
     return mean / math.sqrt(variance)
 
@@ -217,8 +227,8 @@ def deflated_sharpe_ratio(
     if count < 3:
         raise ValueError("deflated_sharpe_ratio needs at least 3 returns")
     deviation = statistics.stdev(values)
-    if deviation == 0:
-        raise ValueError("returns have zero variance; the Sharpe ratio is undefined")
+    if deviation == 0 or negligible_deviation(deviation, values):
+        raise ValueError("returns have zero or negligible variance; the Sharpe ratio is undefined")
     mean = statistics.fmean(values)
     sharpe = mean / deviation
     m2 = sum((value - mean) ** 2 for value in values) / count

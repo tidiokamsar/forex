@@ -1,5 +1,16 @@
 # Changelog
 
+## Lot 3 quantitative validation (P-02, Q-01) · branch `feat/validation-quant` · 2026-10-25
+
+Independent QA review pending; not accepted yet.
+
+- `overfitting.py` (`astra-overfitting-1.0.0`): CSCV probability of backtest overfitting (contiguous slices, in-sample selection by Sharpe-like metric with lowest-index ties, OOS average rank, overfit when `lambda <= 0`, at most 20,000 combinations) and deflated Sharpe ratio (per-period Sharpe, population skewness, non-excess kurtosis, null variance `1 / (T - 1)` by default; `n_trials = 1` gives the PSR against 0). Invalid inputs raise.
+- `strategy_validation.py`: sealed walk-forward over SMA, momentum and breakout candidates (mean reversion excluded), causal per-block evaluation, validation-only selection, every candidate scored on test blocks for the PBO matrix only (rows = 5-bar periods by trade exit time), DSR inputs, flat and SMA reference baselines, `edge_vs_baseline`, holdout cost stress x1.5/x2 (`cost_stress_net_pnl` = worst), one plan per dataset per store, once-only holdout, `COMPLETED`/`INCOMPLETE`/`UNAVAILABLE` overfitting status. The implementation hash includes `overfitting.py`.
+- Registry: evidence fields `pbo`, `deflated_sharpe_probability`, `variants_tested`; criteria `max_pbo` 0.3, `min_deflated_sharpe_probability` 0.95, `require_overfitting_check`; failures `overfitting_check_missing`, `pbo_above_threshold`, `deflated_sharpe_below_threshold`. Candidates registered before lot 3 fail closed.
+- CLI `evaluate-strategies` (`--evaluate-holdout`, `--register --model-id --version`): logs the experiment, optionally registers an inactive candidate with holdout evidence, never promotes, `external_orders: false`, warns on synthetic data.
+- Limits: synthetic data only; on the bundled fixture DSR is `INCOMPLETE` in development and PBO runs on a sparse matrix; thresholds are starting values; the SQLite lock is advisory.
+- Verification: see ACCEPTANCE_REPORT.md.
+
 ## Foundations (F-01 to F-04) · branch `feat/fondations-exploitation` · 2026-10-25
 
 - F-01: `logs.py`, structured JSON logs on stderr (level `ASTRA_LOG_LEVEL`, default `WARNING` in the CLI) and optionally a rotating `astra.jsonl` in `ASTRA_LOG_DIR`. Correlation id from the order command; secret-like field names redacted recursively. Events for order results, reconciliation, connection loss, freezes, kill switch, cTrader, service and backup.

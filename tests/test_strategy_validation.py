@@ -1,6 +1,7 @@
 import contextlib
 import importlib.util
 import itertools
+import json
 import math
 import sys
 import types
@@ -189,7 +190,10 @@ class StrategyWalkForwardTests(unittest.TestCase):
         self.assertEqual(mutated.folds, self.report.folds)
         self.assertNotEqual(mutated.dataset_identity_sha256, self.report.dataset_identity_sha256)
 
+    @patch("astra.strategy_validation.MIN_DSR_RETURNS", 0)
+    @patch("astra.strategy_validation.MIN_PBO_NONZERO_ROW_FRACTION", 0.0)
     def test_overfitting_inputs_use_all_development_slices_in_order(self):
+        # Plumbing test: the information guards are disabled here and tested separately.
         with overfitting_double() as double:
             report = evaluate()
         overfitting = report.overfitting
@@ -295,7 +299,10 @@ class SealedHoldoutTests(unittest.TestCase):
             # The mismatch is refused before the attempt is recorded, so the holdout is not burnt.
             self.assertEqual(self.holdout(report).status, "COMPLETED")
 
+    @patch("astra.strategy_validation.MIN_DSR_RETURNS", 0)
+    @patch("astra.strategy_validation.MIN_PBO_NONZERO_ROW_FRACTION", 0.0)
     def test_evidence_matches_registry_fields_and_feeds_the_gates(self):
+        # Plumbing test: the information guards are disabled here and tested separately.
         with overfitting_double(pbo=0.25, probability=0.5):
             report = evaluate(store=self.store)
             evaluation = self.holdout(report)
@@ -316,8 +323,15 @@ class SealedHoldoutTests(unittest.TestCase):
             manifest={"dataset_identity": "x", "feature_set_version": "1", "code_sha256": "y", "params": {}},
             criteria=PromotionCriteria(),
         )
-        registry.record_evaluation(model_id="wf", version="1", kind="holdout", evidence=evidence)
+        attempt = self.store.holdout_for_protocol(report.plan_sha256)
+        registry.record_evaluation(
+            actor=Actor("agent", Role.RESEARCH_AGENT), model_id="wf", version="1", kind="holdout",
+            evidence=evidence, holdout_evaluation_id=attempt["evaluation_id"],
+        )
         failures = registry.check_promotion("wf", "1")
+        # Registered after the holdout and without plan/candidate binding: provenance fails.
+        self.assertIn("criteria_registered_after_holdout_was_scored", failures)
+        self.assertIn("holdout_from_another_plan", failures)
         self.assertIn("deflated_sharpe_below_threshold", failures)
         self.assertNotIn("overfitting_check_missing", failures)
         self.assertNotIn("pbo_above_threshold", failures)
@@ -328,7 +342,7 @@ class OverfittingModuleIntegrationTests(unittest.TestCase):
     def test_real_statistics_module_receives_the_development_matrix(self):
         report = evaluate()
         overfitting = report.overfitting
-        self.assertIn(overfitting.status, ("COMPLETED", "INCOMPLETE"))
+        self.assertIn(overfitting.status, ("COMPLETED", "INCOMPLETE", "LOW_INFORMATION"))
         if overfitting.pbo is not None:
             self.assertGreaterEqual(overfitting.pbo, 0.0)
             self.assertLessEqual(overfitting.pbo, 1.0)
@@ -340,5 +354,105 @@ class OverfittingModuleIntegrationTests(unittest.TestCase):
             self.assertEqual(overfitting.deflated_sharpe_result["n_trials"], report.variants_tested)
 
 
+class InformationGuardTests(unittest.TestCase):
+    """Lot 3 QA: sparse or tiny samples must not produce a reassuring PBO or deflated Sharpe."""
+
+    def assess(self, matrix, returns):
+        from astra.strategy_validation import assess_overfitting
+
+        labels = [f"p{index}" for index in range(len(matrix))]
+        return assess_overfitting(matrix, labels, variants_tested=len(matrix[0]), dsr_returns=returns,
+                                  trial_sharpe_variance=None)
+
+    def test_mostly_zero_matrix_is_low_information(self):
+        matrix = [[0.0] * 4 for _ in range(16)]
+        matrix[3][1] = 5.0
+        result = self.assess(matrix, [0.01 * (i % 7 - 3) for i in range(40)])
+        self.assertIsNone(result.pbo)
+        self.assertEqual(result.status, "LOW_INFORMATION")
+        self.assertTrue(any(error.startswith("pbo:") for error in result.errors))
+
+    def test_three_positive_returns_do_not_pass_the_dsr_gate(self):
+        matrix = [[float((r * 7 + c * 3) % 5 - 2) for c in range(4)] for r in range(16)]
+        result = self.assess(matrix, [0.01, 0.02, 0.015])
+        self.assertIsNone(result.deflated_sharpe_probability)
+        self.assertIn("deflated_sharpe: 3 returns (need at least 30)", result.errors)
+
+    def test_float_noise_is_not_a_huge_sharpe(self):
+        from astra.overfitting import deflated_sharpe_ratio, sharpe_like
+
+        self.assertEqual(sharpe_like([1.0, 1.0 + 1e-13, 1.0]), 0.0)
+        with self.assertRaises(ValueError):
+            deflated_sharpe_ratio([0.01, 0.01 + 1e-15, 0.01 - 1e-15], n_trials=7)
+
+
+class HoldoutProvenanceTests(unittest.TestCase):
+    """Evidence recorded from the real sealed holdout of a version registered beforehand passes provenance."""
+
+    @patch("astra.strategy_validation.MIN_DSR_RETURNS", 0)
+    @patch("astra.strategy_validation.MIN_PBO_NONZERO_ROW_FRACTION", 0.0)
+    def test_bound_evidence_passes_provenance_and_tampering_is_caught(self):
+        import sqlite3
+
+        with workspace_tempdir() as temp:
+            database = f"{temp}/astra.sqlite3"
+            store = BacktestStore(database)
+            store.initialize()
+            registry = ModelRegistry(database)
+            registry.initialize()
+            with overfitting_double(pbo=0.25, probability=0.5):
+                report = evaluate(store=store)
+                selected = next(item for item in report.final_candidate_selection if item.selected)
+                registry.register_candidate(
+                    actor=Actor("agent", Role.RESEARCH_AGENT), model_id="wf", version="1",
+                    manifest={"dataset_identity": "x", "feature_set_version": "1", "code_sha256": "y",
+                              "params": selected.config, "plan_sha256": report.plan_sha256,
+                              "candidate_id": selected.candidate_id},
+                    criteria=PromotionCriteria(),
+                )
+                holdout = evaluate_strategy_holdout_once(
+                    BARS, None, report=report, protocol=PROTOCOL, store=store
+                )
+            evidence = holdout_evidence(holdout)
+            attempt = store.holdout_for_protocol(report.plan_sha256)
+            registry.record_evaluation(
+                actor=Actor("agent", Role.RESEARCH_AGENT), model_id="wf", version="1", kind="holdout",
+                evidence=evidence, holdout_evaluation_id=attempt["evaluation_id"],
+            )
+            failures = registry.check_promotion("wf", "1")
+            provenance = {"evidence_provenance_missing", "holdout_evaluation_not_found_or_incomplete",
+                          "holdout_from_another_plan", "holdout_selected_another_candidate",
+                          "criteria_registered_after_holdout_was_scored", "evidence_does_not_match_holdout_report"}
+            self.assertFalse(provenance & set(failures), failures)
+            # Rewriting the recorded numbers is detected against the stored report.
+            db = sqlite3.connect(database)
+            try:
+                with db:
+                    row = db.execute("SELECT evaluation_id, evidence_json FROM model_evaluations").fetchone()
+                    payload = json.loads(row[1])
+                    payload["net_pnl"] = 1e9
+                    db.execute("UPDATE model_evaluations SET evidence_json = ? WHERE evaluation_id = ?",
+                               (json.dumps(payload), row[0]))
+            finally:
+                db.close()
+            self.assertIn("evidence_does_not_match_holdout_report", registry.check_promotion("wf", "1"))
+
+
+class HoldoutReuseTests(unittest.TestCase):
+    """Lot 3 QA: appending a bar must not unlock a new attempt on (almost) the same holdout."""
+
+    def test_extended_dataset_with_overlapping_holdout_is_refused(self):
+        with workspace_tempdir() as temp:
+            store = BacktestStore(f"{temp}/astra.sqlite3")
+            store.initialize()
+            with overfitting_double():
+                evaluate(store=store)
+                longer = make_synthetic_bars(401)
+                with self.assertRaises(ValueError) as caught:
+                    evaluate(bars=longer, store=store)
+            self.assertIn("overlaps the holdout", str(caught.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
+

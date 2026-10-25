@@ -138,6 +138,21 @@ class BacktestStore:
                     "canonical market-bar identity is already sealed by another protocol; "
                     "use a fresh independent dataset"
                 )
+            # Extending or trimming a dataset changes its identity but not its holdout period:
+            # refuse any other plan whose holdout overlaps an already sealed holdout in time.
+            new_start = datetime.fromisoformat(str(holdout["start"]))
+            new_end = datetime.fromisoformat(str(holdout["end"]))
+            for other in db.execute(
+                "SELECT protocol_id, holdout_start, holdout_end FROM research_protocols WHERE dataset_sha256 <> ?",
+                (dataset_identity_sha256,),
+            ).fetchall():
+                other_start = datetime.fromisoformat(other["holdout_start"])
+                other_end = datetime.fromisoformat(other["holdout_end"])
+                if new_start <= other_end and other_start <= new_end:
+                    raise ValueError(
+                        "the holdout period overlaps the holdout of an already sealed plan "
+                        f"({other['protocol_id'][:12]}); use data from a later, independent period"
+                    )
             inserted = db.execute(
                 """INSERT INTO research_protocols (
                        protocol_id, dataset_sha256, protocol_version, sealed_at,
@@ -320,6 +335,16 @@ class BacktestStore:
                     ),
                 ),
             )
+
+    def holdout_for_protocol(self, protocol_id: str) -> dict[str, Any] | None:
+        """The holdout attempt reserved by a sealed plan, if any (id, status, timestamps)."""
+
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT evaluation_id, status, started_at, completed_at FROM holdout_evaluations WHERE protocol_id = ?",
+                (protocol_id,),
+            ).fetchone()
+        return dict(row) if row else None
 
     def save_backtest(self, result: BacktestResult, dataset: Any) -> str:
         if not getattr(dataset, "usable", False):

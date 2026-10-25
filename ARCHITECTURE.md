@@ -77,6 +77,21 @@ TradingService.tick (one account, one adapter)
 - `backup.py`: SQLite online backup with manifest; restore verified, human-only, followed by per-account `reconciliation_required` freezes.
 - `brokers/ctrader.py`: reconnect with capped backoff, permanent versus transient errors, client rate limiter, single read-only `retryAfter` retry, token expiry check and store-gated refresh.
 
+## Quantitative validation (lot 3, in review)
+
+```text
+bars + candidates (sma, momentum, breakout)
+   -> plan (protocol, candidates, hashes) sealed in SQLite: one plan per dataset identity per store
+   -> per fold: validation (selection) -> test (all candidates, PBO input only), causal per block
+   -> PBO matrix (5-bar periods x candidates) + DSR sample -> overfitting (CSCV PBO, deflated Sharpe)
+   -> optional once-only holdout: selected + SMA reference + flat, cost stress x1.5/x2
+   -> holdout_evidence (EVIDENCE_FIELDS) -> registry.record_evaluation -> promotion gates (human promote only)
+```
+
+- `strategy_validation` reuses `validation` fold layout and `signal_backtest`; it imports `overfitting` lazily, so a missing module yields `UNAVAILABLE` and unmet gates.
+- `overfitting` is pure computation with no storage, web or broker imports.
+- The CLI `evaluate-strategies` writes the experiment, the sealed plan and, with `--register`, an inactive candidate; it never promotes and sends no order.
+
 ## Structural options considered
 
 | Option | Benefits | Costs and risks | Decision |

@@ -29,6 +29,7 @@ Open `http://127.0.0.1:8765`. All bundled data is **synthetic** (`data/synthetic
 | `demo` | SMA baseline backtest on the bundled synthetic fixture |
 | `backtest --csv ... --source-type ... --exploratory` | Full-history exploratory backtest (non-promotable) |
 | `walk-forward --csv ... --hypothesis ...` | Train/validation/test folds, sealed plan, once-only holdout (`--evaluate-holdout`) |
+| `evaluate-strategies [--csv ... --source-type ...] [--evaluate-holdout] [--register --model-id ID --version V]` | Sealed walk-forward over SMA, momentum and breakout candidates with PBO and deflated Sharpe; once-only holdout; optional inactive candidate registration; never promotes (see [RESEARCH_PROTOCOL.md](RESEARCH_PROTOCOL.md)) |
 | `ml-baseline [--csv ...]` | Purged walk-forward logistic regression vs base rate; logs the experiment and registers an inactive candidate |
 | `paper-replay [--csv ...] [--strategy sma\|momentum\|breakout]` | Replays bars through Order Gateway + RiskEngine + simulated broker, then reconciles |
 | `orders`, `models` | Inspect stored orders, model versions and experiments |
@@ -55,7 +56,9 @@ Logs are JSON lines on stderr: `ASTRA_LOG_LEVEL` (default `WARNING`), `ASTRA_LOG
 | `features`, `regimes` | Versioned causal features; train-only-fitted regime thresholds with confidence |
 | `strategies`, `research`, `signal_backtest` | Momentum, breakout, mean reversion, SMA baseline; event-time backtests with costs |
 | `validation`, `ml` | Walk-forward/holdout protocol; purged walk-forward ML baseline |
-| `registry` | Experiment log, model versions, pre-registered criteria, promotion, rollback |
+| `strategy_validation` | Sealed multi-family walk-forward (SMA, momentum, breakout), baselines, cost stress, once-only holdout, registry evidence |
+| `overfitting` | CSCV probability of backtest overfitting and deflated Sharpe ratio (pure Python) |
+| `registry` | Experiment log, model versions, pre-registered criteria (including PBO and deflated Sharpe gates), promotion, rollback |
 | `risk` | Independent RiskEngine with hard-capped policy |
 | `instruments` | Contract specs (illustrative), size rounding, margin |
 | `brokers` | Broker contract and `SimulatedBroker` |
@@ -87,6 +90,7 @@ Latest recorded result: see [ACCEPTANCE_REPORT.md](ACCEPTANCE_REPORT.md).
 ## Limits
 
 - Synthetic data only; no result here is evidence about real markets. Historical performance does not guarantee future results, and nothing here is financial advice.
+- Lot 3 overfitting checks (PBO, deflated Sharpe) are in independent review. On the small bundled fixture they are weak: the development DSR is `INCOMPLETE` and PBO runs on a sparse matrix. Their thresholds are starting values.
 - The cTrader demo adapter is tested offline only; its read-only `ctrader-check` has not been run against a real demo account, and DEMO order execution is disabled. Its reconnection, rate limiting and token handling are also tested offline only.
 - Backup/restore and the continuous service exist and are tested locally with the simulator only; the service CLI runs on the simulated broker and a synthetic feed. No restore drill against a real broker account.
 - Missing: external service supervision (restart, start at boot), alert delivery, authentication, dashboard TLS.

@@ -3,7 +3,7 @@ import unittest
 
 from _support import workspace_tempdir
 from astra.governance import Actor, PermissionDenied, Role
-from astra.registry import ModelRegistry, ModelStatus, PromotionCriteria, PromotionError
+from astra.registry import ModelRegistry, ModelStatus, PromotionCriteria, PromotionError, accept_unverified_evidence
 from astra.storage import BacktestStore
 
 REVIEWER = Actor("bob", Role.HUMAN_REVIEWER)
@@ -32,7 +32,8 @@ class RegistryTests(unittest.TestCase):
     def setUp(self):
         self._tmp = workspace_tempdir()
         tmp = self._tmp.__enter__()
-        self.registry = ModelRegistry(f"{tmp}/astra.sqlite3")
+        # Numeric-gate tests run without provenance checks (tested in ProvenanceTests).
+        self.registry = ModelRegistry(f"{tmp}/astra.sqlite3", evidence_verifier=accept_unverified_evidence)
         self.registry.initialize()
 
     def tearDown(self):
@@ -44,7 +45,7 @@ class RegistryTests(unittest.TestCase):
             criteria=PromotionCriteria(),
         )
         if evidence is not None:
-            self.registry.record_evaluation(model_id="momentum", version=version, kind="holdout", evidence=evidence)
+            self.registry.record_evaluation(actor=AGENT, holdout_evaluation_id="test-holdout", model_id="momentum", version=version, kind="holdout", evidence=evidence)
 
     def test_unvalidated_candidate_cannot_be_promoted(self):
         self.register("1.0.0")
@@ -91,7 +92,7 @@ class RegistryTests(unittest.TestCase):
             criteria=PromotionCriteria(require_overfitting_check=False),
         )
         evidence = {key: value for key, value in GOOD_EVIDENCE.items() if key not in ("pbo", "deflated_sharpe_probability", "variants_tested")}
-        self.registry.record_evaluation(model_id="legacy", version="1", kind="holdout", evidence=evidence)
+        self.registry.record_evaluation(actor=AGENT, holdout_evaluation_id="test-holdout", model_id="legacy", version="1", kind="holdout", evidence=evidence)
         self.assertEqual(self.registry.check_promotion("legacy", "1"), ())
         with self.assertRaises(ValueError):
             PromotionCriteria(max_pbo=1.5)
@@ -106,7 +107,7 @@ class RegistryTests(unittest.TestCase):
     def test_holdout_can_only_be_recorded_once(self):
         self.register("1.0.0", GOOD_EVIDENCE)
         with self.assertRaises(PromotionError):
-            self.registry.record_evaluation(model_id="momentum", version="1.0.0", kind="holdout", evidence=GOOD_EVIDENCE)
+            self.registry.record_evaluation(actor=AGENT, holdout_evaluation_id="test-holdout", model_id="momentum", version="1.0.0", kind="holdout", evidence=GOOD_EVIDENCE)
 
     def test_criteria_tampering_is_detected(self):
         self.register("1.0.0", GOOD_EVIDENCE)
@@ -146,6 +147,37 @@ class RegistryTests(unittest.TestCase):
                 actor=AGENT, model_id="x", version="1", manifest={"params": {}}, criteria=PromotionCriteria()
             )
 
+    def test_legacy_candidate_without_overfitting_criteria_fails_closed(self):
+        """A candidate registered before Lot 3 (no overfitting keys stored) cannot be promoted on old evidence."""
+        import json
+
+        from astra.registry import _canonical, _sha256
+
+        self.register("0.9.0")
+        legacy_criteria = {
+            "min_trades": 30, "min_net_pnl": 0.0, "min_profit_factor": 1.1, "max_drawdown_pct": 10.0,
+            "min_edge_vs_baseline": 0.0, "require_cost_stress_non_negative": True, "require_holdout": True,
+            "require_shadow": False,
+        }
+        db = sqlite3.connect(self.registry.path)
+        try:
+            with db:
+                db.execute(
+                    "UPDATE model_versions SET criteria_json = ?, criteria_sha256 = ? WHERE version = '0.9.0'",
+                    (_canonical(legacy_criteria), _sha256(legacy_criteria)),
+                )
+        finally:
+            db.close()
+        legacy_evidence = {key: value for key, value in GOOD_EVIDENCE.items()
+                           if key not in ("pbo", "deflated_sharpe_probability", "variants_tested")}
+        self.registry.record_evaluation(actor=AGENT, holdout_evaluation_id="test-holdout", model_id="momentum", version="0.9.0", kind="holdout", evidence=legacy_evidence)
+        failures = self.registry.check_promotion("momentum", "0.9.0")
+        self.assertIn("overfitting_check_missing", failures)
+        self.assertNotIn("criteria_tampered", failures)
+        self.assertEqual(json.loads(json.dumps(failures)), list(failures))
+        with self.assertRaises(PromotionError):
+            self.registry.promote(actor=REVIEWER, model_id="momentum", version="0.9.0", reason="legacy")
+
     def test_negative_experiments_are_kept(self):
         experiment = self.registry.open_experiment(
             author=AGENT,
@@ -161,6 +193,42 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(stored["variants_tested"], 4)
         with self.assertRaises(ValueError):
             self.registry.close_experiment(experiment, result={}, decision="CANDIDATE")
+
+
+class ProvenanceTests(unittest.TestCase):
+    """Lot 3 QA: fabricated or unbound evidence must never satisfy the gates."""
+
+    def setUp(self):
+        self._tmp = workspace_tempdir()
+        tmp = self._tmp.__enter__()
+        self.addCleanup(self._tmp.__exit__, None, None, None)
+        self.registry = ModelRegistry(f"{tmp}/astra.sqlite3")  # default verifier
+        self.registry.initialize()
+
+    def test_fabricated_evidence_cannot_promote(self):
+        self.registry.register_candidate(
+            actor=AGENT, model_id="fake", version="1", manifest=MANIFEST, criteria=PromotionCriteria()
+        )
+        self.registry.record_evaluation(
+            actor=AGENT, model_id="fake", version="1", kind="holdout", evidence=GOOD_EVIDENCE,
+            holdout_evaluation_id="made-up-id",
+        )
+        failures = self.registry.check_promotion("fake", "1")
+        self.assertIn("holdout_evaluation_not_found_or_incomplete", failures)
+        with self.assertRaises(PromotionError):
+            self.registry.promote(actor=REVIEWER, model_id="fake", version="1", reason="fabricated")
+
+    def test_holdout_evidence_requires_a_reference_and_an_actor(self):
+        self.registry.register_candidate(
+            actor=AGENT, model_id="fake", version="2", manifest=MANIFEST, criteria=PromotionCriteria()
+        )
+        with self.assertRaises(PromotionError):
+            self.registry.record_evaluation(actor=AGENT, model_id="fake", version="2", kind="holdout", evidence=GOOD_EVIDENCE)
+        with self.assertRaises(PermissionDenied):
+            self.registry.record_evaluation(
+                actor=Actor("llm", Role.LLM), model_id="fake", version="2", kind="holdout", evidence=GOOD_EVIDENCE,
+                holdout_evaluation_id="x",
+            )
 
 
 if __name__ == "__main__":
