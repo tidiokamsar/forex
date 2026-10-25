@@ -12,6 +12,7 @@ Secure behaviour is asserted. Scenarios that fail on 9eae4a6 carry ``@unittest.e
 and a ``# VERIFY FAIL N-n`` comment (severity in the comment). All data is SYNTHETIC.
 """
 
+import contextlib
 import hashlib
 import inspect
 import json
@@ -1098,6 +1099,238 @@ class Round4EvidenceTests(AnchoredStoreMixin):
         self.assertIn("anchor_empty_for_used_store", verify_store_against_anchor(store.path, fresh).errors)
         with self.assertRaisesRegex(ValueError, "evidence anchor"):
             BacktestStore(store.path, anchor=fresh).require_anchor_consistency()
+
+
+# =====================================================================================================
+# Phase 4 (QA agent D) against f1e0f76: detector round 4, evidence chain, anchor binding.
+# Expected failures are marked ``# PHASE4 FAIL Q-n`` with a severity.
+# =====================================================================================================
+
+
+def _cal_tick_closes(rng, n):
+    """Same generator as the calibration suite: 0, 1 or 2 ticks per bar, quoted to 1e-5."""
+
+    price, closes = 1.1, [1.1]
+    for _ in range(n):
+        price += rng.choice((-1, 1)) * (2 if rng.random() < 0.15 else 1) * 1e-5 * (rng.random() < 0.8)
+        closes.append(round(price, 5))
+    return closes
+
+
+def _nudge_close(closes, index):
+    nudged = list(closes)
+    nudged[index] = round(nudged[index] + 1e-5, 5)
+    return holdout_returns(nudged)
+
+
+def _short_tick_copies(n, samples=100):
+    verdicts = {}
+    for k in range(samples):
+        rng = random.Random(f"p4:{n}:{k}")
+        closes = _cal_tick_closes(rng, n)
+        old = holdout_returns(closes)
+        for name, new in (("exact", old), ("inverted", [-v for v in old]),
+                          ("nudged", _nudge_close(closes, rng.randrange(1, n)))):
+            verdicts.setdefault(name, []).append(holdout_reuse.assess_reuse(new, old).verdict)
+    return verdicts
+
+
+class Round4DetectorTests(unittest.TestCase):
+    def test_long_tick_copies_are_conflicts(self):
+        verdicts = _short_tick_copies(40, samples=40)
+        for name, values in verdicts.items():
+            with self.subTest(name):
+                self.assertEqual(set(values), {holdout_reuse.CONFLICT})
+
+    # PHASE4 FAIL Q-1 (Medium; regression vs 0ef781b on short tick-quantized holdouts): at the CLI default
+    # holdout length (20 bars) and at the 16-return floor, copies of a tick-quantized walk (the calibration's
+    # own generator) are CLEAR, i.e. sealable and scoreable again: nudged by one tick 6/100 at 20 bars and
+    # 21/100 at 16; inverted 2/100 and 5/100. The calibration suite measures copies at 40 returns only. On a
+    # binary one-tick walk the 0ef781b detector missed a nudged 20-bar copy in 0 of 30 cases, this one in 5.
+    @unittest.expectedFailure
+    def test_short_tick_copies_are_never_clear(self):
+        for n in (16, 20):
+            for name, values in _short_tick_copies(n).items():
+                with self.subTest(n=n, transform=name):
+                    self.assertEqual(values.count(holdout_reuse.CLEAR), 0)
+
+    # PHASE4 FAIL Q-2 (Low): the sign is meant to be ignored (inverted quote), but at 16 returns an exact copy is
+    # never CLEAR while its inversion is CLEAR in 5 of 100 cases: the two transforms are not judged alike.
+    @unittest.expectedFailure
+    def test_inverted_copy_gets_the_verdict_of_the_exact_copy(self):
+        verdicts = _short_tick_copies(16)
+        self.assertEqual(verdicts["exact"].count(holdout_reuse.CLEAR), verdicts["inverted"].count(holdout_reuse.CLEAR))
+
+    # PHASE4 FAIL Q-3 (Low; near-constant data only): rescaling the prices of a sub-tick trend by 2 and quoting
+    # again to 1e-5 changes the rounding pattern: the copy is CLEAR in 30 of 30 cases even at 120 returns.
+    @unittest.expectedFailure
+    def test_rescaled_quantized_sub_tick_trend_is_detected(self):
+        clear = 0
+        for k in range(30):
+            rng, price, closes = random.Random(f"q3:{k}"), 1.1, [1.1]
+            for _ in range(120):
+                price += 2e-5 + rng.gauss(0, 2e-6)
+                closes.append(price)
+            old = holdout_returns([round(value, 5) for value in closes])
+            new = holdout_returns([round(value * 2, 5) for value in closes])
+            clear += holdout_reuse.assess_reuse(new, old).verdict == holdout_reuse.CLEAR
+        self.assertEqual(clear, 0)
+
+    def test_bundled_fixture_ramp_copies_are_never_clear(self):
+        from astra.data import load_bars_csv
+        from test_lot4_adversarial import PROJECT_ROOT
+
+        dataset = load_bars_csv(PROJECT_ROOT / "data" / "synthetic_eurusd_m15.csv", source_type="SYNTHETIC")
+        closes = [bar.close for bar in dataset.bars][-21:]
+        old = holdout_returns(closes)
+        copies = [holdout_returns([round(value * factor, 5) for value in closes]) for factor in (0.5, 1.37, 2, 3)]
+        copies += [holdout_returns([round(value + shift, 5) for value in closes]) for shift in (0.01, 0.2)]
+        copies.append(_nudge_close(closes, 10))
+        for new in copies:
+            self.assertNotEqual(holdout_reuse.assess_reuse(new, old).verdict, holdout_reuse.CLEAR)
+
+    def test_calibration_table_is_reproduced_with_independent_seeds(self):
+        # The documented negatives hold on seeds the fixer did not choose (dense data: no flag at all).
+        import test_holdout_reuse_calibration as calibration
+
+        for name, generate in (("gauss", calibration._gauss), ("ar1", calibration._ar1), ("ticks", calibration._ticks)):
+            rng = random.Random(f"phase4-independent:{name}")
+            flagged = sum(holdout_reuse.assess_reuse(generate(rng), generate(rng)).verdict
+                          in (holdout_reuse.CONFLICT, holdout_reuse.SUSPECT) for _ in range(300))
+            with self.subTest(name):
+                self.assertEqual(flagged, 0)
+
+
+def rehash_attempt_chain(path, mutate):
+    """Rewrite every attempt row through ``mutate(row) -> row`` and rehash the chain (triggers dropped)."""
+
+    drop_all_triggers(path)
+    db = sqlite3.connect(path)
+    db.row_factory = sqlite3.Row
+    try:
+        rows = [dict(row) for row in db.execute(f"SELECT * FROM {attempts.TABLE} ORDER BY seq")]
+        db.execute(f"DELETE FROM {attempts.TABLE}")
+        previous = attempts.GENESIS_HASH
+        columns = (*attempts._COLUMNS, "row_hash")
+        for row in rows:
+            content = {**mutate(dict(row)), "prev_hash": previous}
+            content.pop("row_hash")
+            digest = attempts.row_hash(content)
+            db.execute(f"INSERT INTO {attempts.TABLE} ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+                       (*(content.get(name) for name in attempts._COLUMNS), digest))
+            previous = digest
+        db.commit()
+    finally:
+        db.close()
+    reinitialize(path)
+
+
+class Round4EvidenceAttackTests(AnchoredStoreMixin):
+    def forge_report_and_evidence(self, evaluation_id, improve):
+        drop_all_triggers(self.path)
+        forged = rewrite_json(self.path, "holdout_evaluations", "report_json", "evaluation_id", evaluation_id, improve)
+        row = sql(self.path, "SELECT evaluation_id FROM model_evaluations WHERE version = '1'")[0][0]
+        rewrite_json(self.path, "model_evaluations", "evidence_json", "evaluation_id", row,
+                     lambda payload: {**payload, **holdout_evidence(forged)})
+        reinitialize(self.path)
+        return forged
+
+    def test_forged_statistics_and_rewritten_chain_diverge_from_the_anchor(self):
+        _report, _holdout, evaluation_id = self.register_score_record()
+        before = self.failures()
+
+        def improve(report):
+            report["overfitting"].update(status="COMPLETED", pbo=0.05, deflated_sharpe_probability=0.99)
+            return report
+
+        forged = self.forge_report_and_evidence(evaluation_id, improve)
+        new_hash = hashlib.sha256(sql(self.path, "SELECT report_json FROM holdout_evaluations WHERE evaluation_id = ?",
+                                      (evaluation_id,))[0][0].encode("utf-8")).hexdigest()
+
+        def patch_holdout_metrics(row):
+            if row["kind"] == attempts.KIND_HOLDOUT and row["metrics_json"]:
+                metrics = json.loads(row["metrics_json"])
+                if "report_sha256" in metrics:
+                    metrics["report_sha256"] = new_hash
+                if isinstance(metrics.get("overfitting"), dict):
+                    metrics["overfitting"].update(pbo=0.05, deflated_sharpe_probability=0.99)
+                for key in ("pbo", "deflated_sharpe_probability"):
+                    if key in metrics:
+                        metrics[key] = forged["overfitting"][key]
+                row["metrics_json"] = attempts.canonical_json(metrics)
+            return row
+
+        rehash_attempt_chain(self.path, patch_holdout_metrics)
+        self.assertTrue(attempts.verify_attempt_chain(self.path).ok)  # the chain alone looks intact
+        after = self.failures()
+        self.assertTrue(after - before, f"before={sorted(before)} after={sorted(after)}")
+        self.assertTrue({item for item in after if item.startswith("evidence_anchor_inconsistent")}
+                        | ({"holdout_overfitting_differs_from_rederivation"} & after), after)
+
+    def test_unrecorded_abstention_floor_change_is_caught_by_rederivation(self):
+        with patch("astra.strategy_validation.MAX_PBO_ABSTAINED_FRACTION", 1.0), \
+                patch("astra.strategy_validation.MIN_PBO_TRADES_PER_SLICE", 0):
+            self.register_score_record()
+        failures = self.failures()
+        self.assertTrue(failures & {"statistical_policy_below_floor", "holdout_overfitting_differs_from_rederivation",
+                                    "overfitting_check_missing"}, failures)
+
+    def test_waiver_does_not_hide_other_integrity_failures(self):
+        _report, _holdout, evaluation_id = self.register_score_record()
+        self.forge_report_and_evidence(evaluation_id, lambda report: {
+            **report, "edge_vs_baseline": 4_500.0})
+        waived = set(self.registry.check_promotion("wf", "1", holdout_bars=BARS, allow_non_production_anchor=True))
+        self.assertIn("holdout_report_differs_from_rederivation", waived)
+        self.assertNotIn("evidence_anchor_not_production_grade", waived)
+
+    def test_wiped_seal_tables_and_fresh_anchor_cannot_reuse_a_nudged_copy(self):
+        score_holdout(self.store, evaluate(store=self.store))
+        drop_all_triggers(self.path)
+        for table in ("holdout_evaluations", "holdout_signatures", "holdout_reuse_checks", "research_protocols",
+                      "evidence_anchor_bindings"):
+            with contextlib.suppress(sqlite3.OperationalError):
+                sql(self.path, f"DELETE FROM {table}")
+        reinitialize(self.path)
+        fresh = LocalFileAnchor(f"{self.temp}/fresh-anchor.jsonl")
+        store = BacktestStore(self.path, anchor=fresh)
+        bars = time_shift(perturb_holdout(BARS, delta=2e-5), days=400)
+        with self.assertRaisesRegex(ValueError, "price path|already scored|evidence anchor"):
+            score_holdout(store, evaluate(bars=bars, store=store), bars=bars)
+
+    # PHASE4 FAIL Q-4 (Low; DB write; mitigated by the attempt-log comparison above): a store whose seal and
+    # binding rows were wiped is no longer "in use" for a fresh anchor, although its attempt log still records
+    # sealed plans and a scored holdout. ``_store_in_use`` ignores research_attempt_events.
+    @unittest.expectedFailure
+    def test_store_with_attempt_history_is_in_use_for_a_fresh_anchor(self):
+        score_holdout(self.store, evaluate(store=self.store))
+        drop_all_triggers(self.path)
+        for table in ("holdout_evaluations", "holdout_signatures", "holdout_reuse_checks", "research_protocols",
+                      "evidence_anchor_bindings"):
+            with contextlib.suppress(sqlite3.OperationalError):
+                sql(self.path, f"DELETE FROM {table}")
+        reinitialize(self.path)
+        fresh = LocalFileAnchor(f"{self.temp}/fresh-anchor.jsonl")
+        self.assertIn("anchor_empty_for_used_store", verify_store_against_anchor(self.path, fresh).errors)
+
+
+class Round4InformationTests(unittest.TestCase):
+    def test_dsr_needs_trade_information_on_every_path(self):
+        rng = random.Random(9)
+        matrix = [[rng.gauss(0, 5) for _ in range(4)] for _ in range(64)]
+        returns = [0.002 + 0.01 * rng.gauss(0, 1) for _ in range(200)]
+        labels = [f"p{i}" for i in range(64)]
+        for kwargs in ({}, {"dsr_trade_count": 29}, {"dsr_trade_count": None}):
+            with self.subTest(kwargs=kwargs):
+                result = assess_overfitting(matrix, labels, variants_tested=4, dsr_returns=returns,
+                                            initial_equity=10_000.0, **kwargs)
+                self.assertIsNone(result.deflated_sharpe_probability)
+                self.assertNotEqual(result.status, "COMPLETED")
+        result = assess_overfitting(matrix, labels, variants_tested=4, dsr_returns=returns, initial_equity=10_000.0,
+                                    dsr_trade_count=30)
+        self.assertIsNotNone(result.deflated_sharpe_probability)
+        self.assertEqual(result.statistical_policy["applied"], {
+            "min_dsr_returns": 30, "min_dsr_trades": 30, "min_pbo_nonzero_row_fraction": 0.5, "min_pbo_slices": 4,
+            "min_pbo_trades_per_slice": 1})
 
 
 if __name__ == "__main__":
