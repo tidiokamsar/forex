@@ -177,6 +177,7 @@ class TradingService:
         self._reconnect = reconnect or getattr(broker, "reconnect", None)
         self._state_key = f"{STATE_PREFIX}{account_ref}"
         self._consecutive_errors = 0
+        self._reconnect_blocked = False
         self._stop = threading.Event()
         state = store.get_state(self._state_key, {})
         self.last_bar = datetime.fromisoformat(state["last_bar"]) if state.get("last_bar") else None
@@ -223,29 +224,50 @@ class TradingService:
 
     def tick(self) -> None:
         self.stats.ticks += 1
+        self._rearm_if_cleared()
         try:
             self._tick()
             self._consecutive_errors = 0
+        except BrokerRequestError as exc:
+            # A provider refusal such as a rate limit is transient: log, do not count.
+            log_event(_LOG, "service.request_refused", level=logging.WARNING, error_code=exc.error_code)
         except Exception as exc:  # noqa: BLE001 - the loop must survive and report any failure
             self.stats.errors += 1
             self._consecutive_errors += 1
             _LOG.exception("service tick failed", extra={"event": "service.tick_failed", "error": type(exc).__name__})
-            if self._consecutive_errors >= MAX_CONSECUTIVE_ERRORS and not self.stats.degraded:
-                self.stats.degraded = True
-                self.gateway.controls.freeze(
-                    FreezeReason.SERVICE_DEGRADED, context=f"{self._consecutive_errors} consecutive tick errors"
-                )
-                log_event(_LOG, "service.degraded", level=logging.CRITICAL, errors=self._consecutive_errors)
+            if self._consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                self._enter_degraded(f"{self._consecutive_errors} consecutive tick errors")
         self._heartbeat("degraded" if self.stats.degraded else "running")
+
+    def _enter_degraded(self, context: str) -> None:
+        if self.stats.degraded:
+            return
+        self.stats.degraded = True
+        self.gateway.controls.freeze(FreezeReason.SERVICE_DEGRADED, context=context)
+        log_event(_LOG, "service.degraded", level=logging.CRITICAL, context=context)
+
+    def _rearm_if_cleared(self) -> None:
+        """After a human clears service_degraded, errors are counted again from zero."""
+
+        if self.stats.degraded and FreezeReason.SERVICE_DEGRADED.value not in self.gateway.controls.freezes():
+            self.stats.degraded = False
+            self._consecutive_errors = 0
+            self._reconnect_blocked = False
+            log_event(_LOG, "service.rearmed", account_ref=self.account_ref)
 
     def _tick(self) -> None:
         if self.gateway.check_connection() is not ConnectionState.CONNECTED:
-            if self._reconnect is None:
+            if self._reconnect is None or self._reconnect_blocked:
                 return
             try:
                 self._reconnect()
             except (BrokerUnavailable, BrokerTimeout) as exc:
-                log_event(_LOG, "service.reconnect_failed", level=logging.WARNING, error=str(exc))
+                if getattr(exc, "permanent", False) is True:
+                    # Retrying cannot fix this (live account, configuration, token): stop and ask a human.
+                    self._reconnect_blocked = True
+                    self._enter_degraded(f"permanent reconnect failure: {type(exc).__name__}")
+                log_event(_LOG, "service.reconnect_failed", level=logging.WARNING, error=str(exc),
+                          permanent=self._reconnect_blocked)
                 return
             if self.broker.connection_state() is not ConnectionState.CONNECTED:
                 return

@@ -30,7 +30,7 @@ class EventCursorPerAccountTests(ExecutionTestCase):
             self.assertEqual(sent.state, OrderState.ACCEPTED)
             broker_a.cancel_order(sent.client_order_id)
             gw_a.process_events()
-        self.assertGreater(self.store.get_state("broker_event_cursor:SIM-****0001"), 2)
+        self.assertGreater(self.store.get_state("broker_event_cursor:SIM-****0001")["cursor"], 2)
         broker_b.script_next_submit("accept_only")
         result = gw_b.submit(self.command(account_ref="SIM-****0002"), SYSTEM)
         self.assertEqual(result.state, OrderState.ACCEPTED)

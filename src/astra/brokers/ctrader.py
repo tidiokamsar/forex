@@ -155,6 +155,12 @@ class CTraderConnectionError(BrokerUnavailable):
         super().__init__(f"{error_code}: {description}".strip(": "))
         self.error_code = error_code
 
+    @property
+    def permanent(self) -> bool:
+        """True when reconnecting cannot help (token or account authorization)."""
+
+        return self.error_code in PERMANENT_ERROR_CODES
+
 
 # Error codes (ProtoOAErrorCode / ProtoErrorCode, docs read 2026-10-25) that
 # mean the session, token or account authorization is unusable.
@@ -196,9 +202,13 @@ def provider_error(body: dict[str, Any]) -> Exception:
 class LiveAccountRefused(BrokerUnavailable):
     """The provider reports a live account; this build never trades live."""
 
+    permanent = True
+
 
 class CTraderConfigurationError(BrokerUnavailable):
     """Account, symbol or credential configuration problem; retrying cannot help."""
+
+    permanent = True
 
 
 class TokenStore(Protocol):
@@ -568,13 +578,21 @@ class CTraderAdapter(BrokerAdapter):
             except (LiveAccountRefused, CTraderConfigurationError):
                 raise
             except CTraderConnectionError as exc:
-                if exc.error_code in PERMANENT_ERROR_CODES:
+                if exc.permanent:
+                    raise
+                last_error = exc
+            except CTraderError as exc:
+                # A rate limit during authorization is transient: wait at least retryAfter.
+                if exc.error_code not in RATE_LIMIT_CODES:
                     raise
                 last_error = exc
             except (BrokerUnavailable, BrokerTimeout, OSError) as exc:
                 last_error = exc
             if attempt < max_attempts:
                 delay = min(max_delay, base_delay * 2 ** (attempt - 1))
+                retry_after = getattr(last_error, "retry_after_seconds", None)
+                if retry_after is not None:
+                    delay = max(delay, min(float(retry_after), max_delay))
                 log_event(_LOG, "ctrader.reconnect_wait", level=logging.WARNING, attempt=attempt, delay_seconds=delay)
                 self._sleep(delay)
         raise BrokerUnavailable(f"reconnect failed after {max_attempts} attempts: {last_error}")

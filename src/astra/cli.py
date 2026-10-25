@@ -621,14 +621,20 @@ def _service_command(args: argparse.Namespace, config: AppConfig) -> int:
         clock=feed.clock,
         reconnect=broker.reconnect,
     )
+    previous_handlers = {}
     for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
         if hasattr(signal, name):
-            signal.signal(getattr(signal, name), lambda *_: service.stop())
-    stats = service.run(
-        advance=feed.advance,
-        max_ticks=args.max_ticks,
-        tick_interval_seconds=args.tick_seconds if args.realtime else 0.0,
-    )
+            number = getattr(signal, name)
+            previous_handlers[number] = signal.signal(number, lambda *_: service.stop())
+    try:
+        stats = service.run(
+            advance=feed.advance,
+            max_ticks=args.max_ticks,
+            tick_interval_seconds=args.tick_seconds if args.realtime else 0.0,
+        )
+    finally:
+        for number, handler in previous_handlers.items():
+            signal.signal(number, handler)
     _write_json(
         {
             "mode": "SIMULATION",

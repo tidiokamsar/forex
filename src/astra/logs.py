@@ -21,7 +21,30 @@ from typing import Any
 
 ROOT_LOGGER = "astra"
 _correlation: contextvars.ContextVar[str | None] = contextvars.ContextVar("astra_correlation_id", default=None)
-_SECRET_KEY = re.compile(r"(secret|token|password|passwd|api[_-]?key|authorization|credential)", re.IGNORECASE)
+_SECRET_KEY = re.compile(
+    r"(secret|token|password|passwd|passphrase|api[_-]?key|authorization|credential|private[_-]?key|refresh|cookie)",
+    re.IGNORECASE,
+)
+# Values revealed through governance.SecretValue; masked wherever they appear.
+_KNOWN_SECRETS: set[str] = set()
+_MIN_SECRET_LENGTH = 4
+
+
+def register_secret(value: str) -> None:
+    """Mask ``value`` in every later log record (message, fields, exceptions)."""
+
+    if isinstance(value, str) and len(value) >= _MIN_SECRET_LENGTH:
+        _KNOWN_SECRETS.add(value)
+
+
+def _mask_known_secrets(text: str) -> str:
+    for secret in sorted(_KNOWN_SECRETS, key=len, reverse=True):
+        if secret in text:
+            text = text.replace(secret, REDACTED)
+        escaped = json.dumps(secret)[1:-1]
+        if escaped != secret and escaped in text:
+            text = text.replace(escaped, REDACTED)
+    return text
 _RESERVED = frozenset(vars(logging.LogRecord("", 0, "", 0, "", None, None))) | {"message", "asctime"}
 REDACTED = "****"
 
@@ -55,7 +78,7 @@ class JsonFormatter(logging.Formatter):
             payload["fields"] = redact(fields)
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
-        return json.dumps(payload, ensure_ascii=False, default=str, separators=(",", ":"))
+        return _mask_known_secrets(json.dumps(payload, ensure_ascii=False, default=str, separators=(",", ":")))
 
 
 def configure_logging(
@@ -99,7 +122,9 @@ def get_logger(name: str) -> logging.Logger:
 
 
 def log_event(logger: logging.Logger, event: str, message: str = "", *, level: int = logging.INFO, **fields: Any) -> None:
-    logger.log(level, message or event, extra={"event": event, **redact(fields)})
+    # Field names that collide with LogRecord attributes would raise; prefix them.
+    safe = {(f"field_{key}" if key in _RESERVED else key): value for key, value in redact(fields).items()}
+    logger.log(level, message or event, extra={"event": event, **safe})
 
 
 @contextlib.contextmanager

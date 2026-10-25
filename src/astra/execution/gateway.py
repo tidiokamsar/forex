@@ -488,8 +488,13 @@ class OrderGateway:
 
         # Each adapter numbers its own events, so the cursor is per account.
         cursor_key = _EVENT_CURSOR if self._account_ref is None else f"{_EVENT_CURSOR}:{self._account_ref}"
+        epoch = self._broker.event_epoch
         if self._cursor is None:
-            self._cursor = int(self._store.get_state(cursor_key, 0))
+            # Sequences restart with each adapter instance; a cursor stored
+            # under another epoch (or in the legacy integer form) is not reused.
+            stored = self._store.get_state(cursor_key)
+            same_epoch = isinstance(stored, dict) and stored.get("epoch") == epoch
+            self._cursor = int(stored["cursor"]) if same_epoch else 0
         cursor = self._cursor
         try:
             events = self._broker.poll_events(cursor)
@@ -515,7 +520,7 @@ class OrderGateway:
             after = self._apply_report(record.intent_id, event.report)
             applied += int(after.state is not before or after.last_broker_sequence != record.last_broker_sequence)
         if highest != cursor:
-            self._store.put_state(cursor_key, highest)
+            self._store.put_state(cursor_key, {"epoch": epoch, "cursor": highest})
             self._cursor = highest
         return applied
 

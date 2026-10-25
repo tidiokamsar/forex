@@ -61,6 +61,8 @@ def _inspect(path: Path) -> tuple[str, dict[str, int]]:
 
 
 def create_backup(database: str | Path, backup_dir: str | Path, *, keep: int = 14) -> BackupRecord:
+    if not isinstance(keep, int) or isinstance(keep, bool) or keep < 1:
+        raise BackupError("keep must be an integer of at least 1")
     source = Path(database)
     if not source.exists():
         raise BackupError(f"database not found: {source}")
@@ -111,49 +113,82 @@ def verify_backup(backup: str | Path) -> BackupRecord:
     return BackupRecord(**manifest)
 
 
-def restore_backup(backup: str | Path, database: str | Path, *, actor: Actor, reason: str) -> dict:
+def restore_backup(
+    backup: str | Path,
+    database: str | Path,
+    *,
+    actor: Actor,
+    reason: str,
+    stale_after_seconds: float = 120.0,
+) -> dict:
     """Replace ``database`` with a verified backup. Requires a human operator.
 
-    The service must be stopped first. The previous file is kept next to the
-    target, and the restored store is frozen until reconciliation.
+    Order of operations, so that no failure can leave the target missing or
+    unfrozen: (1) verify the backup actually given, (2) refuse while a service
+    heartbeat is alive, (3) copy it to a staging file and verify the copy,
+    (4) freeze every account inside the staging copy, (5) only then move the
+    live database aside and swap the staging file in. Any failure after the
+    live file was moved puts it back.
     """
 
     target = Path(database)
+    source = Path(backup)
     PermissionGuard(ExecutionStore(target) if target.exists() else None).require(
-        actor, Action.RESTORE_BACKUP, target=str(backup)
+        actor, Action.RESTORE_BACKUP, target=str(source)
     )
     if not reason.strip():
         raise BackupError("a restore reason is required")
-    record = verify_backup(backup)
+    record = verify_backup(source)
+    if target.exists():
+        from .service import service_status
+
+        try:
+            statuses = service_status(ExecutionStore(target), stale_after_seconds=stale_after_seconds)
+        except sqlite3.Error:
+            statuses = []  # no service_state table yet: no service ever heartbeated here
+        alive = [status["account_ref"] for status in statuses if status["alive"]]
+        if alive:
+            raise BackupError(f"a trading service is still running for {alive}; stop it before restoring")
+
+    staging = target.with_name(target.name + ".restoring")
+    staging.unlink(missing_ok=True)
+    try:
+        shutil.copy2(source, staging)
+        if _sha256(staging) != record.sha256:
+            raise BackupError("copied backup does not match its manifest")
+        staged_store = ExecutionStore(staging)
+        staged_store.initialize()
+        # Freeze every account the restored store knows about, before it goes live.
+        accounts = staged_store.account_refs()
+        for account_ref in accounts:
+            TradingControls(staged_store, scope=account_ref).freeze(
+                FreezeReason.RECONCILIATION_REQUIRED, actor=actor.actor_id, context="restored_from_backup"
+            )
+    except BaseException:
+        staging.unlink(missing_ok=True)
+        raise
+
     previous = None
     if target.exists():
         previous = target.with_name(f"{target.name}.pre-restore-{datetime.now(UTC).strftime('%Y%m%dT%H%M%S%fZ')}")
         shutil.move(str(target), previous)
-    staging = target.with_name(target.name + ".restoring")
-    shutil.copy2(record.path, staging)
-    if _sha256(staging) != record.sha256:
-        staging.unlink(missing_ok=True)
-        if previous is not None:
+    try:
+        staging.replace(target)
+    except BaseException:
+        if previous is not None and not target.exists():
             shutil.move(str(previous), target)
-        raise BackupError("copied backup does not match its manifest; previous database put back")
-    staging.replace(target)
-    store = ExecutionStore(target)
-    store.initialize()
-    # Freeze every account the restored store knows about; each one's gateway
-    # lifts its own freeze with a consistent reconciliation.
-    accounts = store.account_refs()
-    for account_ref in accounts:
-        TradingControls(store, scope=account_ref).freeze(
-            FreezeReason.RECONCILIATION_REQUIRED, actor=actor.actor_id, context="restored_from_backup"
-        )
+        staging.unlink(missing_ok=True)
+        raise
+
     previous_text = str(previous) if previous else None
+    store = ExecutionStore(target)
     store.audit(
         "backup.restored",
-        {"actor": actor.actor_id, "reason": reason, "backup": record.path, "sha256": record.sha256,
+        {"actor": actor.actor_id, "reason": reason, "backup": str(source), "sha256": record.sha256,
          "previous_saved_as": previous_text, "accounts_frozen": accounts},
     )
-    log_event(_LOG, "backup.restored", backup=record.path, sha256=record.sha256, previous=previous_text, accounts=accounts)
-    return {"restored_from": record.path, "sha256": record.sha256, "previous_saved_as": previous_text,
+    log_event(_LOG, "backup.restored", backup=str(source), sha256=record.sha256, previous=previous_text, accounts=accounts)
+    return {"restored_from": str(source), "sha256": record.sha256, "previous_saved_as": previous_text,
             "accounts_frozen_until_reconciled": accounts}
 
 

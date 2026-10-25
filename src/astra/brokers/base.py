@@ -179,6 +179,18 @@ class BrokerAdapter(ABC):
         return self._send_order(request)
 
     @property
+    def event_epoch(self) -> str:
+        """Random id of this adapter instance. Event sequence numbers are only
+        comparable within one epoch, so a stored cursor from another instance
+        (an earlier process or session) must not be reused."""
+
+        if "_event_epoch" not in self.__dict__:
+            import uuid
+
+            self.__dict__["_event_epoch"] = uuid.uuid4().hex
+        return self.__dict__["_event_epoch"]
+
+    @property
     def refused_orders(self) -> list[tuple[str, str]]:
         if "_refused_orders" not in self.__dict__:
             self.__dict__["_refused_orders"] = []

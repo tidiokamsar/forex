@@ -131,6 +131,10 @@ class SecretValue:
         self._value = value
 
     def reveal(self) -> str:
+        # Anything revealed is masked in logs from now on, even inside messages.
+        from .logs import register_secret
+
+        register_secret(self._value)
         return self._value
 
     def __repr__(self) -> str:

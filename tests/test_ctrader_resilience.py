@@ -217,6 +217,13 @@ class ResilienceTests(unittest.TestCase):
             adapter.refresh_access_token(BrokenStore())
         self.assertEqual(adapter._credentials.access_token.reveal(), "token-xyz")
 
+    def test_rate_limit_during_authorization_is_transient(self):
+        server = FakeCTraderServer()
+        server.fail_once[P.APPLICATION_AUTH_REQ] = "BLOCKED_PAYLOAD_TYPE"
+        adapter = self.make(server)
+        self.assertEqual(adapter.reconnect(max_attempts=3, base_delay=1.0), 2)
+        self.assertEqual(self.sleeps, [1.0])
+
 
 class RateLimiterTests(unittest.TestCase):
     def test_bucket_waits_when_burst_is_exhausted(self):
