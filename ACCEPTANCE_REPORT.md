@@ -15,7 +15,11 @@ python -m compileall -q src tests
 node --check src/astra/static/app.js
 ```
 
-Observed: ruff `All checks passed!`; `Ran 245 tests in 93.941s`, `OK` (0 failures, 0 skipped); compileall and node exit 0. All tests are local: simulator, scripted fake cTrader server and loopback servers. None ran against the real cTrader service.
+Observed at the first publication (`ab843d1`): ruff `All checks passed!`; `Ran 245 tests in 93.941s`, `OK` (0 failures, 0 skipped); compileall and node exit 0.
+
+Independent verification (protocol of 2026-10-25): a QA agent that did not write the code cloned `ab843d1`, re-ran the suite (`Ran 245 tests in 156.812s`, `OK`), ruff, compileall and node, probed the permit boundary adversarially and confirmed C-01, C-03, C-04 (not a defect), C-05, C-07, the secret scan and that DEMO/LIVE are disabled. It reported two low-severity hardening gaps, now fixed: D-1 (the permit did not bind stop-loss or order type and could be replayed within its TTL: now bound, single-use, with a random nonce so identical requests never share a permit) and D-2 (the override guard could be bypassed by a mixin: now checked through the MRO). A documentation agent audited and then corrected the Markdown files; the coordinator reviewed that diff.
+
+Final verification after D-1, D-2 and the documentation corrections: ruff `All checks passed!`; `Ran 248 tests in 75.552s`, `OK` (0 failures, 0 skipped); compileall and node exit 0. All tests are local: simulator, scripted fake cTrader server and loopback servers. None ran against the real cTrader service.
 
 ## Lot 2b: cTrader demo adapter, offline (2026-10-25)
 
@@ -47,15 +51,15 @@ Manual checks: `paper-replay` (sma, momentum, breakout), `ml-baseline`, `orders`
 
 ### Limits of this lot
 
-- Only the in-process simulated broker exists; no provider was contacted. DEMO is not executable.
+- Only the in-process simulated broker exists; no provider was contacted. DEMO is not executable. (superseded: lot 2b added a cTrader demo adapter tested offline only; still no provider contacted and DEMO still not executable)
 - Instrument specs and costs are illustrative; spreads in the replay are a fixed parameter.
-- Controls are global per SQLite store; roles are asserted, not authenticated.
+- Controls are global per SQLite store; roles are asserted, not authenticated. (superseded: since C-05 freezes and daily-loss state are per account, the kill switch stays global; roles are still asserted)
 - ML edge on the synthetic fixture reflects an artificially regular series, not a market property.
 - No backup/restore test, service supervisor, metrics endpoint, alert delivery, drift monitor or autonomous candidate generation.
 
 ### Human intervention needed
 
-Choose a broker for the first DEMO connector and confirm country/account eligibility and a demo account; see BROKERS.md. No credentials should be shared in chat or committed.
+Choose a broker for the first DEMO connector and confirm country/account eligibility and a demo account; see BROKERS.md. (superseded: cTrader Open API was chosen; the open human step is running `ctrader-check` on a demo account) No credentials should be shared in chat or committed.
 
 ## Lot 1 (version 0.1.0)
 
@@ -111,9 +115,9 @@ The dashboard marks source labels as declared and provider-unverified. No browse
 
 ## Open limitations
 
-- No Git history or remote exists in the project directory.
-- No official broker documentation/account eligibility check or broker connection has been performed.
-- No demo/live execution, authentication, remote deployment, backup/restore proof, model registry, or production acceptance is claimed. The local same-dataset plan and holdout guards are advisory and do not establish tamper-proof one-time evaluation; direct evaluator use and a fresh or edited store remain outside the control boundary.
+- No Git history or remote exists in the project directory. (superseded: Git initialised on top of the remote's `Initial commit`, lot 1 corrections)
+- No official broker documentation/account eligibility check or broker connection has been performed. (superseded in part: official documentation was checked in lot 2 and a cTrader adapter built offline in lot 2b; account eligibility and any real connection remain unverified)
+- No demo/live execution, authentication, remote deployment, backup/restore proof, model registry, or production acceptance is claimed. (superseded in part: a model registry was added in lot 2; the other items still hold) The local same-dataset plan and holdout guards are advisory and do not establish tamper-proof one-time evaluation; direct evaluator use and a fresh or edited store remain outside the control boundary.
 - No browser-based visual or real-device review was performed; dashboard verification is limited to local HTTP behavior and source-level checks.
 - The dashboard still has no authentication and must remain bound to loopback. The SQLite audit trail is mutable.
 - The backtest's account, instrument-specification, and margin flags are illustrative simulation assumptions, and no broker contract or margin rules are modeled.

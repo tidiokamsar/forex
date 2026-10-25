@@ -357,9 +357,15 @@ class ExecutionBoundaryTests(unittest.TestCase):
         self.assert_refused(adapter, self.permit(RunMode.LIVE), "requires_demo_permit")
 
     def test_valid_permit_refused_while_demo_not_executable_or_not_allowed(self):
+        from astra.permits import ExecutionRefused
+
         adapter = self.connected(allow=False)
-        self.assert_refused(adapter, self.permit(), "demo_orders_not_explicitly_allowed")
-        self.assert_refused(adapter, self.permit(), "demo_not_executable_in_this_build")
+        # One refusal carries every failed condition; the permit is consumed by it.
+        with self.assertRaises(ExecutionRefused) as caught:
+            adapter.submit_order(self.request, self.permit())
+        for reason in ("demo_orders_not_explicitly_allowed", "demo_not_executable_in_this_build"):
+            self.assertIn(reason, str(caught.exception))
+        self.assertEqual(self.orders_sent(), [])
         allowed = self.connected(allow=True)
         self.assert_refused(allowed, self.permit(), "demo_not_executable_in_this_build")
 
@@ -406,6 +412,49 @@ class ExecutionBoundaryTests(unittest.TestCase):
             class Bypass(SimulatedBroker):
                 def submit_order(self, request, permit=None):
                     return self._send_order(request)
+
+    def test_a_mixin_cannot_replace_the_boundary_either(self):
+        """D-2 (independent QA): the guard checks the MRO, not only the class body."""
+        from astra.brokers.simulated import SimulatedBroker
+
+        class Mixin:
+            def submit_order(self, request, permit=None):
+                return self._send_order(request)
+
+        with self.assertRaises(TypeError):
+            class ViaMixin(Mixin, SimulatedBroker):
+                pass
+
+    def test_permit_binds_stop_and_order_type_and_is_single_use(self):
+        """D-1 (independent QA): a permit cannot drop the stop, change the order type, or be replayed."""
+        from dataclasses import replace
+        from datetime import datetime
+
+        from astra.brokers.simulated import SimulatedBroker
+        from astra.permits import _AUTHORITY, ExecutionRefused
+
+        broker = SimulatedBroker()
+        broker.set_quote("EURUSD", 1.1, 1.1001)
+        request = BrokerOrderRequest("ASTRA-d1", "EURUSD", Direction.LONG, 1_000.0, stop_loss=1.09)
+        permit = _AUTHORITY.issue(request, RunMode.SIMULATION, datetime.now(UTC))
+        for altered in (replace(request, stop_loss=None), replace(request, stop_loss=1.05), replace(request, order_type="LIMIT")):
+            with self.assertRaises(ExecutionRefused) as caught:
+                broker.submit_order(altered, permit)
+            self.assertIn("permit_does_not_match_request", str(caught.exception))
+        with self.assertRaises(ExecutionRefused):
+            broker.submit_order(request, replace(permit, stop_loss=None))
+        self.assertEqual(broker.submit_calls, 0)
+        broker.submit_order(request, permit)
+        with self.assertRaises(ExecutionRefused) as caught:
+            broker.submit_order(request, permit)
+        self.assertIn("permit_already_used", str(caught.exception))
+        self.assertEqual(broker.submit_calls, 1)
+        # Identical requests issued at the same instant still get distinct permits.
+        now = datetime.now(UTC)
+        self.assertNotEqual(
+            _AUTHORITY.issue(request, RunMode.SIMULATION, now).signature,
+            _AUTHORITY.issue(request, RunMode.SIMULATION, now).signature,
+        )
 
     def test_simulated_broker_also_enforces_the_boundary(self):
         from datetime import datetime

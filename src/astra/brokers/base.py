@@ -163,7 +163,8 @@ class BrokerAdapter(ABC):
 
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
-        if "submit_order" in cls.__dict__:
+        # Checked through the MRO, so a mixin placed before BrokerAdapter cannot replace it either.
+        if cls.submit_order is not BrokerAdapter.submit_order:
             raise TypeError(f"{cls.__name__} must implement _send_order, not override submit_order")
 
     def submit_order(self, request: BrokerOrderRequest, permit: object = None) -> BrokerOrderReport:

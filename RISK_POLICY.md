@@ -25,7 +25,7 @@ Paper-replay orders, and any future connector order, pass through `execution.Ord
 - contract size rounded **down** to the illustrative step, with minimum and maximum checks;
 - required margin versus free margin; an unknown currency conversion blocks.
 
-Exits must reduce an existing position. Hitting the daily loss limit freezes entries until the next UTC day and writes an `alert.risk_daily_loss_limit` audit event. No martingale or loss-recovery sizing exists: size always comes from the fixed risk fraction and the stop distance.
+Exits must reduce an existing position. Hitting the daily loss limit freezes entries for that account until the next UTC day and writes an `alert.risk_daily_loss_limit` audit event. The freeze and its day marker are per account (`OrderGateway(account_ref=...)`); other accounts keep trading, while the kill switch stays global. No martingale or loss-recovery sizing exists: size always comes from the fixed risk fraction and the stop distance.
 
 ## Changing limits
 

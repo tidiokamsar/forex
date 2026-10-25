@@ -46,18 +46,19 @@ OrderGateway: permission -> schema -> idempotency -> kill switch / freezes
 ## Execution boundary (lot 1 corrections)
 
 ```text
-OrderGateway (all checks) --issues--> ExecutionPermit (HMAC, process key, 30 s, bound to request)
+OrderGateway (all checks) --issues--> ExecutionPermit (HMAC, process key, 30 s, single-use, bound to request)
                                           |
-BrokerAdapter.submit_order (not overridable)
-   1. verify_permit        -> missing / forged / mismatched / expired -> ExecutionRefused
+BrokerAdapter.submit_order (not overridable, checked through the MRO)
+   1. verify_permit        -> missing / forged / mismatched / expired / already used -> ExecutionRefused
    2. _environment_guard   -> adapter-specific; default refuses
    3. _send_order          -> provider call
 ```
 
-- `SimulatedBroker` accepts only SIMULATION permits. `CTraderAdapter` accepts only DEMO permits and only when `isLive is False`, `RunMode.DEMO in EXECUTABLE_MODES` (not in this build) and `allow_demo_orders=True`. A refusal ends the order as `BROKER_REJECTED` with `execution_refused:<reason>`; nothing leaves the process.
+- The permit binds client order id, instrument, side, size, order type, stop-loss, purpose and mode, and is accepted once (`permit_already_used`).
+- `SimulatedBroker` accepts only SIMULATION permits. `CTraderAdapter` accepts only DEMO permits and only when `isLive is False`, `RunMode.DEMO in EXECUTABLE_MODES` (not in this build), `allow_demo_orders=True` and the adapter is `CONNECTED`. A refusal ends the order as `BROKER_REJECTED` with `execution_refused:<reason>`; nothing leaves the process.
 - Freezes are scoped per account (`TradingControls(scope=account_ref)`, `OrderGateway(account_ref=...)`); global freezes and the kill switch apply to every account.
-- `BrokerRequestError` (provider refused a request) is handled without a connection freeze; `BrokerUnavailable` (link, auth, session) still freezes entries and requires reconciliation.
-- `execution.resolution` lets a human resolve an `UNKNOWN` order with evidence; it never lifts freezes, reconciliation does.
+- `BrokerRequestError` (provider refused a request) is handled without a connection freeze: on submit the order ends `BROKER_REJECTED` with `broker_request_error:<code>`; during reconciliation the result is `FAILED` and `reconciliation_required` is kept. `BrokerUnavailable` (link, auth, session; cTrader `CTraderConnectionError`) still freezes entries (`connection_lost`) and requires reconciliation.
+- `execution.resolution` lets a human resolve an `UNKNOWN` or `SUBMITTED` order with evidence; it never lifts freezes, reconciliation does.
 
 ## Structural options considered
 
