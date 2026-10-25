@@ -19,6 +19,7 @@ import shutil
 import sqlite3
 import sys
 import time
+import types
 import unittest
 from dataclasses import asdict, replace
 from datetime import timedelta
@@ -48,9 +49,12 @@ from astra.research_policy import HOLDOUT_REUSE_POLICY, reuse_policy_looser_than
 from astra.storage import BacktestStore
 from astra.strategy_validation import (
     StrategyHoldoutEvaluation,
+    _store_trial_universe,
     evaluate_strategy_holdout_once,
     holdout_evidence,
+    overfitting_payload,
     rederive_holdout_evidence,
+    trial_universe_payload,
 )
 from astra.validation import _canonical_json
 from astra.validation import _sha256 as _plan_sha256
@@ -755,6 +759,157 @@ class ReuseVerdictPolicyTests(_Phase3Case):
                             ("suspect_abs_correlation", True), ("clip", None)):
             with self.subTest(name):
                 self.assertIn(name, reuse_policy_looser_than_floor({**payload, name: value}))
+
+
+# =============================================================================================
+# Phase 4: re-review of f1e0f76 (round 4 fixes). Ids A4-D-n.
+# =============================================================================================
+
+
+def _ar1(seed, n=60, phi=0.0, sd=1e-4):
+    rng, value, out = random.Random(seed), 0.0, []
+    for _ in range(n):
+        value = phi * value + rng.gauss(0.0, sd)
+        out.append(value)
+    return out
+
+
+class Phase4EvidenceTests(_Phase3Case):
+    def scratch_copy(self, name="scratch.sqlite3"):
+        scratch = Path(self.database).parent / name
+        shutil.copyfile(self.database, scratch)
+        return BacktestStore(scratch)  # no anchor: ASTRA_EVIDENCE_ANCHOR is not set in tests
+
+    # CONFIRMED DEFECT A4-D-1 (medium): the C-2 fix duck-types the store: any object with a
+    # holdout_for_protocol() answering {"status": "COMPLETED"} turns rederive_holdout_evidence back into a
+    # store-free oracle for a sealed, never-scored plan.
+    @unittest.expectedFailure
+    def test_rederivation_cannot_be_fooled_by_a_stub_store(self):
+        report = self.seal_original()
+        stub = types.SimpleNamespace(holdout_for_protocol=lambda _protocol_id: {"status": "COMPLETED"})
+        scored = None
+        with contextlib.suppress(ValueError):
+            scored = rederive_holdout_evidence(BARS, report.plan_manifest, store=stub)
+        self.assertIsNone(scored)
+        self.assertIsNone(self.store.holdout_for_protocol(report.plan_sha256))
+
+    # CONFIRMED DEFECT A4-D-2 (medium): peek by file copy. The holdout of an anchored store is scored in an
+    # unanchored copy of the file (allowed: C-4 keeps unanchored scoring for exploration), the result is seen,
+    # and the original store then scores the same holdout as if for the first time, anchored before scoring
+    # and therefore promotable. The integrator's own C-1 test adaptation uses exactly this copy. Neither the
+    # anchor nor the original attempt log can know about the copy.
+    @unittest.expectedFailure
+    def test_holdout_peeked_in_a_copy_of_the_store_cannot_be_scored_again(self):
+        _anchor, store = self.anchored_store()
+        with overfitting_double():
+            report = evaluate(store=store)
+        self.assertIsInstance(self.score(report, self.scratch_copy()), StrategyHoldoutEvaluation)  # the peek
+        second = None
+        with contextlib.suppress(ValueError):
+            second = self.score(report, store)
+        self.assertNotIsInstance(second, StrategyHoldoutEvaluation)
+
+    # CONFIRMED DEFECT A4-D-3 (medium): new store + new anchor. The binding stops swapping the anchor of a used
+    # store, but nothing links a fresh database file to the anchors that already recorded the holdout as
+    # consumed: the same bars and plan are sealed, anchored before scoring and scored again. The non-production
+    # waiver at promotion is the only remaining trace, and a production adapter would need a global registry.
+    @unittest.expectedFailure
+    def test_same_holdout_cannot_be_rescored_in_a_new_store_with_a_new_anchor(self):
+        _anchor, store = self.anchored_store()
+        with overfitting_double():
+            report = evaluate(store=store)
+        self.score(report, store)
+        other_anchor = LocalFileAnchor(Path(self.database).parent / "other-anchor.jsonl")
+        other = BacktestStore(Path(self.database).parent / "other.sqlite3", anchor=other_anchor)
+        other.initialize()
+        second = None
+        with contextlib.suppress(ValueError):
+            with overfitting_double():
+                again = evaluate(store=other)
+            second = self.score(again, other)
+        self.assertNotIsInstance(second, StrategyHoldoutEvaluation)
+
+    # CONFIRMED DEFECT A4-D-6 (low, fail-closed lock-out): a crash between anchor.append() and
+    # _record_binding() on the first anchoring leaves an anchor with a checkpoint and an unbound store; every
+    # later seal or scoring is refused for good (store_not_bound_to_anchor) and nothing can repair it.
+    @unittest.expectedFailure
+    def test_crash_between_anchor_append_and_binding_is_recoverable(self):
+        _anchor, store = self.anchored_store()
+        with patch("astra.anchoring._record_binding", side_effect=OSError("crash")), contextlib.suppress(OSError):
+            with overfitting_double():
+                evaluate(store=store)
+        try:
+            with overfitting_double():
+                report = evaluate(store=store)
+        except ValueError as exc:
+            self.fail(f"store locked out after the crash: {exc}")
+        self.assertIsNotNone(store.reuse_check(report.plan_sha256))
+
+    def test_regression_full_record_mint_with_forged_overfitting_is_detected(self):
+        """C-1 holds even when the minted attempt carries a complete record (report hash, logged universe)."""
+
+        registry = ModelRegistry(self.database)
+        registry.initialize()
+        report = self.seal_original()
+        selected = next(item for item in report.final_candidate_selection if item.selected)
+        registry.register_candidate(
+            actor=AGENT, model_id="m", version="1",
+            manifest={"dataset_identity": {"canonical_sha256": report.dataset_identity_sha256},
+                      "feature_set_version": "1", "code_sha256": report.implementation_sha256,
+                      "params": selected.config, "plan_sha256": report.plan_sha256, "candidate_id": selected.candidate_id},
+            criteria=PromotionCriteria(),
+        )
+        honest = asdict(self.score(report, self.scratch_copy()))
+        attempt = self.store.begin_holdout_evaluation(protocol_id=report.plan_sha256,
+                                                      dataset_identity_sha256=report.dataset_identity_sha256)
+        universe = _store_trial_universe(self.store, report.plan_sha256, report.overfitting.bar_seconds, None)
+        recorder = HoldoutAttempt.start(self.store, protocol_id=report.plan_sha256, plan=report.plan_manifest,
+                                        candidate_id=selected.candidate_id,
+                                        holdout_returns=OLD_RETURNS)
+        forged = {**honest, "overfitting": {**honest["overfitting"], "pbo": 0.0, "deflated_sharpe_probability": 1.0},
+                  "evidence_anchor": {"anchored_before_scoring": True}}
+        digest = self.store.complete_holdout_evaluation(evaluation_id=attempt["evaluation_id"], report=forged)
+        recorder.finish({**holdout_evidence(forged), "evaluation_id": attempt["evaluation_id"], "report_sha256": digest,
+                         "trial_universe": trial_universe_payload(universe),
+                         "overfitting": overfitting_payload(forged["overfitting"])}, None)
+        registry.record_evaluation(actor=AGENT, model_id="m", version="1", kind="holdout",
+                                   evidence=holdout_evidence(forged), holdout_evaluation_id=attempt["evaluation_id"])
+        failures = registry.check_promotion("m", "1", holdout_bars=BARS)
+        self.assertIn("holdout_overfitting_differs_from_rederivation", failures)
+        self.assertIn("overfitting_check_missing", failures)
+
+
+class Phase4DetectorTests(ReuseVerdictPolicyTests):
+    # CONFIRMED DEFECT A4-D-4 (medium): prewhitening creates false negatives on persistent paths. For an
+    # AR(1) holdout with phi = 0.95, a copy with noise at 0.2x the return scale is CLEAR (20/20 in a probe;
+    # at 0.1x 19/20 CLEAR), while the same noise on an i.i.d. path is CONFLICT (16/20). Removing the common
+    # lag-1 part leaves only the small innovations, which the added noise then swamps.
+    @unittest.expectedFailure
+    def test_noisy_copy_of_a_persistent_holdout_is_not_clear(self):
+        old = _ar1(3, phi=0.95)
+        scale = (sum(value * value for value in old) / len(old)) ** 0.5
+        rng = random.Random(0)
+        self.seal_direct(old, "OLD", 2030, "a" * 64)
+        new = self.seal_direct([value + rng.gauss(0.0, 0.2 * scale) for value in old], "NEW", 2130, "b" * 64)
+        self.assertNotEqual(self.store.reuse_check(new)["verdict"], "CLEAR")
+
+    # CONFIRMED DEFECT A4-D-5 (medium): sparse paths are compared only by match share with an absolute
+    # tolerance, so a sparse holdout whose moves are all amplified 1.5x (same bars, same timing) is CLEAR,
+    # while a dense copy with every return doubled is CONFLICT (correlation is scale-free).
+    @unittest.expectedFailure
+    def test_amplified_copy_of_a_sparse_holdout_is_not_clear(self):
+        rng = random.Random(5)
+        old = [0.0 if rng.random() < 0.9 else rng.choice((-1.0, 1.0)) * 1e-4 for _ in range(60)]
+        self.seal_direct(old, "OLD", 2030, "a" * 64)
+        new = self.seal_direct([1.5 * value for value in old], "NEW", 2130, "b" * 64)
+        self.assertNotEqual(self.store.reuse_check(new)["verdict"], "CLEAR")
+
+    def test_regression_dense_copies_and_sparse_exact_copies_are_refused(self):
+        old = _ar1(4)
+        self.seal_direct(old, "OLD", 2030, "a" * 64)
+        for index, new in enumerate(([2.0 * v for v in old], [v + 1e-4 for v in old], [-v for v in reversed(old)])):
+            with self.subTest(index), self.assertRaises(ValueError):
+                self.seal_direct(new, f"N{index}", 2100 + index, f"{index:064d}")
 
 
 if __name__ == "__main__":
