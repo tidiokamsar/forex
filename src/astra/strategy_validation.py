@@ -33,6 +33,7 @@ from . import attempts, features, models, regimes, research, risk, signal_backte
 from .models import BacktestConfig, BacktestResult, CostModel, MarketBar
 from .registry import EVIDENCE_FIELDS
 from .research import _prepare_bars
+from .research_policy import STATISTICAL_POLICY
 from .signal_backtest import run_signal_backtest
 from .strategies import (
     BREAKOUT_NAME,
@@ -79,13 +80,14 @@ MAX_PBO_SLICES = 8
 PBO_PERIOD_BARS = 5
 # Minimum information before the statistics are trusted (otherwise the gate stays unmet):
 # the deflated Sharpe needs a real sample, and the PBO matrix must not be mostly empty or repetitive.
-MIN_DSR_RETURNS = 30
+MIN_DSR_RETURNS = STATISTICAL_POLICY.min_dsr_returns
 # Mark-to-market bars of one held position are not independent observations: the DSR also
 # needs this many trades in its sample, and each PBO variant at least one trade per slice (Lot 4, N-1).
-MIN_DSR_TRADES = 30
-MIN_PBO_NONZERO_ROW_FRACTION = 0.5
+MIN_DSR_TRADES = STATISTICAL_POLICY.min_dsr_trades
+MIN_PBO_TRADES_PER_SLICE = STATISTICAL_POLICY.min_pbo_trades_per_slice
+MIN_PBO_NONZERO_ROW_FRACTION = STATISTICAL_POLICY.min_pbo_nonzero_row_fraction
 # C(2, 1) = 2 combinations can only give PBO 0, 0.5 or 1; at least 4 slices (6 combinations) are required.
-MIN_PBO_SLICES = 4
+MIN_PBO_SLICES = STATISTICAL_POLICY.min_pbo_slices
 # More than this fraction of CSCV combinations without an eligible in-sample variant leaves too little evidence.
 MAX_PBO_ABSTAINED_FRACTION = 0.5
 PBO_MATRIX = (
@@ -701,6 +703,7 @@ def evaluate_strategy_holdout_once(
         plan_manifest=report.plan_manifest,
         holdout_returns=_holdout_returns(history, holdout_start_index),
     )
+    store.require_anchor_consistency()
     attempt = store.begin_holdout_evaluation(protocol_id=report.plan_sha256, dataset_identity_sha256=identity_hash)
     if attempt["status"] == "COMPLETED":
         return attempt["report"]
@@ -780,10 +783,12 @@ def evaluate_strategy_holdout_once(
             holdout_evidence(evaluation),
             _sharpe(holdout_returns) if selected_result else None,
         )
+        store.anchor_now()
         return evaluation
     except Exception as exc:
         store.fail_holdout_evaluation(evaluation_id=attempt["evaluation_id"], error_type=type(exc).__name__)
         holdout_attempt.fail(exc)
+        store.anchor_now()
         raise
 
 
@@ -1131,7 +1136,10 @@ def assess_overfitting(
         # Identical, noise-level or rescaled copies: any PBO would come from tie-breaking (Lot 4 QA, D-16 to D-18).
         low_information.append(f"pbo: {distinct_variants} distinguishable variant(s) of {columns}")
     elif count_matrix and (
-        thin := sum(1 for column in range(columns) if sum(row[column] for row in count_matrix) < n_slices)
+        thin := sum(
+            1 for column in range(columns)
+            if sum(row[column] for row in count_matrix) < MIN_PBO_TRADES_PER_SLICE * n_slices
+        )
     ):
         low_information.append(f"pbo: {thin} of {columns} variants have fewer trades than slices ({n_slices})")
     elif inactive_variants:
@@ -1367,6 +1375,9 @@ def _implementation_sha256() -> str:
         for module in (models, research, risk, features, regimes, strategies, signal_backtest, validation)
     ]
     paths.append(Path(__file__))
+    # The versioned thresholds and the reuse detector are part of the research implementation:
+    # changing either invalidates holdouts scored before (code_changed_since_holdout).
+    paths.extend(Path(__file__).with_name(name) for name in ("research_policy.py", "holdout_reuse.py"))
     statistics_module = Path(__file__).with_name("overfitting.py")
     if statistics_module.exists():
         paths.append(statistics_module)

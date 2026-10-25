@@ -765,6 +765,10 @@ def verify_attempt_chain(database_path: str | Path, expected_head: str | None = 
 # -- recorders used by the evaluation code paths ------------------------------------------
 
 
+def new_experiment_id() -> str:
+    return f"astra-exp-{uuid.uuid4()}"
+
+
 def log_for_store(store: Any) -> AttemptLog | None:
     """The attempt log of a store with a ``path`` (``BacktestStore``); ``None`` records nothing."""
 
@@ -829,7 +833,8 @@ class WalkForwardAttempts:
 
     def __init__(self, log: AttemptLog | None, *, experiment_id: str | None = None) -> None:
         self._log = log
-        self._experiment_id = experiment_id
+        # Every attempt belongs to a global experiment; one is minted when the caller has none (Lot 4).
+        self._experiment_id = experiment_id or new_experiment_id()
         self.run_id = str(uuid.uuid4())
         self._plan: Mapping[str, Any] = {}
         self._context: dict[str, Any] = {}
@@ -971,6 +976,12 @@ class HoldoutAttempt:
         log = log_for_store(store)
         if log is None:
             return cls(None, None)
+        if not experiment_id:
+            # The holdout belongs to the experiment that ran the plan's trials.
+            plan_experiments = sorted(
+                {state.get("experiment_id") for state in log.attempts(protocol_id=protocol_id) if state.get("experiment_id")}
+            )
+            experiment_id = plan_experiments[0] if plan_experiments else new_experiment_id()
         descriptor = next((item for item in plan.get("candidates") or () if item.get("candidate_id") == candidate_id), None)
         candidate = _candidate_fields(descriptor, plan) if descriptor else {"params": {}}
         holdout = plan.get("holdout") or {}

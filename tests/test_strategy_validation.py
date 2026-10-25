@@ -191,6 +191,8 @@ class StrategyWalkForwardTests(unittest.TestCase):
         self.assertNotEqual(mutated.dataset_identity_sha256, self.report.dataset_identity_sha256)
 
     @patch("astra.strategy_validation.MIN_DSR_RETURNS", 0)
+    @patch("astra.strategy_validation.MIN_DSR_TRADES", 0)
+    @patch("astra.strategy_validation.MIN_PBO_TRADES_PER_SLICE", 0)
     @patch("astra.strategy_validation.MIN_PBO_NONZERO_ROW_FRACTION", 0.0)
     def test_overfitting_inputs_use_all_development_slices_in_order(self):
         # Plumbing test: the information guards are disabled here and tested separately.
@@ -279,7 +281,7 @@ class SealedHoldoutTests(unittest.TestCase):
         self.assertEqual(events.count("research.holdout_completed"), 1)
         # A different plan for the same canonical dataset is rejected before scoring.
         other = WalkForwardProtocol(fold_count=2, minimum_training_bars=60, validation_bars=40, holdout_bars=40, minimum_candidate_trades=0)
-        with overfitting_double(), self.assertRaisesRegex(ValueError, "already sealed"):
+        with overfitting_double(), self.assertRaisesRegex(ValueError, "already sealed|already scored"):
             evaluate(protocol=other, store=self.store)
 
     def test_failed_holdout_attempt_stays_consumed(self):
@@ -300,6 +302,8 @@ class SealedHoldoutTests(unittest.TestCase):
             self.assertEqual(self.holdout(report).status, "COMPLETED")
 
     @patch("astra.strategy_validation.MIN_DSR_RETURNS", 0)
+    @patch("astra.strategy_validation.MIN_DSR_TRADES", 0)
+    @patch("astra.strategy_validation.MIN_PBO_TRADES_PER_SLICE", 0)
     @patch("astra.strategy_validation.MIN_PBO_NONZERO_ROW_FRACTION", 0.0)
     def test_evidence_matches_registry_fields_and_feeds_the_gates(self):
         # Plumbing test: the information guards are disabled here and tested separately.
@@ -652,6 +656,7 @@ class TrialUniverseAndGuardTests(unittest.TestCase):
         self.assertIsNone(result.pbo)
         self.assertIn("pbo: 2 slices (need at least 4)", result.errors)
 
+    @patch("astra.strategy_validation.MIN_PBO_TRADES_PER_SLICE", 0)  # isolate the abstention guard
     def test_mostly_abstaining_pbo_is_low_information(self):
         # One trade per variant in block 0 and one in block 1, two required: only the 15 of 70
         # combinations holding both blocks in-sample can select, 55 abstain (> 50%).

@@ -15,6 +15,20 @@ from typing import Any
 from . import holdout_reuse
 from .attempts import SCHEMA_SQL as ATTEMPT_SCHEMA_SQL
 from .models import BacktestResult
+from .research_policy import HOLDOUT_REUSE_POLICY
+
+
+def _reuse_findings(other_id: str, returns: list[float], other_returns: list[float]) -> list[dict]:
+    assessment = holdout_reuse.assess_reuse(returns, other_returns)
+    if assessment.verdict == holdout_reuse.CONFLICT:
+        # Same price path relabelled, shifted, rescaled, inverted, reversed, resampled or nudged.
+        raise ValueError(
+            "the holdout price path matches the holdout of an already sealed plan "
+            f"({other_id[:12]}, |correlation| {assessment.max_abs_correlation}); a holdout can be scored only once"
+        )
+    if assessment.verdict == holdout_reuse.CLEAR:
+        return []
+    return [{"protocol_id": other_id, **assessment.payload()}]
 
 
 def _now() -> str:
@@ -30,8 +44,15 @@ def _json_default(value: Any) -> str:
 
 
 class BacktestStore:
-    def __init__(self, database_path: str | Path) -> None:
+    def __init__(self, database_path: str | Path, anchor: Any = None) -> None:
+        """``anchor`` is an ``astra.anchoring.EvidenceAnchor``; by default ``ASTRA_EVIDENCE_ANCHOR`` (or none)."""
+
         self.path = Path(database_path)
+        if anchor is None:
+            from .anchoring import anchor_from_environment
+
+            anchor = anchor_from_environment()
+        self.anchor = anchor
 
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -94,6 +115,18 @@ class BacktestStore:
                 BEGIN SELECT RAISE(ABORT, 'holdout signatures are append-only: UPDATE refused'); END;
                 CREATE TRIGGER IF NOT EXISTS holdout_signatures_no_delete BEFORE DELETE ON holdout_signatures
                 BEGIN SELECT RAISE(ABORT, 'holdout signatures are append-only: DELETE refused'); END;
+                -- Verdict of the reuse detector for each sealed plan, under the policy recorded with it.
+                CREATE TABLE IF NOT EXISTS holdout_reuse_checks (
+                    protocol_id TEXT PRIMARY KEY REFERENCES research_protocols(protocol_id),
+                    verdict TEXT NOT NULL,
+                    findings_json TEXT NOT NULL,
+                    policy_json TEXT NOT NULL,
+                    checked_at TEXT NOT NULL
+                );
+                CREATE TRIGGER IF NOT EXISTS holdout_reuse_checks_no_update BEFORE UPDATE ON holdout_reuse_checks
+                BEGIN SELECT RAISE(ABORT, 'holdout reuse checks are append-only: UPDATE refused'); END;
+                CREATE TRIGGER IF NOT EXISTS holdout_reuse_checks_no_delete BEFORE DELETE ON holdout_reuse_checks
+                BEGIN SELECT RAISE(ABORT, 'holdout reuse checks are append-only: DELETE refused'); END;
                 CREATE TABLE IF NOT EXISTS holdout_evaluations (
                     evaluation_id TEXT PRIMARY KEY,
                     protocol_id TEXT NOT NULL REFERENCES research_protocols(protocol_id),
@@ -160,7 +193,7 @@ class BacktestStore:
         returns = [float(value) for value in holdout_returns] if holdout_returns is not None else []
         # The similarity search is slow (see astra.holdout_reuse), so it runs before the write lock;
         # plans sealed in between are compared again inside the lock.
-        checked = self._refuse_shared_price_path(protocol_id, dataset_identity_sha256, returns)
+        checked, findings = self._assess_against_sealed(protocol_id, dataset_identity_sha256, returns)
         now = _now()
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -182,6 +215,15 @@ class BacktestStore:
                 )
             if holdout_reuse.content_sha256(returns) != content:
                 raise ValueError("holdout returns do not match holdout.content_sha256")
+            if self.anchor is not None:
+                from .anchoring import consumed_holdout_fingerprints
+
+                # The external anchor survives a restore of an older database (Lot 4, B-8).
+                if content in consumed_holdout_fingerprints(self.anchor):
+                    raise ValueError(
+                        "the evidence anchor records this holdout price path as already scored; "
+                        "a holdout can be scored only once"
+                    )
             # The attempt log outlives deleted seal rows: a holdout it records as scored stays spent (Lot 4, N-5).
             spent = db.execute(
                 "SELECT protocol_id FROM research_attempt_events WHERE kind = 'holdout' "
@@ -216,16 +258,17 @@ class BacktestStore:
             ).fetchall():
                 other_plan = json.loads(other["plan_json"])
                 other_returns = json.loads(other["returns_json"]) if other["returns_json"] else None
-                if (other_plan.get("holdout") or {}).get("content_sha256") == content or (
-                    other_returns is not None
-                    and other["protocol_id"] not in checked
-                    and holdout_reuse.shares_price_path(returns, other_returns)
-                ):
-                    # Same price path relabelled, shifted, rescaled, inverted or nudged: the holdout is spent.
+                if (other_plan.get("holdout") or {}).get("content_sha256") == content:
                     raise ValueError(
                         "the holdout price path matches the holdout of an already sealed plan "
                         f"({other['protocol_id'][:12]}); a holdout can be scored only once"
                     )
+                if other_returns is None:
+                    # Sealed before Lot 4: its path cannot be compared, so reuse cannot be ruled out.
+                    findings.append({"protocol_id": other["protocol_id"], "verdict": holdout_reuse.UNDETERMINED,
+                                     "reason": "sealed plan without stored holdout returns"})
+                elif other["protocol_id"] not in checked:
+                    findings.extend(_reuse_findings(other["protocol_id"], returns, other_returns))
                 other_instrument = other_plan.get("instrument")
                 if other_returns is not None and instrument and other_instrument and instrument != other_instrument:
                     continue  # another instrument's holdout is independent data
@@ -258,6 +301,16 @@ class BacktestStore:
                     "INSERT INTO holdout_signatures (protocol_id, returns_json) VALUES (?, ?)",
                     (protocol_id, json.dumps(returns, allow_nan=False, separators=(",", ":"))),
                 )
+                db.execute(
+                    "INSERT INTO holdout_reuse_checks VALUES (?, ?, ?, ?, ?)",
+                    (
+                        protocol_id,
+                        holdout_reuse.worst([item["verdict"] for item in findings]),
+                        json.dumps(findings, sort_keys=True, separators=(",", ":")),
+                        json.dumps(HOLDOUT_REUSE_POLICY.payload(), sort_keys=True, separators=(",", ":")),
+                        now,
+                    ),
+                )
             row = db.execute(
                 "SELECT * FROM research_protocols WHERE protocol_id = ?",
                 (protocol_id,),
@@ -284,27 +337,62 @@ class BacktestStore:
                     ),
                 )
 
-    def _refuse_shared_price_path(self, protocol_id: str, dataset_identity_sha256: str, returns: list[float]) -> set:
-        """Compare ``returns`` with every sealed holdout's stored returns outside any write lock."""
+    def _assess_against_sealed(
+        self, protocol_id: str, dataset_identity_sha256: str, returns: list[float]
+    ) -> tuple[set, list[dict]]:
+        """Compare ``returns`` with every sealed holdout's stored returns outside any write lock.
+
+        Raises on a ``CONFLICT``; returns the compared protocol ids and the
+        ``SUSPECT`` / ``UNDETERMINED`` findings, recorded with the new plan.
+        """
 
         if not returns:
-            return set()
+            return set(), []
         with self._connect() as db:
             if db.execute("SELECT 1 FROM research_protocols WHERE protocol_id = ?", (protocol_id,)).fetchone():
-                return set()  # idempotent re-seal: checked when it was first sealed
+                return set(), []  # idempotent re-seal: checked when it was first sealed
             rows = db.execute(
                 """SELECT p.protocol_id, s.returns_json FROM research_protocols p
                    JOIN holdout_signatures s ON s.protocol_id = p.protocol_id
                    WHERE p.dataset_sha256 <> ? AND p.protocol_id <> ?""",
                 (dataset_identity_sha256, protocol_id),
             ).fetchall()
+        findings: list[dict] = []
         for row in rows:
-            if holdout_reuse.shares_price_path(returns, json.loads(row["returns_json"])):
-                raise ValueError(
-                    "the holdout price path matches the holdout of an already sealed plan "
-                    f"({row['protocol_id'][:12]}); a holdout can be scored only once"
-                )
-        return {row["protocol_id"] for row in rows}
+            findings.extend(_reuse_findings(row["protocol_id"], returns, json.loads(row["returns_json"])))
+        return {row["protocol_id"] for row in rows}, findings
+
+    def reuse_check(self, protocol_id: str) -> dict[str, Any] | None:
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM holdout_reuse_checks WHERE protocol_id = ?", (protocol_id,)).fetchone()
+        if row is None:
+            return None
+        return {
+            "verdict": row["verdict"],
+            "findings": json.loads(row["findings_json"]),
+            "policy": json.loads(row["policy_json"]),
+            "checked_at": row["checked_at"],
+        }
+
+    def require_anchor_consistency(self) -> None:
+        """Refuse to score a holdout when the store disagrees with the evidence anchor (restore, rewrite)."""
+
+        if self.anchor is None:
+            return
+        from .anchoring import verify_store_against_anchor
+
+        verification = verify_store_against_anchor(self.path, self.anchor)
+        errors = [code for code in verification.errors if code != "anchor_empty"]
+        if errors:
+            raise ValueError(f"the store is inconsistent with the evidence anchor: {', '.join(errors)}")
+
+    def anchor_now(self) -> None:
+        """Append a checkpoint of the store to the evidence anchor, when one is configured."""
+
+        if self.anchor is not None:
+            from .anchoring import anchor_store
+
+            anchor_store(self.path, self.anchor)
 
     def begin_holdout_evaluation(
         self, *, protocol_id: str, dataset_identity_sha256: str
@@ -321,6 +409,16 @@ class BacktestStore:
                 raise ValueError("research protocol must be sealed before holdout evaluation")
             if protocol["dataset_sha256"] != dataset_identity_sha256:
                 raise ValueError("market-bar identity does not match the sealed protocol")
+            check = db.execute(
+                "SELECT verdict FROM holdout_reuse_checks WHERE protocol_id = ?", (protocol_id,)
+            ).fetchone()
+            if check is not None and check["verdict"] in (holdout_reuse.SUSPECT, holdout_reuse.UNDETERMINED):
+                # Scoring a holdout that may already be spent would leak it again (Lot 4, s52): only a new,
+                # independent holdout clears the doubt.
+                raise ValueError(
+                    f"holdout reuse is {check['verdict'].lower()} for this plan; "
+                    "score a new, independent holdout instead"
+                )
             existing = db.execute(
                 "SELECT * FROM holdout_evaluations WHERE dataset_sha256 = ?",
                 (dataset_identity_sha256,),

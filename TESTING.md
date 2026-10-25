@@ -70,4 +70,21 @@ Independent QA pending. All inputs are synthetic or hand-built matrices.
 | P-02/Q-01 real statistics module on the development matrix | `test_strategy_validation.OverfittingModuleIntegrationTests` |
 | CLI `evaluate-strategies`: register requires holdout, inactive candidate, blockers, retry returns stored holdout, second plan refused | `test_cli_operations.test_evaluate_strategies_seals_plan_and_records_inactive_candidate` |
 
+## Lot 4 research-integrity evidence
+
+All inputs are synthetic, hand-built or produced by the local simulator; nothing ran against real market data or a broker.
+
+| Item | Tests |
+|---|---|
+| Independent security review (agent A): fingerprint evasion, legacy plans, minted holdouts, verifier override, detector evasions, restore | `test_lot4_security_review` |
+| Adversarial baseline and scenarios (agent D) | `test_lot4_adversarial` |
+| Verification of the integrated fixes (agent D) | `test_lot4_verification` |
+| Re-derivation of holdout evidence from bars, anchored promotion, restore of an older backup, reuse verdicts | `test_lot4_integration` |
+| Reuse detector calibration (positive and negative synthetic sets) | `test_holdout_reuse_calibration` |
+| Attempt registry: recording, statuses, store-wide count, tamper detection | `test_attempts` |
+| Evidence anchor: checkpoint chain, file tampering, restore, chain rewrite | `test_anchoring` |
+| PBO/CSCV with the selection rule, DSR paper example, trial universe, guards | `test_overfitting`, `test_strategy_validation` |
+
+Remaining expected failures document open residuals; each carries a `CONFIRMED DEFECT` or `RESIDUAL` comment, and an unexpected success means a marker must be removed after checking.
+
 Record the exact command, exit code, and observed summary in `ACCEPTANCE_REPORT.md`. A skipped, interrupted, or unavailable check is not a pass.

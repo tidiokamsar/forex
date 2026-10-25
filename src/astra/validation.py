@@ -715,6 +715,7 @@ def evaluate_holdout_once(
         plan_manifest=walk_forward_report.plan_manifest,
         holdout_returns=_holdout_returns(history, holdout_start_index),
     )
+    store.require_anchor_consistency()
     attempt = store.begin_holdout_evaluation(
         protocol_id=walk_forward_report.plan_sha256,
         dataset_identity_sha256=identity_hash,
@@ -829,6 +830,7 @@ def evaluate_holdout_once(
             if selected_result
             else None,
         )
+        store.anchor_now()
         return evaluation
     except Exception as exc:
         store.fail_holdout_evaluation(
@@ -836,6 +838,7 @@ def evaluate_holdout_once(
             error_type=type(exc).__name__,
         )
         holdout_attempt.fail(exc)
+        store.anchor_now()
         raise
 
 

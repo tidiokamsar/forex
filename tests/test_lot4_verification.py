@@ -325,7 +325,6 @@ class AttemptRegistryTamperTests(TempStoreMixin):
 
     # VERIFY FAIL N-2b (Medium): the chain head snapshotted into the evidence at record time is never
     # checked; a consistent rewrite after recording passes as an intact chain.
-    @unittest.expectedFailure
     def test_rewrite_after_recording_breaks_the_snapshotted_head(self):
         evaluate(store=self.store)  # exploration on BARS
         self.register_score_record(bars=INDEPENDENT_BARS, candidates=TWO_CANDIDATES)
@@ -336,7 +335,6 @@ class AttemptRegistryTamperTests(TempStoreMixin):
     # VERIFY FAIL N-3 (Medium; was D-1): the stored holdout report is protected by triggers only. With the
     # triggers dropped, report and evidence forged consistently and the triggers recreated, the version is
     # promoted to CHAMPION, although the chained holdout attempt still holds the genuine evidence metrics.
-    @unittest.expectedFailure
     def test_forged_report_is_caught_by_the_chained_holdout_metrics(self):
         _report, _holdout, evaluation_id = self.register_score_record()
         drop_all_triggers(self.path)
@@ -361,7 +359,6 @@ class AttemptRegistryTamperTests(TempStoreMixin):
 
     # VERIFY FAIL N-5 (Medium; was D-7): with triggers dropped, deleting the seal rows re-opens the holdout;
     # the chained holdout attempt (with its holdout_content_sha256) is not consulted when sealing.
-    @unittest.expectedFailure
     def test_deleted_seal_rows_are_caught_by_the_attempt_log(self):
         score_holdout(self.store, evaluate(store=self.store))
         drop_all_triggers(self.path)
@@ -500,7 +497,6 @@ class ReuseDetectorTests(TempStoreMixin):
     # VERIFY FAIL N-8 (Low, availability; fails closed): independent holdouts that are mostly flat (forward-filled
     # or quiet bars, 10% non-zero returns) match by chance: the MAD scale collapses and a single coincident
     # non-zero return makes a window correlation of about 1. About a quarter of random pairs are refused.
-    @unittest.expectedFailure
     def test_sparse_independent_holdouts_do_not_match(self):
         rng = random.Random(1)
 
@@ -528,7 +524,6 @@ class MarkToMarketInformationTests(unittest.TestCase):
     # with mark-to-market per-bar returns, ONE position held for 60 bars passes the "30 non-zero returns" DSR
     # guard and the "non-zero periods" PBO guard: status COMPLETED, PBO about 0.01, DSR 1.0, from one trade.
     # The guards count periods, not independent decisions (trades). Regression of the intent of D-19.
-    @unittest.expectedFailure
     def test_single_held_trade_is_low_information(self):
         rng = random.Random(9)
         matrix = [[rng.gauss(0, 5) for _ in range(3)] + [rng.gauss(1.0, 3)] for _ in range(64)]

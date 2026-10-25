@@ -104,6 +104,45 @@ CLI (read-only, database opened with `mode=ro`): `astra attempts list [--protoco
 
 Limits, stated plainly: SQLite is not tamper-proof. Triggers refuse `UPDATE`, `DELETE` and an `INSERT` that does not link to the chain head, and `verify` detects an edited row (row hash), a removed row (sequence gap, or `sqlite_sequence` ahead of the last row), reordering (sequence and previous-hash links), missing triggers and inconsistent status sequences. An owner with write access to the file can still drop the triggers, rewrite or empty the whole table and its `sqlite_sequence` row, and recompute every hash: such a consistent rewrite passes `verify` unless the chain head was anchored outside the database beforehand (printed, exported, committed or sent elsewhere) and is passed as `--expected-head`. Even then, an anchor only proves the rows up to that point were not rewritten. Exploration done without a store (`store=None`), in another database file or outside ASTRA is not recorded and cannot be counted.
 
+### Research policy (`research_policy`, `astra-research-policy-0.1.0-provisional`)
+
+Thresholds are provisional technical floors, versioned in code, not validated financial recommendations. An agent cannot lower them through an API, a CLI flag or a database row; a change is a reviewed code change that bumps the version, is justified here and, because `research_policy.py` and `holdout_reuse.py` are part of the research implementation hash, invalidates every holdout scored before (`code_changed_since_holdout`).
+
+| Threshold | Value | Meaning |
+|---|---|---|
+| `conflict_abs_correlation` | 0.98 | holdout reuse conflict: the plan is refused |
+| `suspect_abs_correlation` | 0.95 | suspect: sealed, promotion refused until a new independent holdout is used |
+| `min_holdout_returns` | 16 | technical floor to run the reuse diagnostic; not enough to promote |
+| `min_dsr_trades` | 30 | technical floor for a preliminary deflated Sharpe; not evidence of profitability |
+| `min_dsr_returns` | 30 | DSR sample length floor |
+| `min_pbo_slices`, `min_pbo_trades_per_slice`, `min_pbo_nonzero_row_fraction` | 4, 1, 0.5 | PBO information floors |
+
+When the trial count, the PBO matrix or the observations are insufficient, the status is `LOW_INFORMATION`, no PBO or DSR value is published and promotion is blocked (`overfitting_check_missing`). The development (walk-forward) DSR uses the plan's own trials and is informative only; the promotable DSR is the holdout's, with the store-wide trial count.
+
+### Holdout reuse detection and calibration (`holdout_reuse`)
+
+At seal time every new holdout is compared with every sealed holdout of the store: exact fingerprint, holdout period (same instrument), the attempt log's scored holdouts, the external anchor's consumed holdouts, and `assess_reuse`. `assess_reuse` compares robust-standardized log returns (not raw prices) over aligned windows at every offset, ignoring the sign, also against the reversed path and against two-bar aggregations of either side. The verdict is recorded, append-only, in `holdout_reuse_checks` with the policy used: `CONFLICT` refuses the plan; `SUSPECT` (correlated beyond 0.95) and `UNDETERMINED` (no comparable window, or a plan sealed before lot 4 without stored returns) are sealed but promotion fails (`holdout_reuse_suspected`, `holdout_reuse_undetermined`); no statement by an agent can clear them, only a new independent holdout. A verdict recorded under a looser policy fails (`holdout_reuse_policy_below_floor`).
+
+Calibration (`tests/test_holdout_reuse_calibration.py`, 40 synthetic pairs per set, 40 returns, fixed seeds; synthetic data, so these rates say nothing about real markets):
+
+| Set | Conflict | Suspect | Undetermined | Clear |
+|---|---|---|---|---|
+| exact copy, nudge 1e-9, offset 1 or 3 bars, inverted quote, time reversed, resampled x2, noise 0.1x | 40 | 0 | 0 | 0 |
+| noise 0.2x the return scale | 30 | 10 | 0 | 0 |
+| noise 0.3x | 7 | 27 | 0 | 6 |
+| noise 0.5x | 0 | 8 | 0 | 32 |
+| distinct path, correlation 0.98 | 30 | 10 | 0 | 0 |
+| distinct path, correlation 0.95 | 3 | 30 | 0 | 7 |
+| distinct path, correlation 0.90 | 0 | 9 | 0 | 31 |
+| independent gaussian / heavy-tailed | 0 | 0 | 0 | 40 |
+| independent sparse (90% flat) | 0 | 0 | 40 | 0 |
+
+False negatives: copies with noise from about 0.3x the return scale upward are increasingly missed, and an arbitrarily noisy copy cannot be told apart from independent data; resampling factors other than two, shared runs shorter than about 1.25 windows and mostly flat windows are not compared. False positives: distinct but strongly correlated data (correlated pairs, overlapping baskets) is flagged like a copy, by design; sparse data is always `UNDETERMINED`, which blocks promotion (fail closed). Cost: two statistics over every alignment, about 8 s for 1000 x 1000 returns in pure Python, per sealed plan, computed before the write lock (it grows with every sealed plan). The second statistic, the share of aligned non-flat returns equal within 5% of the median absolute return (conflict at 80%), catches near-constant paths that keep little signal once centred (Lot 4 regression s52).
+
+### Evidence anchoring (`anchoring`)
+
+An `EvidenceAnchor` keeps, outside SQLite and its backups, a hash-chained series of checkpoints: previous and current attempt-chain head, sequence number, consumed holdouts (evaluation id, status, content fingerprint), sealed protocols and experiment ids. `verify_store_against_anchor` detects a restored older database (`store_behind_anchor`, `consumed_holdout_missing`, `sealed_protocol_missing`), a divergent or rewritten chain (`attempt_chain_diverged`, `attempt_log_tampered`) and missing experiments. The store checks the anchor before scoring a holdout (`require_anchor_consistency`), refuses to seal a holdout the anchor records as consumed, and appends a checkpoint after each holdout (`anchor_now`). Promotion fails without an anchor (`evidence_anchor_missing`), on any inconsistency (`evidence_anchor_inconsistent:<code>`) and when the holdout was never anchored (`holdout_not_anchored`). Configuration: `ASTRA_EVIDENCE_ANCHOR` names a file for the only adapter provided, `LocalFileAnchor`, which is explicitly **not production grade** (`production_grade = False`): its owner can truncate, replace or delete it. The production target is an external immutable store (WORM / Object Lock or equivalent); no provider is implemented or configured, so production immutability is **not** established.
+
 ### CLI `evaluate-strategies`
 
 Flags: `--csv`, `--source-type` (required with `--csv`), `--source-name`, `--interval-seconds`, `--folds` (2), `--minimum-training-bars` (60), `--validation-bars` (20), `--holdout-bars` (20), `--minimum-candidate-trades` (1), `--evaluate-holdout`, `--register` (requires `--evaluate-holdout`, `--model-id`, `--version`). Without `--csv` it uses the bundled synthetic fixture after its SHA-256 check. It opens an experiment before running and closes it as `NEEDS_MORE_RESEARCH` or `REJECTED` (failed runs are kept as rejected). With `--register` it records an inactive `CANDIDATE` with default criteria frozen before the holdout is scored, then the holdout evidence, and returns the `promotion_blockers`. It never promotes, returns `external_orders: false`, and adds a `SYNTHETIC` warning for synthetic data.

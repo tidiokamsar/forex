@@ -8,10 +8,14 @@ from dataclasses import replace
 from unittest.mock import patch
 
 from _support import workspace_tempdir
+from astra import holdout_reuse
+from astra.anchoring import LocalFileAnchor
+from astra.backup import create_backup, restore_backup
 from astra.governance import Actor, Role
 from astra.registry import ModelRegistry, PromotionCriteria
 from astra.storage import BacktestStore
 from astra.strategy_validation import evaluate_strategy_holdout_once, holdout_evidence, rederive_holdout_evidence
+from test_execution import OPERATOR
 from test_strategy_validation import BARS, PROTOCOL, evaluate, overfitting_double
 
 AGENT = Actor("agent", Role.RESEARCH_AGENT)
@@ -25,14 +29,18 @@ REDERIVATION_FAILURES = {
 @patch("astra.strategy_validation.MIN_DSR_RETURNS", 0)
 @patch("astra.strategy_validation.MIN_PBO_NONZERO_ROW_FRACTION", 0.0)
 class HoldoutRederivationTests(unittest.TestCase):
+    ANCHORED = False
+
     def setUp(self):
         self._tmp = workspace_tempdir()
         temp = self._tmp.__enter__()
         self.addCleanup(self._tmp.__exit__, None, None, None)
+        self.temp = temp
         self.database = f"{temp}/astra.sqlite3"
-        self.store = BacktestStore(self.database)
+        self.anchor = LocalFileAnchor(f"{temp}/anchor.jsonl") if self.ANCHORED else None
+        self.store = BacktestStore(self.database, anchor=self.anchor)
         self.store.initialize()
-        self.registry = ModelRegistry(self.database)
+        self.registry = ModelRegistry(self.database, anchor=self.anchor)
         self.registry.initialize()
         with overfitting_double(pbo=0.25, probability=0.5):
             self.report = evaluate(store=self.store)
@@ -84,6 +92,107 @@ class HoldoutRederivationTests(unittest.TestCase):
                        (json.dumps(report), self.evaluation_id))
         failures = self.registry.check_promotion("wf", "1", holdout_bars=BARS)
         self.assertIn("holdout_report_differs_from_rederivation", failures)
+
+
+INTEGRITY_FAILURES = REDERIVATION_FAILURES | {
+    "evidence_anchor_missing", "evidence_anchor_unreadable", "holdout_not_anchored", "holdout_reuse_check_missing",
+    "holdout_reuse_suspected", "holdout_reuse_undetermined", "holdout_reuse_policy_below_floor",
+}
+
+
+class AnchoredPromotionTests(HoldoutRederivationTests):
+    """Lot 4 round 3: the external evidence anchor gates promotion and survives a database restore."""
+
+    ANCHORED = True
+
+    def integrity(self, failures):
+        return {item for item in failures if item in INTEGRITY_FAILURES or item.startswith("evidence_anchor")}
+
+    def test_clean_anchored_store_has_no_integrity_failure(self):
+        self.assertEqual(self.store.reuse_check(self.report.plan_sha256)["verdict"], holdout_reuse.CLEAR)
+        self.assertEqual(self.integrity(self.registry.check_promotion("wf", "1", holdout_bars=BARS)), set())
+        self.assertFalse(self.anchor.production_grade)
+
+    def test_missing_anchor_blocks_promotion(self):
+        with patch.dict("os.environ", {}, clear=True):
+            registry = ModelRegistry(self.database)
+        self.assertIn("evidence_anchor_missing", registry.check_promotion("wf", "1", holdout_bars=BARS))
+
+    def test_restoring_an_older_backup_blocks_rescoring_and_promotion(self):
+        # A backup taken before the holdout was scored is restored; the anchor still knows it was spent.
+        with contextlib.closing(sqlite3.connect(self.database)) as db:
+            holdout_id = self.store.holdout_for_protocol(self.report.plan_sha256)["evaluation_id"]
+            self.assertIsNotNone(db.execute("SELECT 1 FROM holdout_evaluations WHERE evaluation_id = ?",
+                                            (holdout_id,)).fetchone())
+        fresh = f"{self.temp}/fresh.sqlite3"
+        # Built without the anchor: it stands for a backup taken before the holdout was scored.
+        with patch.dict("os.environ", {}, clear=True):
+            fresh_store = BacktestStore(fresh)
+        fresh_store.initialize()
+        with overfitting_double():
+            evaluate(store=fresh_store)  # same plan, nothing scored: what an old backup looks like
+        backup = create_backup(fresh, f"{self.temp}/backups")
+        restore_backup(backup.path, self.database, actor=OPERATOR, reason="restore drill")
+        restored = BacktestStore(self.database, anchor=self.anchor)
+        with overfitting_double(), self.assertRaisesRegex(ValueError, "evidence anchor"):
+            evaluate_strategy_holdout_once(BARS, None, report=self.report, protocol=PROTOCOL, store=restored)
+        # The restored store no longer agrees with the anchor, which every holdout path and promotion checks.
+        from astra.anchoring import verify_store_against_anchor
+
+        verification = verify_store_against_anchor(self.database, self.anchor)
+        self.assertFalse(verification.ok)
+        self.assertIn("consumed_holdout_missing", verification.errors)
+        with self.assertRaisesRegex(ValueError, "inconsistent with the evidence anchor"):
+            restored.require_anchor_consistency()
+
+    def test_consumed_holdout_cannot_be_resealed_in_a_new_store(self):
+        other = BacktestStore(f"{self.temp}/other.sqlite3", anchor=self.anchor)
+        other.initialize()
+        with overfitting_double(), self.assertRaisesRegex(ValueError, "evidence anchor records"):
+            evaluate(store=other)
+
+
+class ReuseVerdictTests(unittest.TestCase):
+    """A SUSPECT or UNDETERMINED reuse verdict is recorded at seal time and cannot be cleared by assertion."""
+
+    def seal(self, store, returns, label):
+        manifest = {"dataset_identity_sha256": label * 64, "instrument": "EURUSD",
+                    "holdout": {"start": "2030-01-01T00:00:00+00:00", "end": "2030-01-02T00:00:00+00:00",
+                                "content_sha256": holdout_reuse.content_sha256(returns)}}
+        if label != "a":
+            manifest["holdout"].update(start=f"203{ord(label) - 96}-01-01T00:00:00+00:00",
+                                       end=f"203{ord(label) - 96}-01-02T00:00:00+00:00")
+        from astra.validation import _canonical_json, _sha256
+
+        protocol_id = _sha256(_canonical_json(manifest))
+        store.seal_research_protocol(protocol_id=protocol_id, dataset_identity_sha256=label * 64,
+                                     protocol_version="t", plan_manifest=manifest, holdout_returns=returns)
+        return protocol_id
+
+    def test_suspect_and_conflict_verdicts(self):
+        import random
+
+        rng = random.Random(4)
+        base = [round(rng.gauss(0, 1e-4), 12) for _ in range(40)]
+        with workspace_tempdir() as temp:
+            store = BacktestStore(f"{temp}/s.sqlite3")
+            store.initialize()
+            self.seal(store, base, "a")
+            with self.assertRaisesRegex(ValueError, "price path matches"):
+                self.seal(store, [round(-v, 12) for v in reversed(base)], "b")  # inverted and reversed copy
+            suspect = None
+            for seed in range(200):  # a correlated but distinct path that lands between the thresholds
+                noise = random.Random(seed)
+                candidate = [round(0.955 * v + 0.296 * noise.gauss(0, 1e-4), 12) for v in base]
+                verdict = holdout_reuse.assess_reuse(candidate, base).verdict
+                if verdict == holdout_reuse.SUSPECT:
+                    suspect = candidate
+                    break
+            self.assertIsNotNone(suspect)
+            protocol_id = self.seal(store, suspect, "c")
+            self.assertEqual(store.reuse_check(protocol_id)["verdict"], holdout_reuse.SUSPECT)
+            with contextlib.closing(sqlite3.connect(store.path)) as db, self.assertRaises(sqlite3.IntegrityError), db:
+                db.execute("UPDATE holdout_reuse_checks SET verdict = 'CLEAR' WHERE protocol_id = ?", (protocol_id,))
 
 
 if __name__ == "__main__":

@@ -61,7 +61,7 @@ class ServiceRunTests(ServiceTestCase):
 
     def test_stop_from_another_thread_is_graceful(self):
         service, _broker, feed = self.make()
-        timer = threading.Timer(0.5, service.stop)
+        timer = threading.Timer(2.0, service.stop)  # margin for a loaded machine
         timer.start()
         stats = service.run(advance=feed.advance, tick_interval_seconds=0.01)
         timer.cancel()

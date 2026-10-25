@@ -120,8 +120,16 @@ class ModelRegistry:
         database_path: str | Path,
         guard: PermissionGuard | None = None,
         evidence_verifier: Callable[[sqlite3.Connection, sqlite3.Row, dict[str, Any]], tuple[str, ...]] | None = None,
+        anchor: Any = None,
     ) -> None:
         self.path = Path(database_path)
+        # Evidence anchor outside SQLite (astra.anchoring); by default ASTRA_EVIDENCE_ANCHOR, else none,
+        # in which case holdout promotion fails closed (evidence_anchor_missing).
+        if anchor is None:
+            from .anchoring import anchor_from_environment
+
+            anchor = anchor_from_environment()
+        self.anchor = anchor
         self._guard = guard or PermissionGuard(self)
         # Holdout evidence is never trusted as numbers: by default it must match
         # a completed, sealed holdout report stored in the same database.
@@ -374,6 +382,7 @@ class ModelRegistry:
             with self._connect() as db:
                 if self._verify_evidence is verify_holdout_provenance:
                     failures.extend(verify_holdout_provenance(db, row, evidence, holdout_bars=holdout_bars))
+                    failures.extend(_anchor_and_reuse_failures(db, self.path, self.anchor, evidence))
                 else:
                     failures.extend(self._verify_evidence(db, row, evidence))
                 # One version per holdout, re-checked here: evidence copied to a sibling row bypasses
@@ -687,6 +696,61 @@ def _current_implementation_sha256(plan: dict[str, Any]) -> str:
     else:
         from .validation import _implementation_sha256
     return _implementation_sha256()
+
+
+def _anchor_and_reuse_failures(db: sqlite3.Connection, path: Path, anchor: Any, evidence: dict[str, Any]) -> list[str]:
+    """Promotion needs a store consistent with the external evidence anchor and a clear reuse verdict.
+
+    After a restore of an older database, or a rewritten attempt chain, no
+    promotion is allowed until the store agrees with the anchor again. A plan
+    whose holdout the detector found SUSPECT or UNDETERMINED needs a new
+    independent holdout: no agent statement can clear it.
+    """
+
+    from .research_policy import reuse_policy_looser_than_floor
+
+    failures: list[str] = []
+    provenance = evidence.get(PROVENANCE_KEY) or {}
+    holdout = db.execute(
+        "SELECT protocol_id FROM holdout_evaluations WHERE evaluation_id = ?", (provenance.get("holdout_evaluation_id"),)
+    ).fetchone()
+    protocol_id = holdout["protocol_id"] if holdout else None
+    if anchor is None:
+        failures.append("evidence_anchor_missing")
+    else:
+        from .anchoring import AnchorError, verify_store_against_anchor
+
+        try:
+            verification = verify_store_against_anchor(path, anchor)
+        except (AnchorError, OSError):
+            failures.append("evidence_anchor_unreadable")
+        else:
+            failures.extend(f"evidence_anchor_inconsistent:{code}" for code in verification.errors)
+            anchored = {
+                item.get("evaluation_id")
+                for checkpoint in anchor.checkpoints()
+                for item in checkpoint.consumed_holdouts
+            }
+            if provenance.get("holdout_evaluation_id") not in anchored:
+                failures.append("holdout_not_anchored")
+    try:
+        check = db.execute(
+            "SELECT verdict, policy_json FROM holdout_reuse_checks WHERE protocol_id = ?", (protocol_id,)
+        ).fetchone()
+    except sqlite3.Error:
+        check = None
+    if check is None:
+        failures.append("holdout_reuse_check_missing")
+    else:
+        if check["verdict"] == "SUSPECT":
+            failures.append("holdout_reuse_suspected")
+        elif check["verdict"] == "UNDETERMINED":
+            failures.append("holdout_reuse_undetermined")
+        elif check["verdict"] != "CLEAR":
+            failures.append("holdout_reuse_check_invalid")
+        if reuse_policy_looser_than_floor(json.loads(check["policy_json"])):
+            failures.append("holdout_reuse_policy_below_floor")
+    return failures
 
 
 def _rederivation_failures(plan: dict[str, Any], report: dict[str, Any], holdout_bars: Any) -> list[str]:
