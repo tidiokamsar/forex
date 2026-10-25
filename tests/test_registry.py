@@ -257,6 +257,32 @@ class ProvenanceTests(unittest.TestCase):
             )
 
 
+class PolicyFloorAtPromotionTests(unittest.TestCase):
+    """Lot 3 QA round 3: rows stored with lax criteria before the floor existed cannot be promoted."""
+
+    def test_stored_lax_criteria_block_promotion(self):
+        from astra.registry import _canonical, _sha256
+
+        with workspace_tempdir() as temp:
+            registry = ModelRegistry(f"{temp}/astra.sqlite3", evidence_verifier=accept_unverified_evidence)
+            registry.initialize()
+            registry.register_candidate(actor=AGENT, model_id="old", version="1", manifest=MANIFEST, criteria=PromotionCriteria())
+            from dataclasses import asdict
+
+            lax = {**asdict(PromotionCriteria()), "require_holdout": False, "min_trades": 1}
+            db = sqlite3.connect(registry.path)
+            try:
+                with db:
+                    db.execute("UPDATE model_versions SET criteria_json = ?, criteria_sha256 = ? WHERE model_id = 'old'",
+                               (_canonical(lax), _sha256(lax)))
+            finally:
+                db.close()
+            registry.record_evaluation(actor=AGENT, model_id="old", version="1", kind="validation", evidence=GOOD_EVIDENCE)
+            failures = registry.check_promotion("old", "1")
+            self.assertIn("criteria_below_policy_floor:require_holdout", failures)
+            self.assertIn("criteria_below_policy_floor:min_trades", failures)
+            with self.assertRaises(PromotionError):
+                registry.promote(actor=REVIEWER, model_id="old", version="1", reason="legacy lax row")
+
 if __name__ == "__main__":
     unittest.main()
-

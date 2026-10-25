@@ -58,6 +58,7 @@ from .validation import (
     _dataset_identity_sha256,
     _flat_metrics,
     _fold_ranges,
+    _holdout_content_sha256,
     _resolve_dataset_hash,
     _result_metrics,
     _scale_costs,
@@ -399,6 +400,7 @@ def evaluate_strategy_walk_forward(
         ],
         "instrument": history[0].instrument,
         "holdout": {
+            "content_sha256": _holdout_content_sha256(history, development_end),
             "status": "RESERVED_NOT_EVALUATED",
             "observations": protocol.holdout_bars,
             "start": history[development_end].timestamp.isoformat(),

@@ -341,6 +341,10 @@ class ModelRegistry:
         if _sha256(json.loads(row["manifest_json"])) != row["manifest_sha256"]:
             return ("manifest_tampered",)
         criteria = PromotionCriteria(**criteria_payload)
+        # Re-applied at promotion, so rows registered before the floor existed cannot use lax criteria.
+        looser = criteria_looser_than_floor(criteria)
+        if looser:
+            return tuple(f"criteria_below_policy_floor:{name}" for name in looser)
         by_kind = {item["kind"]: json.loads(item["evidence_json"]) for item in evaluations}
         decisive_kind = "holdout" if criteria.require_holdout else "validation"
         evidence = by_kind.get(decisive_kind)

@@ -500,7 +500,8 @@ class InstrumentScopedOverlapTests(unittest.TestCase):
             store.initialize()
             with overfitting_double():
                 evaluate(store=store)
-                other = [dc_replace(bar, instrument="GBPUSD") for bar in BARS]
+                # Same calendar, genuinely different prices (another seed): independent data.
+                other = [dc_replace(bar, instrument="GBPUSD") for bar in make_synthetic_bars(400, seed=11)]
                 report = evaluate(bars=other, store=store)
             self.assertEqual(report.plan_manifest["instrument"], "GBPUSD")
 
@@ -514,6 +515,37 @@ class PerVariantGuardTests(unittest.TestCase):
                                     dsr_returns=[0.01 * (i % 5 - 2) for i in range(40)], trial_sharpe_variance=None)
         self.assertIsNone(result.pbo)
         self.assertTrue(any("variants have fewer than" in error for error in result.errors))
+
+class HoldoutContentReuseTests(unittest.TestCase):
+    """Lot 3 QA round 3: the same holdout prices relabelled or shifted in time cannot be scored again."""
+
+    def assert_refused(self, transform):
+        with workspace_tempdir() as temp:
+            store = BacktestStore(f"{temp}/astra.sqlite3")
+            store.initialize()
+            with overfitting_double():
+                evaluate(store=store)
+                with self.assertRaises(ValueError) as caught:
+                    evaluate(bars=[transform(bar) for bar in BARS], store=store)
+            self.assertIn("price path matches", str(caught.exception))
+
+    def test_time_shifted_copy_is_refused(self):
+        from dataclasses import replace as dc_replace
+        from datetime import timedelta
+
+        self.assert_refused(lambda bar: dc_replace(bar, timestamp=bar.timestamp + timedelta(days=730)))
+
+    def test_relabelled_copy_is_refused(self):
+        from dataclasses import replace as dc_replace
+
+        self.assert_refused(lambda bar: dc_replace(bar, instrument="EURUSD.X"))
+
+    def test_rescaled_copy_is_refused(self):
+        from dataclasses import replace as dc_replace
+
+        self.assert_refused(
+            lambda bar: dc_replace(bar, open=bar.open * 2, high=bar.high * 2, low=bar.low * 2, close=bar.close * 2)
+        )
 
 if __name__ == "__main__":
     unittest.main()

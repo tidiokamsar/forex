@@ -144,11 +144,19 @@ class BacktestStore:
             new_start = datetime.fromisoformat(str(holdout["start"]))
             new_end = datetime.fromisoformat(str(holdout["end"]))
             instrument = plan_manifest.get("instrument")
+            content = holdout.get("content_sha256")
             for other in db.execute(
                 "SELECT protocol_id, holdout_start, holdout_end, plan_json FROM research_protocols WHERE dataset_sha256 <> ?",
                 (dataset_identity_sha256,),
             ).fetchall():
-                other_instrument = json.loads(other["plan_json"]).get("instrument")
+                other_plan = json.loads(other["plan_json"])
+                if content and (other_plan.get("holdout") or {}).get("content_sha256") == content:
+                    # Same price path relabelled, shifted in time or rescaled: the holdout is already spent.
+                    raise ValueError(
+                        "the holdout price path matches the holdout of an already sealed plan "
+                        f"({other['protocol_id'][:12]}); a holdout can be scored only once"
+                    )
+                other_instrument = other_plan.get("instrument")
                 if instrument and other_instrument and instrument != other_instrument:
                     continue  # another instrument's holdout is independent data
                 other_start = datetime.fromisoformat(other["holdout_start"])

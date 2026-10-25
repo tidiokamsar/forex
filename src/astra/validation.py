@@ -339,6 +339,7 @@ def evaluate_walk_forward(
         "folds": boundary_payload,
         "instrument": history[0].instrument,
         "holdout": {
+            "content_sha256": _holdout_content_sha256(history, development_end),
             "status": "RESERVED_NOT_EVALUATED",
             "observations": protocol.holdout_bars,
             "start": history[development_end].timestamp.isoformat(),
@@ -966,6 +967,19 @@ def _implementation_sha256() -> str:
     digest.update(current_path.name.encode("utf-8"))
     digest.update(current_path.read_bytes())
     return digest.hexdigest()
+
+
+def _holdout_content_sha256(history: tuple[MarketBar, ...], start: int) -> str:
+    """Fingerprint of the holdout's price path, independent of labels, dates and price scale.
+
+    It hashes the close-to-close log returns (rounded to 12 decimals) from the
+    bar before the holdout to the end, so the same prices relabelled, moved in
+    time or rescaled give the same fingerprint.
+    """
+
+    closes = [bar.close for bar in history[max(0, start - 1):]]
+    returns = [round(math.log(later / earlier), 12) for earlier, later in pairwise(closes)]
+    return _sha256(_canonical_json(returns))
 
 
 def _canonical_json(value: object) -> str:
