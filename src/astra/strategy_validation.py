@@ -69,6 +69,10 @@ STRATEGY_VALIDATION_VERSION = "1.0.0"
 SELECTION_METRIC = validation.SELECTION_METRIC
 MAX_CANDIDATES = validation.MAX_CANDIDATES
 MAX_PBO_SLICES = 8
+# CSCV needs per-period returns, not one total per window: each development
+# window is split into periods of this many bars and each candidate's trade
+# P&L is attributed to the period in which the trade exits.
+PBO_PERIOD_BARS = 5
 FLAT_BASELINE_NAME = "NO_POSITION@1"
 FAMILIES = ("sma", "momentum", "breakout")
 EXCLUDED_FAMILIES = {
@@ -337,7 +341,7 @@ def evaluate_strategy_walk_forward(
     implementation_hash = _implementation_sha256()
     descriptors = tuple(candidate.descriptor() for candidate in chosen)
     families = tuple(family for family in FAMILIES if any(c.family == family for c in chosen))
-    n_slices = pbo_slice_count(2 * protocol.fold_count)
+    n_slices = pbo_slice_count(_period_count(ranges) // 2)
     plan = {
         "protocol": asdict(protocol),
         "strategy_validation_version": STRATEGY_VALIDATION_VERSION,
@@ -475,9 +479,13 @@ def evaluate_strategy_walk_forward(
                 ),
             )
         )
-        labels.extend((f"fold{ordinal}_validation", f"fold{ordinal}_test"))
-        matrix.append(tuple(validation_results[cid].net_pnl for cid in ids))
-        matrix.append(tuple(test_results[cid].net_pnl for cid in ids))
+        for kind, (start, stop), results in (
+            ("validation", (vs, ve), validation_results),
+            ("test", (ts, te), test_results),
+        ):
+            period_labels, period_rows = _period_rows(history, start, stop, ids, results, f"fold{ordinal}_{kind}")
+            labels.extend(period_labels)
+            matrix.extend(period_rows)
         for cid in ids:
             validation_trades[cid].extend(_trade_returns(validation_results[cid], initial_equity))
             test_trades[cid].extend(_trade_returns(test_results[cid], initial_equity))
@@ -706,6 +714,29 @@ def holdout_evidence(report: StrategyHoldoutEvaluation | Mapping[str, Any]) -> d
     return {key: values[key] for key in EVIDENCE_FIELDS}
 
 
+def _period_bounds(start: int, stop: int) -> list[tuple[int, int]]:
+    return [(first, min(first + PBO_PERIOD_BARS, stop)) for first in range(start, stop, PBO_PERIOD_BARS)]
+
+
+def _period_count(ranges) -> int:
+    return sum(len(_period_bounds(vs, ve)) + len(_period_bounds(ts, te)) for vs, ve, ts, te in ranges)
+
+
+def _period_rows(history, start, stop, ids, results, label_prefix):
+    """Net trade P&L per candidate for each PBO_PERIOD_BARS period of one window, by trade exit time."""
+
+    bounds = _period_bounds(start, stop)
+    labels = [f"{label_prefix}_p{number}" for number in range(1, len(bounds) + 1)]
+    ends = [history[last - 1].timestamp for _first, last in bounds]
+    rows = [[0.0] * len(ids) for _ in bounds]
+    for column, cid in enumerate(ids):
+        for trade in results[cid].trades:
+            # Trades of a window exit inside it; the first period ending at or after the exit owns it.
+            row = next((index for index, end in enumerate(ends) if trade.exit_time <= end), len(ends) - 1)
+            rows[row][column] += trade.net_pnl
+    return labels, [tuple(row) for row in rows]
+
+
 def pbo_slice_count(available_slices: int) -> int:
     """Largest even number not above ``min(MAX_PBO_SLICES, available_slices)``."""
 
@@ -734,7 +765,8 @@ def assess_overfitting(
     matrix = tuple(tuple(float(value) for value in row) for row in performance)
     labels = tuple(slice_labels)
     returns = tuple(float(value) for value in dsr_returns)
-    n_slices = pbo_slice_count(len(matrix))
+    # At least two rows per slice, as the statistics module requires.
+    n_slices = pbo_slice_count(len(matrix) // 2)
     common = {
         "variants_tested": variants_tested,
         "slice_labels": labels,

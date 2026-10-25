@@ -194,15 +194,27 @@ class StrategyWalkForwardTests(unittest.TestCase):
             report = evaluate()
         overfitting = report.overfitting
         self.assertEqual(overfitting.status, "COMPLETED")
-        self.assertEqual(overfitting.slice_labels, ("fold1_validation", "fold1_test", "fold2_validation", "fold2_test"))
-        self.assertEqual(len(overfitting.performance_matrix), 2 * PROTOCOL.fold_count)
-        self.assertTrue(all(len(row) == report.variants_tested for row in overfitting.performance_matrix))
-        self.assertEqual(overfitting.performance_matrix[0], tuple(t.validation.net_pnl for t in report.folds[0].trials))
-        self.assertEqual(overfitting.performance_matrix[1], tuple(t.test.net_pnl for t in report.folds[0].trials))
-        self.assertEqual(double.pbo_calls[0]["performance"], [list(row) for row in overfitting.performance_matrix])
-        self.assertEqual(double.pbo_calls[0]["n_slices"], 4)
-        self.assertEqual(overfitting.n_slices, 4)
-        self.assertEqual(report.plan_manifest["overfitting"]["n_slices"], 4)
+        # One row per PBO_PERIOD_BARS period of every development window, in time order.
+        labels = overfitting.slice_labels
+        matrix = overfitting.performance_matrix
+        expected_windows = [f"fold{f}_{kind}" for f in range(1, PROTOCOL.fold_count + 1) for kind in ("validation", "test")]
+        self.assertEqual(list(dict.fromkeys(label.rsplit("_p", 1)[0] for label in labels)), expected_windows)
+        self.assertGreater(len(matrix), 2 * PROTOCOL.fold_count)
+        self.assertTrue(all(len(row) == report.variants_tested for row in matrix))
+        # The periods of each window sum back to that window's net P&L for every candidate.
+        for fold in report.folds:
+            for kind in ("validation", "test"):
+                prefix = f"fold{fold.fold}_{kind}_p"
+                rows = [row for label, row in zip(labels, matrix, strict=True) if label.startswith(prefix)]
+                for column, trial in enumerate(fold.trials):
+                    window_net = getattr(trial, kind).net_pnl
+                    self.assertAlmostEqual(sum(row[column] for row in rows), window_net, places=9)
+        self.assertEqual(double.pbo_calls[0]["performance"], [list(row) for row in matrix])
+        expected_slices = pbo_slice_count(len(matrix) // 2)
+        self.assertEqual(double.pbo_calls[0]["n_slices"], expected_slices)
+        self.assertEqual(overfitting.n_slices, expected_slices)
+        self.assertEqual(report.plan_manifest["overfitting"]["n_slices"], expected_slices)
+        self.assertGreaterEqual(len(matrix), 2 * expected_slices)
         self.assertEqual(double.dsr_calls[0]["n_trials"], report.variants_tested)
         self.assertEqual((overfitting.pbo, overfitting.deflated_sharpe_probability), (0.25, 0.5))
 
