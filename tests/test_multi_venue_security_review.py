@@ -495,11 +495,10 @@ class LedgerKeyTests(unittest.TestCase):
         ]
         self.assertLessEqual(sum(allowed) * Decimal("0.038") * Decimal("50000"), Decimal("100000") * Decimal("0.10"))
 
-    # CONFIRMED DEFECT MV-A-16 (low-medium, adjacent to MV-A-15): the fix only checks the canonical *form* of
+    # FIXED (was CONFIRMED DEFECT MV-A-16) (low-medium, adjacent to MV-A-15): the fix only checks the canonical *form* of
     # venue_id. Any canonical-looking id ("binance_spot_a", "binance_spot_b", "x") is accepted and gets its own
     # ledger key, although none is a registry venue, so the same free quote balance still funds several daily
     # caps: ten 1.9% buys spread over five invented ids are all allowed.
-    @unittest.expectedFailure
     def test_daily_cap_cannot_be_split_across_invented_venue_ids(self):
         ids = ("binance_spot", "binance_spot_a", "binance_spot_b", "coinbase_x", "x")
         allowed = [

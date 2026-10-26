@@ -30,6 +30,7 @@ caller's value) but cannot verify them.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import re
@@ -41,7 +42,7 @@ from threading import Lock
 
 from ..models import RunMode
 from ..venues.contract import Balance, MarketType, StaleDataError, ensure_fresh
-from ..venues.registry import TRADING_ENABLED_IN_THIS_LOT
+from ..venues.registry import TRADING_ENABLED_IN_THIS_LOT, RegistryError, load_registry
 from . import crypto_futures, fixed_expiry_options
 from .common import require_text, to_decimal
 from .costs import (
@@ -92,6 +93,23 @@ def _fingerprint(pairs: Parameters) -> str:
 
 # Canonical venue id, as in astra.venues.registry (lower-case, no whitespace).
 _VENUE_ID_PATTERN = re.compile(r"[a-z][a-z0-9_]*")
+
+
+@functools.lru_cache(maxsize=1)
+def _registered_spot_venues() -> frozenset[str]:
+    """Venue ids of the shipped, sealed registry that carry the CRYPTO_SPOT market type.
+
+    An unreadable or tampered registry yields an empty set, so every spot decision
+    refuses (fail closed).
+    """
+
+    try:
+        registry = load_registry()
+    except (RegistryError, OSError, ValueError):
+        return frozenset()
+    return frozenset(
+        venue_id for venue_id in registry.venue_ids if MarketType.CRYPTO_SPOT in registry.get(venue_id).market_types
+    )
 
 @dataclass(frozen=True, slots=True)
 class MarketRiskDecision:
@@ -541,6 +559,9 @@ class CryptoSpotRiskPolicy:
             # The ledger is keyed by venue_id: only the registry's canonical form is accepted, so spelling
             # variants ("BINANCE_SPOT", "binance_spot ") cannot split the daily cap (MV-A-15).
             reasons.append("venue_id_not_canonical")
+        elif context.venue_id not in _registered_spot_venues():
+            # Nor can an invented, well-formed id open a fresh cap on the same balance (MV-A-16).
+            reasons.append("venue_not_in_registry")
 
         spec, book = context.spec, context.book
         reasons.extend(self._market_data(intent, context))
@@ -757,7 +778,7 @@ class CryptoSpotRiskPolicy:
         elif not _is_decimal(stop) or stop <= 0 or stop >= price:
             reasons.append("invalid_stop")
 
-        venue_known = isinstance(context.venue_id, str) and bool(_VENUE_ID_PATTERN.fullmatch(context.venue_id))
+        venue_known = isinstance(context.venue_id, str) and context.venue_id in _registered_spot_venues()
         daily: tuple[Decimal, Decimal] | None = None
         quote_balance = None if balances is None else balances.get(spec.quote_asset)
         if quote_balance is not None:

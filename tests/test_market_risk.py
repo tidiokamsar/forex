@@ -437,8 +437,9 @@ class SpotBuyLedgerTests(unittest.TestCase):
                           balances=(*balances(), Balance("ETH", Decimal(0), Decimal(0), NOW)))
         decision = policy.evaluate(buy(intent_id="e1", symbol="ETHUSDT", quantity=Decimal("0.038")), eth_ctx)
         self.assertIn("daily_notional_exceeds_cap", decision.reasons)
+        # An unregistered venue cannot open a fresh cap on the same balance (MV-A-16): it is refused outright.
         other_venue = policy.evaluate(buy(intent_id="o1", quantity=Decimal("0.038")), context(venue_id="other_venue"))
-        self.assertTrue(other_venue.allowed, other_venue.reasons)
+        self.assertIn("venue_not_in_registry", other_venue.reasons)
 
     def test_ledger_has_no_delete_or_update_api(self):
         public = {n for n in dir(SpotBuyLedger) if not n.startswith("_")}
