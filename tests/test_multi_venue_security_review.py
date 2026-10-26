@@ -53,12 +53,11 @@ class _RecordingSend:
 
 
 class RegistryGateBypassTests(unittest.TestCase):
-    # CONFIRMED DEFECT MV-A-1 (medium): the module claims "the only bypass is test_only_skip_registry_gate,
+    # FIXED (was CONFIRMED DEFECT MV-A-1) (medium): the module claims "the only bypass is test_only_skip_registry_gate,
     # accepted only with a loopback base URL", but ``registry_record=`` accepts any in-memory VenueRecord. A
     # record built with dataclasses.replace (or the VenueRecord constructor) skips every rule of the strict
     # loader (READ_ONLY_CONNECTED with no evidence, no eligibility conditions, no content hash) and opens the
     # gate for the real production hosts. Patched _send: no request leaves the machine.
-    @unittest.expectedFailure
     def test_forged_in_memory_record_cannot_open_the_gate_for_a_real_host(self):
         send = _RecordingSend()
         with patch.object(bs._BinanceHttp, "_send", send):
@@ -95,11 +94,10 @@ class RegistryGateBypassTests(unittest.TestCase):
 
 
 class EnvironmentClaimTests(ServerCase):
-    # CONFIRMED DEFECT MV-A-2 (medium): configuration alone yields LIVE + PROVIDER_API. With the test-only
+    # FIXED (was CONFIRMED DEFECT MV-A-2) (medium): configuration alone yields LIVE + PROVIDER_API. With the test-only
     # gate bypass and loopback_role="production", a signed answer from the local fake server makes
     # account_environment() report PROVIDER_API, the one source the contract reserves for evidence from the
     # provider. A loopback host can never be evidence of a live Binance account.
-    @unittest.expectedFailure
     def test_loopback_fake_server_never_yields_provider_api(self):
         reader = self.reader()
         reader.balances()
@@ -115,10 +113,9 @@ class EnvironmentClaimTests(ServerCase):
 
 
 class BanStateTests(ServerCase):
-    # CONFIRMED DEFECT MV-A-3 (medium): the 418 ban, the 429 stop and the local weight budget live in each
+    # FIXED (was CONFIRMED DEFECT MV-A-3) (medium): the 418 ban, the 429 stop and the local weight budget live in each
     # _BinanceHttp instance. After an HTTP 418 (IP ban, escalating from 2 minutes to 3 days), constructing a
     # new connector, as a restarted service or a retrying caller does, sends the next request at once.
-    @unittest.expectedFailure
     def test_a_new_connector_respects_an_active_ip_ban(self):
         self.server.script("/api/v3/ping", Scripted(418, {"code": -1003, "msg": "banned"}, {"Retry-After": "300"}))
         with self.assertRaises(bs.BinanceIpBanned):
@@ -149,10 +146,9 @@ def self_suppress():
 
 
 class ReadOnlyKeyTests(ServerCase):
-    # CONFIRMED DEFECT MV-A-4 (low): reverify_after_seconds has no upper bound and no validation. With
+    # FIXED (was CONFIRMED DEFECT MV-A-4) (low): reverify_after_seconds has no upper bound and no validation. With
     # math.inf (or NaN, or 1e12) the key's apiRestrictions are read once; a key later switched to trading and
     # withdrawals keeps serving signed reads forever.
-    @unittest.expectedFailure
     def test_key_permissions_are_rechecked_even_with_an_unbounded_interval(self):
         try:
             reader = self.reader(reverify_after_seconds=math.inf)
@@ -182,10 +178,9 @@ class ReadOnlyKeyTests(ServerCase):
 
 
 class SecretHandlingTests(ServerCase):
-    # CONFIRMED DEFECT MV-A-5 (low): SecretValue (slots, no __reduce__) pickles and deep-copies with the
+    # FIXED (was CONFIRMED DEFECT MV-A-5) (low): SecretValue (slots, no __reduce__) pickles and deep-copies with the
     # plaintext. The reader refuses pickling, but the SecretValue objects it holds, or the ones
     # from_environment builds, serialize the API secret in clear (multiprocessing, caches, crash dumps).
-    @unittest.expectedFailure
     def test_secret_value_cannot_be_pickled_in_clear(self):
         try:
             data = pickle.dumps(SecretValue(SECRET))

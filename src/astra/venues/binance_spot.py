@@ -13,9 +13,21 @@ Registry gate: every network call first checks ``astra.venues.registry``.
 True for the ``binance_spot`` record; ``BinanceSpotAccountReader`` refuses
 unless ``can_read_account(record)`` is True. The shipped registry keeps
 Binance blocked (UNVERIFIED / ELIGIBILITY_UNKNOWN) until a human records the
-evidence, so both classes refuse out of the box. The only bypass is the
-``test_only_skip_registry_gate`` argument, accepted only with a loopback base
-URL, for the offline tests.
+evidence, so both classes refuse out of the box. For a real (non-loopback)
+host the record always comes from ``load_registry()`` (strict schema, evidence
+rules and content hash); an in-memory ``registry_record`` is refused there.
+Only with a loopback base URL, for the offline tests, may a caller pass an
+in-memory ``registry_record`` or the ``test_only_skip_registry_gate`` flag.
+
+Provider evidence: a loopback host (the offline fake) is never evidence of a
+Binance account, so ``account_environment()`` reports UNVERIFIED there
+whatever ``loopback_role`` says.
+
+Stop state: the HTTP 418 ban, the HTTP 429 stop and the local request-weight
+budget are shared process-wide per base URL, so a new connector instance
+respects a ban or budget hit by another one. Passing ``state_path`` also
+persists the ban and the 429 stop to a small JSON file, so a restarted
+process respects them too; an unreadable state file is refused.
 
 Read-only by construction: the only HTTP method in this module is GET and the
 only paths are the ones in ``ALLOWED_PATHS``. There is no order, cancel,
@@ -65,6 +77,7 @@ import http.client
 import ipaddress
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -76,6 +89,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 from ..brokers.base import (
@@ -138,6 +152,8 @@ WEIGHT_SAFETY_FRACTION = 0.8
 MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 DEFAULT_RECV_WINDOW_MS = 5000
 MAX_ALLOWED_RECV_WINDOW_MS = 10_000  # ASTRA keeps it small; the provider maximum is 60000
+MIN_REVERIFY_SECONDS = 1
+MAX_REVERIFY_SECONDS = 3600  # key permissions are re-read at least hourly
 KLINES_MAX_LIMIT = 1000
 
 QUOTE_SOURCE = "PROVIDER_API:binance_spot:bookTicker"
@@ -303,6 +319,120 @@ def _parse_base_url(base_url: str, allowed_roles: frozenset[str], loopback_role:
     return _BaseUrl(f"{parts.scheme}://{parts.hostname}{port}", host, role, loopback)
 
 
+STATE_SCHEMA = "astra.binance_host_state"
+STATE_SCHEMA_VERSION = 1
+
+
+class _HostState:
+    """Process-wide stop state and weight budget for one base URL, shared by every connector instance.
+
+    The 418 ban and the 429 stop use wall-clock times and can be persisted to a
+    JSON file (``state_path``) so a restarted process also respects them. The
+    weight window is in memory only (the provider's per-minute count resets it).
+    """
+
+    def __init__(self, key: str) -> None:
+        self.key = key
+        self.lock = threading.RLock()
+        self.state_path: Path | None = None
+        self.weight_limit = DOCUMENTED_REQUEST_WEIGHT_PER_MINUTE
+        self.used_weight: dict[str, int] = {}
+        self.window_start: float | None = None
+        self.window_used = 0
+        self.blocked_until: datetime | None = None  # after a 429 we did not wait out
+        self.banned = False
+        self.banned_until: datetime | None = None  # None while banned: open-ended, a human must acknowledge
+
+    def attach(self, state_path: Path) -> None:
+        if self.state_path is not None and self.state_path != state_path:
+            raise BinanceConfigurationError(f"{self.key}: already persisted to another state file")
+        self.state_path = state_path
+        record = _read_state_file(state_path).get(self.key)
+        if record is None:
+            return
+        try:
+            banned = record["banned"]
+            banned_until = _parse_state_time(record["banned_until"])
+            blocked_until = _parse_state_time(record["blocked_until"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise BinanceConfigurationError(f"state file entry for {self.key} is invalid; inspect it by hand") from exc
+        if not isinstance(banned, bool):
+            raise BinanceConfigurationError(f"state file entry for {self.key} is invalid; inspect it by hand")
+        if banned and not self.banned:
+            self.banned, self.banned_until = True, banned_until
+        elif banned and self.banned_until is not None:
+            self.banned_until = None if banned_until is None else max(self.banned_until, banned_until)
+        if blocked_until is not None and (self.blocked_until is None or blocked_until > self.blocked_until):
+            self.blocked_until = blocked_until
+
+    def save(self) -> None:
+        if self.state_path is None:
+            return
+        document = _read_state_file(self.state_path)
+        document[self.key] = {
+            "banned": self.banned,
+            "banned_until": self.banned_until.isoformat() if self.banned_until else None,
+            "blocked_until": self.blocked_until.isoformat() if self.blocked_until else None,
+        }
+        payload = {"schema": STATE_SCHEMA, "schema_version": STATE_SCHEMA_VERSION, "hosts": document}
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.state_path.with_name(self.state_path.name + ".tmp")
+        temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(temporary, self.state_path)
+
+
+def _parse_state_time(value: object) -> datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError("time must be an ISO string or null")
+    moment = datetime.fromisoformat(value)
+    if moment.tzinfo is None:
+        raise ValueError("time must be timezone-aware")
+    return moment
+
+
+def _read_state_file(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        # Fail closed: an unreadable stop-state file could hide an active ban.
+        raise BinanceConfigurationError(f"Binance state file {path} is unreadable; inspect it by hand") from exc
+    if (
+        not isinstance(document, dict)
+        or document.get("schema") != STATE_SCHEMA
+        or document.get("schema_version") != STATE_SCHEMA_VERSION
+        or not isinstance(document.get("hosts"), dict)
+    ):
+        raise BinanceConfigurationError(f"Binance state file {path} has an unexpected format; inspect it by hand")
+    return document["hosts"]
+
+
+_HOST_STATES: dict[str, _HostState] = {}
+_HOST_STATES_LOCK = threading.Lock()
+
+
+def _host_state(key: str, state_path: str | Path | None) -> _HostState:
+    with _HOST_STATES_LOCK:
+        state = _HOST_STATES.get(key)
+        if state is None:
+            state = _HostState(key)
+            _HOST_STATES[key] = state
+    if state_path is not None:
+        with state.lock:
+            state.attach(Path(state_path))
+    return state
+
+
+def reset_host_states_for_tests() -> None:
+    """TEST ONLY: forget the in-memory per-host state (persisted files are left untouched)."""
+
+    with _HOST_STATES_LOCK:
+        _HOST_STATES.clear()
+
+
 class _BinanceHttp:
     """GET-only HTTP client with registry gate, weight budget, 429/418 handling and bounded retries."""
 
@@ -320,6 +450,7 @@ class _BinanceHttp:
         monotonic: Callable[[], float],
         sleep: Callable[[float], None],
         scrub: Callable[[str], str],
+        state_path: str | Path | None = None,
     ) -> None:
         if isinstance(max_attempts, bool) or not isinstance(max_attempts, int) or not 1 <= max_attempts <= 5:
             raise BinanceConfigurationError("max_attempts must be an integer from 1 to 5")
@@ -340,65 +471,73 @@ class _BinanceHttp:
         if base.loopback:
             handlers.append(urllib.request.ProxyHandler({}))
         self._opener = urllib.request.build_opener(*handlers)
-        self._lock = threading.Lock()
-        self.weight_limit = DOCUMENTED_REQUEST_WEIGHT_PER_MINUTE
-        self.used_weight: dict[str, int] = {}
-        self._window_start = monotonic()
-        self._window_used = 0
-        self._blocked_until: float | None = None  # monotonic, after a 429 we did not wait out
-        self._banned = False
-        self._banned_until: datetime | None = None
+        # Ban, 429 stop and weight budget are shared by every instance for this base URL.
+        self._state = _host_state(base.url, state_path)
+        self._lock = self._state.lock
         self.requests_sent = 0
 
     # -- state ---------------------------------------------------------------
 
     @property
     def banned_until(self) -> datetime | None:
-        return self._banned_until
+        return self._state.banned_until
 
     @property
     def is_banned(self) -> bool:
-        return self._banned
+        return self._state.banned
+
+    @property
+    def weight_limit(self) -> int:
+        return self._state.weight_limit
+
+    @property
+    def used_weight(self) -> dict[str, int]:
+        return self._state.used_weight
 
     def acknowledge_ban_cleared(self) -> None:
         """Human action: lift an open-ended 418 stop after checking the ban has ended."""
 
         with self._lock:
-            self._banned = False
-            self._banned_until = None
+            self._state.banned = False
+            self._state.banned_until = None
+            self._state.save()
         log_event(_LOG, "binance.ban_acknowledged", level=logging.WARNING)
 
     def _check_blocks(self, path: str) -> None:
-        if self._banned:
-            if self._banned_until is not None and self._clock() >= self._banned_until:
-                self._banned = False
-                self._banned_until = None
+        state = self._state
+        if state.banned:
+            if state.banned_until is not None and self._clock() >= state.banned_until:
+                state.banned = False
+                state.banned_until = None
+                state.save()
             else:
-                until = self._banned_until.isoformat() if self._banned_until else "unknown (a human must acknowledge)"
+                until = state.banned_until.isoformat() if state.banned_until else "unknown (a human must acknowledge)"
                 raise BinanceIpBanned(f"{path}: IP banned by the provider (HTTP 418) until {until}; no request sent",
-                                      self._banned_until)
-        if self._blocked_until is not None:
-            remaining = self._blocked_until - self._monotonic()
+                                      state.banned_until)
+        if state.blocked_until is not None:
+            remaining = (state.blocked_until - self._clock()).total_seconds()
             if remaining > 0:
                 raise BrokerRequestError("HTTP_429", f"{path}: rate limited; wait {remaining:.1f}s before retrying",
                                          remaining, transient=True)
-            self._blocked_until = None
+            state.blocked_until = None
+            state.save()
 
     def _reserve_weight(self, path: str, weight: int) -> None:
+        state = self._state
         now = self._monotonic()
-        if now - self._window_start >= 60.0:
-            self._window_start = now
-            self._window_used = 0
-        budget = int(self.weight_limit * WEIGHT_SAFETY_FRACTION)
-        if self._window_used + weight > budget:
-            wait = max(0.0, 60.0 - (now - self._window_start))
+        if state.window_start is None or not 0 <= now - state.window_start < 60.0:
+            state.window_start = now
+            state.window_used = 0
+        budget = int(state.weight_limit * WEIGHT_SAFETY_FRACTION)
+        if state.window_used + weight > budget:
+            wait = max(0.0, 60.0 - (now - state.window_start))
             raise BrokerRequestError(
                 "LOCAL_WEIGHT_BUDGET",
-                f"{path}: local request-weight budget {budget}/min reached ({self._window_used} used); no request sent",
+                f"{path}: local request-weight budget {budget}/min reached ({state.window_used} used); no request sent",
                 wait,
                 transient=True,
             )
-        self._window_used += weight
+        state.window_used += weight
 
     def _record_headers(self, headers: Mapping[str, str] | Any) -> None:
         if headers is None:
@@ -414,10 +553,10 @@ class _BinanceHttp:
             if value < 0:
                 continue
             interval = name[len("x-mbx-used-weight-"):].upper()
-            self.used_weight[interval] = value
+            self._state.used_weight[interval] = value
             if interval == "1M":
                 # The provider's count is authoritative for the current minute.
-                self._window_used = value
+                self._state.window_used = value
 
     def update_weight_limit(self, rate_limits: object) -> None:
         if not isinstance(rate_limits, list):
@@ -431,7 +570,8 @@ class _BinanceHttp:
                 and type(entry.get("limit")) is int
                 and entry["limit"] > 0
             ):
-                self.weight_limit = entry["limit"]
+                with self._lock:
+                    self._state.weight_limit = entry["limit"]
 
     # -- request -------------------------------------------------------------
 
@@ -480,7 +620,8 @@ class _BinanceHttp:
                         continue
                     wait = retry_after if retry_after is not None else 60.0
                     with self._lock:
-                        self._blocked_until = self._monotonic() + wait
+                        self._state.blocked_until = self._clock() + timedelta(seconds=wait)
+                        self._state.save()
                     log_event(_LOG, "binance.rate_limited_stop", level=logging.WARNING, path=endpoint.path, retry_after=wait)
                     raise BrokerRequestError("HTTP_429", f"{endpoint.path}: rate limit exceeded", wait, transient=True)
                 if status >= 500:
@@ -505,8 +646,9 @@ class _BinanceHttp:
     def _ban(self, path: str, retry_after: float | None) -> None:
         until = None if retry_after is None else self._clock() + timedelta(seconds=retry_after)
         with self._lock:
-            self._banned = True
-            self._banned_until = until
+            self._state.banned = True
+            self._state.banned_until = until
+            self._state.save()
         log_event(_LOG, "binance.ip_banned", level=logging.ERROR, path=path,
                   banned_until=until.isoformat() if until else None)
         raise BinanceIpBanned(f"{path}: IP banned by the provider (HTTP 418); all requests stopped", until)
@@ -615,6 +757,7 @@ class _BinanceClient:
         clock: Callable[[], datetime],
         monotonic: Callable[[], float],
         sleep: Callable[[float], None],
+        state_path: str | Path | None = None,
     ) -> None:
         self._base = _parse_base_url(base_url, self._allowed_roles, loopback_role)
         if test_only_skip_registry_gate is not False and (
@@ -642,6 +785,7 @@ class _BinanceClient:
             monotonic=monotonic,
             sleep=sleep,
             scrub=self._scrub,
+            state_path=state_path,
         )
 
     def _scrub(self, text: str) -> str:
@@ -654,6 +798,13 @@ class _BinanceClient:
         if self._skip_gate:
             return
         record = self._record
+        if record is not None and not self._base.loopback:
+            # An in-memory record skips the strict loader (schema, evidence rules, content hash).
+            # Real hosts are gated only by the bundled registry file, read through load_registry().
+            raise RegistryGateRefused(
+                f"{VENUE_ID}: an in-memory registry_record is accepted only with a loopback base_url (tests); "
+                "real hosts use the bundled registry"
+            )
         if record is None:
             try:
                 record = venue_registry.load_registry().get(VENUE_ID)
@@ -909,6 +1060,7 @@ class BinanceSpotPublicData(_BinanceClient, MarketDataConnector):
         clock: Callable[[], datetime] = _utc_now,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        state_path: str | Path | None = None,
     ) -> None:
         self._init_client(
             base_url=base_url,
@@ -925,6 +1077,7 @@ class BinanceSpotPublicData(_BinanceClient, MarketDataConnector):
             clock=clock,
             monotonic=monotonic,
             sleep=sleep,
+            state_path=state_path,
         )
         if fees is not None:
             maker, taker = (to_decimal(fees[0], "maker_fee"), to_decimal(fees[1], "taker_fee"))
@@ -1190,6 +1343,7 @@ class BinanceSpotAccountReader(_BinanceClient, AccountReadConnector):
         clock: Callable[[], datetime] = _utc_now,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        state_path: str | Path | None = None,
     ) -> None:
         if not isinstance(api_key, SecretValue) or not isinstance(api_secret, SecretValue):
             raise BinanceConfigurationError("api_key and api_secret must be SecretValue instances")
@@ -1205,6 +1359,15 @@ class BinanceSpotAccountReader(_BinanceClient, AccountReadConnector):
         ):
             raise BinanceConfigurationError(f"recv_window_ms must be an integer from 1 to {MAX_ALLOWED_RECV_WINDOW_MS}")
         self._recv_window = recv_window_ms
+        if (
+            isinstance(reverify_after_seconds, bool)
+            or not isinstance(reverify_after_seconds, (int, float))
+            or not math.isfinite(reverify_after_seconds)
+            or not MIN_REVERIFY_SECONDS <= reverify_after_seconds <= MAX_REVERIFY_SECONDS
+        ):
+            raise BinanceConfigurationError(
+                f"reverify_after_seconds must be a finite number from {MIN_REVERIFY_SECONDS} to {MAX_REVERIFY_SECONDS}"
+            )
         self._reverify_after = float(reverify_after_seconds)
         self._verified_at: datetime | None = None
         self._provider_evidence = False
@@ -1225,6 +1388,7 @@ class BinanceSpotAccountReader(_BinanceClient, AccountReadConnector):
             clock=clock,
             monotonic=monotonic,
             sleep=sleep,
+            state_path=state_path,
         )
         self._capabilities = VenueCapabilities(
             venue_id=VENUE_ID,
@@ -1347,11 +1511,12 @@ class BinanceSpotAccountReader(_BinanceClient, AccountReadConnector):
             seen.add(balance.asset)
             balances.append(balance)
         # A signed response from a production host is provider evidence of a live account.
-        self._provider_evidence = self._base.role == "production"
+        # A loopback host (the offline fake) is never evidence, whatever loopback_role says.
+        self._provider_evidence = self._base.role == "production" and not self._base.loopback
         return tuple(balances)
 
     def account_environment(self) -> tuple[VenueEnvironment, EnvironmentSource]:
-        """LIVE + PROVIDER_API only after a signed account response from a production host.
+        """LIVE + PROVIDER_API only after a signed account response from a real (non-loopback) production host.
 
         Binance production has no demo flag in its account response; the
         evidence is that the production host authenticated the key and served
@@ -1365,7 +1530,7 @@ class BinanceSpotAccountReader(_BinanceClient, AccountReadConnector):
             return validate_environment_claim(VenueEnvironment.TESTNET, EnvironmentSource.UNVERIFIED)
         if role == "demo":
             return validate_environment_claim(VenueEnvironment.DEMO, EnvironmentSource.UNVERIFIED)
-        if role == "production" and self._provider_evidence:
+        if role == "production" and self._provider_evidence and not self._base.loopback:
             return validate_environment_claim(VenueEnvironment.LIVE, EnvironmentSource.PROVIDER_API)
         return validate_environment_claim(VenueEnvironment.LIVE, EnvironmentSource.UNVERIFIED)
 

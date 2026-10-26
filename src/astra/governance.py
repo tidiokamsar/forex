@@ -142,6 +142,20 @@ class SecretValue:
 
     __str__ = __repr__
 
+    def __reduce__(self):
+        # Pickling would write the plaintext (multiprocessing, caches, crash dumps); refuse it.
+        raise TypeError("SecretValue cannot be pickled")
+
+    def __reduce_ex__(self, protocol):
+        raise TypeError("SecretValue cannot be pickled")
+
+    def __copy__(self) -> SecretValue:
+        # Immutable wrapper: a copy is the same object, so no new plaintext holder is created.
+        return self
+
+    def __deepcopy__(self, memo: dict) -> SecretValue:
+        return self
+
 
 class SecretVault:
     """Reads secrets from the process environment for authorized humans only.

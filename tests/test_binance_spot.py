@@ -6,6 +6,7 @@ astra.venues.binance_spot.
 """
 
 import ast
+import copy
 import dataclasses
 import io
 import json
@@ -15,7 +16,9 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
+from _support import workspace_tempdir
 from astra.brokers.base import (
     BrokerRequestError,
     BrokerTimeout,
@@ -78,6 +81,9 @@ class FakeTime:
 
 class ServerCase(unittest.TestCase):
     def setUp(self):
+        # Stop state is process-wide per base URL; a reused ephemeral port must not inherit it.
+        bs.reset_host_states_for_tests()
+        self.addCleanup(bs.reset_host_states_for_tests)
         self.clock = FakeClock()
         self.server = FakeBinanceServer(api_key=KEY, api_secret=SECRET, clock_ms=self.clock.peek_ms).start()
         self.addCleanup(self.server.stop)
@@ -361,7 +367,7 @@ class RateLimitTests(ServerCase):
         with self.assertRaises(BrokerRequestError):
             connector.ping()
         self.assertEqual(len(self.server.requests), 1)  # no hammering
-        self.fake_time.now += 121
+        self.clock.advance(121)
         connector.ping()
         self.assertEqual(len(self.server.requests), 2)
 
@@ -475,7 +481,8 @@ class ReadOnlyKeyTests(ServerCase):
         self.assertEqual(account_query["recvWindow"], "5000")
         self.assertEqual(account_query["omitZeroBalances"], "true")
         self.assertIn("signature", account_query)
-        self.assertEqual(reader.account_environment(), (VenueEnvironment.LIVE, EnvironmentSource.PROVIDER_API))
+        # A loopback fake is never provider evidence, even with loopback_role="production" (MV-A-2).
+        self.assertEqual(reader.account_environment(), (VenueEnvironment.LIVE, EnvironmentSource.UNVERIFIED))
         # Verified once; not re-read within the re-verification window.
         reader.balances()
         self.assertEqual(self.server.paths().count("/sapi/v1/account/apiRestrictions"), 1)
@@ -628,6 +635,116 @@ class RegistryGateTests(ServerCase):
         wrong = dataclasses.replace(public_ok, venue_id="other_venue")
         with self.assertRaises(bs.RegistryGateRefused):
             bs.BinanceSpotPublicData(self.server.base_url, loopback_role="public_data", registry_record=wrong).ping()
+
+
+class SharedStopStateTests(ServerCase):
+    """MV-A-3: ban, 429 stop and weight budget are process-wide per base URL, optionally persisted."""
+
+    def test_ban_and_429_stop_shared_by_new_instances(self):
+        self.server.script("/api/v3/ping", Scripted(418, {"code": -1003, "msg": "banned"}, {"Retry-After": "300"}))
+        with self.assertRaises(bs.BinanceIpBanned):
+            self.public().ping()
+        with self.assertRaises(bs.BinanceIpBanned):
+            self.public().ping()
+        with self.assertRaises(bs.BinanceIpBanned):
+            self.reader().verify_read_only()  # same host, other class
+        self.assertEqual(len(self.server.requests), 1)
+        self.clock.advance(301)
+        self.public().ping()
+        self.server.script("/api/v3/ping", Scripted(429, {}, {"Retry-After": "120"}))
+        with self.assertRaises(BrokerRequestError):
+            self.public().ping()
+        with self.assertRaises(BrokerRequestError):
+            self.public().ping()
+        self.assertEqual(len(self.server.requests), 3)
+
+    def test_weight_budget_shared_by_instances(self):
+        self.server.used_weight = 4790
+        self.public().ping()
+        sent = len(self.server.requests)
+        with self.assertRaises(BrokerRequestError) as ctx:
+            self.public().symbol_rules()
+        self.assertEqual(ctx.exception.error_code, "LOCAL_WEIGHT_BUDGET")
+        self.assertEqual(len(self.server.requests), sent)
+
+    def test_ban_persisted_across_processes(self):
+        with workspace_tempdir() as directory:
+            state = Path(directory) / "binance_state.json"
+            self.server.script("/api/v3/ping", Scripted(418, {"code": -1003, "msg": "banned"}))
+            with self.assertRaises(bs.BinanceIpBanned):
+                self.public(state_path=state).ping()
+            document = json.loads(state.read_text(encoding="utf-8"))
+            self.assertTrue(document["hosts"][self.server.base_url]["banned"])
+            bs.reset_host_states_for_tests()  # simulates a restarted process
+            with self.assertRaises(bs.BinanceIpBanned):
+                self.public(state_path=state).ping()
+            self.assertEqual(len(self.server.requests), 1)
+            self.public(state_path=state).acknowledge_ban_cleared()
+            bs.reset_host_states_for_tests()
+            self.public(state_path=state).ping()
+            self.assertEqual(len(self.server.requests), 2)
+
+    def test_unreadable_state_file_refused(self):
+        with workspace_tempdir() as directory:
+            state = Path(directory) / "binance_state.json"
+            state.write_text("{not json", encoding="utf-8")
+            with self.assertRaises(bs.BinanceConfigurationError):
+                self.public(state_path=state)
+            state.write_text(json.dumps({"schema": "other", "hosts": {}}), encoding="utf-8")
+            with self.assertRaises(bs.BinanceConfigurationError):
+                self.public(state_path=state)
+
+
+class ReviewFixTests(ServerCase):
+    def test_in_memory_record_refused_for_real_host(self):
+        # MV-A-1: no socket is opened; the gate refuses before _send.
+        shipped = venue_registry.load_registry().get("binance_spot")
+        S = venue_registry.VenueStatus
+        forged = dataclasses.replace(shipped, statuses=tuple(
+            venue_registry.StatusGrant(s, "2026-10-26", "forged")
+            for s in (S.DISCOVERED, S.OFFICIAL_API_VERIFIED, S.REGION_ELIGIBILITY_VERIFIED, S.READ_ONLY_CONNECTED)))
+        with patch.object(bs._BinanceHttp, "_send", side_effect=AssertionError("network used")):
+            with self.assertRaises(bs.RegistryGateRefused):
+                bs.BinanceSpotPublicData(registry_record=forged).ping()
+            reader = bs.BinanceSpotAccountReader(SecretValue(KEY), SecretValue(SECRET), registry_record=forged)
+            with self.assertRaises(bs.RegistryGateRefused):
+                reader.balances()
+
+    def test_real_production_host_yields_provider_api_after_signed_read(self):
+        # MV-A-2 counterpart: a real production host (patched transport, gate patched open) is evidence.
+        def send(_self, url, _headers):
+            path = url.split("://", 1)[1].split("/", 1)[1].split("?", 1)[0]
+            bodies = {
+                "api/v3/time": {"serverTime": self.clock.peek_ms()},
+                "sapi/v1/account/apiRestrictions": bs_restrictions(),
+                "api/v3/account": {"accountType": "SPOT", "balances": [], "canTrade": False},
+            }
+            return 200, {}, json.dumps(bodies[path]).encode()
+
+        with patch.object(bs._BinanceHttp, "_send", send), patch.object(bs.venue_registry, "can_read_account", return_value=True):
+            reader = bs.BinanceSpotAccountReader(SecretValue(KEY), SecretValue(SECRET), clock=self.clock)
+            self.assertEqual(reader.account_environment(), (VenueEnvironment.LIVE, EnvironmentSource.UNVERIFIED))
+            self.assertEqual(reader.balances(), ())
+            self.assertEqual(reader.account_environment(), (VenueEnvironment.LIVE, EnvironmentSource.PROVIDER_API))
+
+    def test_reverify_interval_bounded(self):
+        # MV-A-4
+        for value in (float("inf"), float("nan"), 0, 0.5, 3601, 1e12, True, "300", None):
+            with self.subTest(value=value), self.assertRaises(bs.BinanceConfigurationError):
+                self.reader(reverify_after_seconds=value)
+        self.reader(reverify_after_seconds=1)
+        self.reader(reverify_after_seconds=3600)
+
+    def test_secret_value_not_pickled_or_copied_in_clear(self):
+        # MV-A-5
+        secret = SecretValue(SECRET)
+        for protocol in range(pickle.HIGHEST_PROTOCOL + 1):
+            with self.assertRaises(TypeError):
+                pickle.dumps(secret, protocol=protocol)
+        self.assertIs(copy.copy(secret), secret)
+        self.assertIs(copy.deepcopy(secret), secret)
+        self.assertIs(copy.deepcopy({"k": secret})["k"], secret)
+        self.assertEqual(secret.reveal(), SECRET)
 
 
 class NoWriteEndpointTests(unittest.TestCase):
