@@ -421,5 +421,32 @@ class SpotLedgerTests(unittest.TestCase):
         self.assertEqual(policy.ledger.records, ())
 
 
+class PersistedStateMigrationTests(unittest.TestCase):
+    def setUp(self):
+        bs.reset_host_states_for_tests()
+        self.addCleanup(bs.reset_host_states_for_tests)
+
+    # CONFIRMED DEFECT MV-A-13 (low, fail-open on upgrade): the persisted stop-state file is now read under the new
+    # scope key ("binance:production"). A file written before this change keys the ban by base URL
+    # ("https://api.binance.com"); attach() looks up only the new key and silently ignores the old entry, so an
+    # active, open-ended 418 ban recorded before the upgrade is forgotten. Entries it cannot map should refuse
+    # (as an unreadable file already does) or be migrated. No network: the connector is only constructed.
+    @unittest.expectedFailure
+    def test_ban_persisted_under_the_previous_key_format_is_still_honoured(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "binance_state.json"
+            path.write_text(json.dumps({
+                "schema": bs.STATE_SCHEMA, "schema_version": bs.STATE_SCHEMA_VERSION,
+                "hosts": {"https://api.binance.com": {"banned": True, "banned_until": None, "blocked_until": None}},
+            }), encoding="utf-8")
+            try:
+                connector = bs.BinanceSpotPublicData("https://api.binance.com", state_path=path)
+            except bs.BinanceConfigurationError:
+                return  # refusing an unmapped entry is the secure outcome
+            self.assertTrue(connector.is_banned)
+
+
 if __name__ == "__main__":
     unittest.main()
