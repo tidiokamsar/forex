@@ -63,12 +63,44 @@ copies listed.
   The hedge-fund example (non-annualized SR 0.458, skewness -2.448, kurtosis 10.164) uses the same
   convention.
 
+### 4. Lo, "The Statistics of Sharpe Ratios" (Financial Analysts Journal 58(4), 2002, pp. 36-52)
+
+- Read 2026-10-25/26 (policy 0.3.0) from a copy hosted by the Berkeley student trading club,
+  https://traders.berkeley.edu/papers/The-Statistics-of-Sharpe-Ratios.pdf (the published FAJ article as
+  a PDF, extracted as text; most equation glyphs survived partly). Not the paywalled Taylor & Francis or
+  JSTOR copies.
+- Sections used:
+  - "IID Returns": eq. 5-9, `V_IID = 1 + SR^2 / 2` and `SE(SR) = sqrt(V_IID / T)` (Table 1 note).
+  - "Non-IID Returns": eq. 14-15, GMM asymptotic variance `V_GMM` with a Newey-West estimator of
+    Sigma (Appendix A). Not implemented in ASTRA (see limitations).
+  - "Time Aggregation", eq. 16-20: `R_t(q) = R_t + ... + R_{t-q+1}`,
+    `Var[R_t(q)] = q sigma^2 + 2 sigma^2 sum_{k=1}^{q-1} (q - k) rho_k` (eq. 19), and
+    `SR(q) = eta(q) SR`, `eta(q) = q / sqrt(q + 2 sum_{k=1}^{q-1} (q - k) rho_k)` (eq. 20).
+  - AR(1) example, eq. 21-22 (`rho_k = rho^k`, closed form of `eta(q)`) and Table 2. The text's
+    numbers (q = 12: 3.46 for rho = 0, 2.88 for rho = 0.2, 4.17 for rho = -0.2) are reproduced by
+    `astra.overfitting.lo_scale_factor` in `tests/test_overfitting.py::SerialDependenceTest`.
+- ASTRA's effective sample size is derived from eq. 19-20 with `q = T`, truncated at m lags:
+  `eta(T)^2 = T / (1 + 2 sum_{k<=m} (1 - k/T) rho_k) = T_eff`. Lo does not use the term "effective
+  sample size"; the name and the truncation are ASTRA's.
+
+### 5. Ljung-Box statistic
+
+- Read: NIST/SEMATECH e-Handbook of Statistical Methods, section 6.4.4.8.1 "Box-Ljung Test",
+  https://www.itl.nist.gov/div898/handbook/pmc/section4/pmc4481.htm (excerpt; the formula glyphs did
+  not survive extraction). It confirms the structure: statistic over the first h sample
+  autocorrelations of a series of length n, compared with a chi-square with h degrees of freedom
+  (h minus the fitted ARMA parameters for residuals; ASTRA tests the raw returns, so h).
+- The formula used, `Q = n (n + 2) sum_{k=1}^{h} r_k^2 / (n - k)`, is the standard Ljung and Box
+  (1978) statistic; the original Biometrika paper was not read. Hand-checked in the tests
+  (n = 4, h = 1: Q = 0.5) and against chi-square critical values (3.8415 for 1 dof, 11.0705 for 5).
+
 ## Not accessed
 
 - The typeset journal versions (J. Computational Finance 2017; J. Portfolio Management 2014;
   J. Risk 2012).
-- Mertens (2002) and Lo (2002), cited by the DSR paper for the Sharpe-ratio standard error; the
-  formula was checked against the PSR snippet above instead.
+- Mertens (2002), cited by the DSR paper for the Sharpe-ratio standard error; the formula was
+  checked against the PSR snippet above instead. (Lo 2002 was read later, see section 4.)
+- Ljung and Box (1978), Biometrika, and Newey and West (1987); only the NIST summary above was read.
 - Harvey and Liu (2014), the alternative threshold the DSR paper mentions.
 
 ## How ASTRA maps to these definitions

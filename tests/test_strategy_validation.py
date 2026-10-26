@@ -90,7 +90,7 @@ class _OverfittingDouble:
             median_logit=0.0,
         )
 
-    def deflated_sharpe_ratio(self, returns, *, n_trials, trial_sharpe_variance=None):
+    def deflated_sharpe_ratio(self, returns, *, n_trials, trial_sharpe_variance=None, autocorrelation_lags=None):
         self.dsr_calls.append({"returns": list(returns), "n_trials": n_trials, "variance": trial_sharpe_variance})
         return _DoubleDSRResult(0.1, 0.2, self.probability, n_trials, len(returns), 0.0, 3.0)
 
@@ -610,10 +610,89 @@ class MarkToMarketPeriodTests(unittest.TestCase):
         self.assertIn("mark-to-market", report.plan_manifest["overfitting"]["pbo_matrix"])
 
 
+def _ar1_returns(rho, count, seed, scale=0.002, mean=0.0004):
+    import random
+
+    rng = random.Random(seed)
+    value, out = 0.0, []
+    for _ in range(count + 300):
+        value = rho * value + rng.gauss(0.0, 1.0)
+        out.append(mean + scale * value)
+    return tuple(out[300:])
+
+
+@unittest.skipUnless(HAS_OVERFITTING_MODULE, "astra.overfitting is not integrated")
+class DsrSerialDependenceGuardTests(unittest.TestCase):
+    """Policy 0.3.0: dependent DSR samples use Lo's effective size, or are withheld (LOW_INFORMATION)."""
+
+    MATRIX = tuple(tuple(float((r * r * 3 + r * 7 + c * 5 + c * r) % 11 - 5) for c in range(4)) for r in range(16))
+
+    def assess(self, returns):
+        from astra.strategy_validation import assess_overfitting
+
+        return assess_overfitting(self.MATRIX, [f"p{r}" for r in range(16)], variants_tested=4, dsr_returns=returns,
+                                  trial_sharpe_variance=None, initial_equity=10_000.0, dsr_trade_count=100)
+
+    def test_iid_sample_is_published_with_its_dependence_record(self):
+        result = self.assess(_ar1_returns(0.0, 400, seed=3))
+        self.assertEqual(result.status, "COMPLETED")
+        dependence = result.dsr_serial_dependence
+        self.assertEqual(dependence["lags"], strategy_validation.DSR_AUTOCORRELATION_LAGS)
+        self.assertLessEqual(dependence["max_abs_autocorrelation"], strategy_validation.MAX_DSR_ABS_AUTOCORRELATION)
+        self.assertAlmostEqual(result.deflated_sharpe_result["effective_observations"],
+                               dependence["effective_observations"], places=9)
+        self.assertLessEqual(dependence["effective_observations"], 400)
+
+    def test_strongly_autocorrelated_sample_is_low_information(self):
+        returns = _ar1_returns(0.8, 400, seed=3)
+        result = self.assess(returns)
+        self.assertIsNone(result.deflated_sharpe_probability)
+        self.assertIsNone(result.deflated_sharpe_probability_plan_only)
+        self.assertGreater(result.dsr_serial_dependence["max_abs_autocorrelation"], 0.7)
+        self.assertTrue(any("max |autocorrelation|" in error for error in result.errors), result.errors)
+        # The same returns in a random order (no serial dependence) are published.
+        import random
+
+        shuffled = list(returns)
+        random.Random(1).shuffle(shuffled)
+        self.assertIsNotNone(self.assess(shuffled).deflated_sharpe_probability)
+
+    @patch("astra.strategy_validation.MAX_DSR_ABS_AUTOCORRELATION", 0.95)
+    def test_effective_size_below_the_floor_is_low_information(self):
+        # The dependence threshold is relaxed here only to reach the effective-size floor: rho = 0.6 over
+        # 60 returns gives T_eff of about 60 / (1 + 2 * sum_{k<=5} 0.6^k) = 60 / 3.77, far below 30.
+        result = self.assess(_ar1_returns(0.6, 60, seed=8))
+        self.assertIsNone(result.deflated_sharpe_probability)
+        self.assertLess(result.dsr_serial_dependence["effective_observations"], 30)
+        self.assertTrue(any("effective sample size" in error for error in result.errors), result.errors)
+        # A relaxed threshold is recorded and fails the promotion policy check.
+        from astra.research_policy import statistical_policy_below_floor
+
+        self.assertIn("max_dsr_abs_autocorrelation",
+                      statistical_policy_below_floor(result.statistical_policy["applied"]))
+
+    def test_policy_check_directions(self):
+        from astra.research_policy import RESEARCH_POLICY_VERSION, statistical_policy_below_floor
+
+        self.assertEqual(RESEARCH_POLICY_VERSION, "astra-research-policy-0.3.0-provisional")
+        applied = strategy_validation.applied_statistical_policy()["applied"]
+        self.assertEqual(statistical_policy_below_floor(applied), ())
+        for name, value in (("max_dsr_abs_autocorrelation", 0.31), ("min_dsr_effective_returns", 29),
+                            ("dsr_autocorrelation_lags", 4), ("dsr_autocorrelation_lags", 6)):
+            with self.subTest(name=name, value=value):
+                self.assertEqual(statistical_policy_below_floor({**applied, name: value}), (name,))
+        # Stricter values pass.
+        stricter = {**applied, "max_dsr_abs_autocorrelation": 0.2, "min_dsr_effective_returns": 50}
+        self.assertEqual(statistical_policy_below_floor(stricter), ())
+
+
 @unittest.skipUnless(HAS_OVERFITTING_MODULE, "astra.overfitting is not integrated")
 class TrialUniverseAndGuardTests(unittest.TestCase):
     MATRIX = tuple(tuple(float((r * r * 3 + r * 7 + c * 5 + c * r) % 11 - 5) for c in range(4)) for r in range(16))
-    RETURNS = tuple(0.002 * ((i * 7) % 11 - 4) for i in range(120))
+    # Policy 0.3.0: the former fixture 0.002 * ((7 i) % 11 - 4) repeats every 11 returns (|rho_k| up to 0.48);
+    # its DSR was only published under the i.i.d. assumption and is now withheld. A seeded i.i.d. series
+    # keeps these plumbing tests about the trial count, not about serial dependence.
+    RETURNS = _ar1_returns(0.0, 120, seed=21)
 
     def assess(self, **kwargs):
         from astra.strategy_validation import assess_overfitting
