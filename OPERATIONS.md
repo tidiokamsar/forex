@@ -1,13 +1,20 @@
 # Operations
 
-All commands run from the project folder with `$env:PYTHONPATH = "src"` (PowerShell). Everything below is SIMULATION only.
+All commands run from the project folder with `$env:PYTHONPATH = "src"` (PowerShell). Everything below is SIMULATION only, on synthetic data: DEMO orders are disabled, LIVE is locked, and no command sends an order outside the process. The only command that contacts a provider is the read-only `ctrader-check` ([BROKERS.md](BROKERS.md)), which has not yet been run against the real service.
 
 ## Normal local run
 
 1. `python -m astra status`: confirm `SIMULATION`, `live_locked: true`, `external_orders: false`.
-2. Research: `python -m astra demo`, `walk-forward ...`, or `ml-baseline` (see README).
+2. Research: `python -m astra demo`, `walk-forward ...`, `evaluate-strategies ...` or `ml-baseline` (see README and [RESEARCH_PROTOCOL.md](RESEARCH_PROTOCOL.md)).
 3. Paper replay through the Order Gateway: `python -m astra paper-replay [--strategy sma|momentum|breakout]`.
-4. Inspect: `python -m astra orders`, `python -m astra controls show`, `python -m astra models`, or `python -m astra serve` for the read-only dashboard.
+4. Inspect: `python -m astra orders`, `python -m astra controls show`, `python -m astra models`, `python -m astra attempts list|count|verify`, or `python -m astra serve` for the read-only dashboard.
+
+## Research integrity checks (lot 4)
+
+- `python -m astra attempts verify [--expected-head ROW_HASH]` checks the hash-chained attempt log (exit code 1 when it does not verify) and prints the current chain head. `list` and `count` print it too. The database is opened read-only.
+- Keep the printed chain head outside the database (printed, committed, or copied to other media) after each research session. Without an external copy, a consistent rewrite of the chain by the file owner passes `verify`; with one, `--expected-head` detects it, but only for the rows up to that head.
+- Evidence anchor: set `ASTRA_EVIDENCE_ANCHOR` before the first sealed plan of a store (see [DEPLOYMENT.md](DEPLOYMENT.md)). The shipped `LocalFileAnchor` is a local file, **not production grade**. No CLI command shows or verifies the anchor; `anchoring.verify_store_against_anchor(database, anchor)` is the Python entry point, and sealing, holdout scoring and promotion call it themselves.
+- Promotion has no CLI command. It is a Python call by a human reviewer (`ModelRegistry.promote(..., holdout_bars=...)`) that re-derives the holdout evidence from the bars; with `LocalFileAnchor` it also requires the explicit, audited `allow_non_production_anchor=True`. A `CHAMPION` status is not used by the service or the paper replay.
 
 ## Emergency stop and freezes
 
@@ -15,7 +22,7 @@ All commands run from the project folder with `$env:PYTHONPATH = "src"` (PowerSh
 - Release: `python -m astra controls release --reason "<why>" --operator <name>`. Requires a human role. In this local CLI the role is asserted by the local user, not authenticated.
 - Entry freezes block new entries but allow risk-reducing exits. `connection_lost`, `reconciliation_required`, `position_divergence` and `unknown_order_state` are cleared **only** by a consistent reconciliation. `daily_loss_limit` lasts until the next UTC day. Each change is an audit event.
 - Scope: the kill switch is global to the store. Freezes and the daily-loss day marker are per account (`TradingControls(scope=account_ref)`, `OrderGateway(account_ref=...)`): an incident on one account does not block another, and reconciling one account does not clear another's freezes. Global freezes (written by a gateway built without `account_ref`) apply to every account.
-- `controls show` and `/api/controls` return `entry_freezes` (global freezes) and `entry_freezes_by_account` (active freezes per account; the key `"*"` holds global freezes).
+- `controls show` returns `entry_freezes` (global freezes) and `entry_freezes_by_account` (active freezes per account; the key `"*"` holds global freezes). `/api/controls` returns the same `entry_freezes_by_account`, but its `entry_freezes` is the union of the codes of every scope, and its `entries_allowed` is false as soon as any account (or the global scope) is frozen.
 
 ## Resolving an UNKNOWN order
 
@@ -105,11 +112,16 @@ python -m astra backup restore <backup file> --operator <name> --reason "<why>"
 
 - `create` uses SQLite's online backup API, runs `PRAGMA integrity_check`, and writes `astra-<UTC timestamp>.sqlite3` plus `<file>.manifest.json` (path, SHA-256, creation time, source, size, integrity result, row count per table). The folder is `--dir`, else `ASTRA_BACKUP_DIR`, else `var/backups`. Only the newest `--keep` backups (default 14) are kept.
 - `verify` recomputes the SHA-256 and the integrity check and compares row counts with the manifest; any mismatch fails.
-- `restore` requires a human role (`HUMAN_ADMIN` or `HUMAN_OPERATOR`; the CLI asserts `HUMAN_OPERATOR`, not authenticated) and a non-empty reason. Stop the service first: the restore is refused while any service heartbeat in the target store is alive (status `running` or `degraded`, heartbeat at most 120 s old). Order of operations, so that no failure leaves the target missing or unfrozen: the backup file actually given is verified (hash, integrity, table counts); it is copied to `<name>.restoring` and the copy is hash-checked; every account that has orders in that copy is frozen with `reconciliation_required` inside the copy; only then is the current database moved to `<name>.pre-restore-<UTC timestamp>` and the copy swapped in. Any failure before the move leaves the live database untouched; a failure of the swap puts the previous database back. A corrupted live database can be restored over: the audit of the restore falls back to the logs, and the corrupted file is kept as `<name>.pre-restore-<UTC timestamp>`. Heartbeats copied from the backup are marked `stopped_by_restore`. Restoring a store that has no orders freezes nothing; the service's startup reconciliation still compares it with the broker. and a `backup.restored` audit event records actor, reason, backup, hash and frozen accounts.
+- `restore` requires a human role (`HUMAN_ADMIN` or `HUMAN_OPERATOR`; the CLI asserts `HUMAN_OPERATOR`, not authenticated) and a non-empty reason. Stop the service first: the restore is refused while any service heartbeat in the target store is alive (status `running` or `degraded`, heartbeat at most 120 s old). Order of operations, so that no failure leaves the target missing or unfrozen: the backup file actually given is verified (hash, integrity, table counts); it is copied to `<name>.restoring` and the copy is hash-checked; every account that has orders in that copy is frozen with `reconciliation_required` inside the copy; only then is the current database moved to `<name>.pre-restore-<UTC timestamp>` and the copy swapped in. Any failure before the move leaves the live database untouched; a failure of the swap puts the previous database back. A corrupted live database can be restored over: the audit of the restore falls back to the logs, and the corrupted file is kept as `<name>.pre-restore-<UTC timestamp>`. Heartbeats copied from the backup are marked `stopped_by_restore`. Restoring a store that has no orders freezes nothing; the service's startup reconciliation still compares it with the broker. A `backup.restored` audit event records actor, reason, backup, hash and frozen accounts.
 - After a restore, entries stay blocked until a reconciliation against the broker is consistent. A backup older than the broker's state is detected at that reconciliation (`DIVERGENT`, for example `position_mismatch`) and the freeze stays.
+- Research evidence after a restore: backups contain the attempt log, sealed plans and holdout evaluations, but not the evidence anchor file. With an anchor configured, a restored database older than the anchor is reported as behind it (`store_behind_anchor`, `consumed_holdout_missing`, `sealed_protocol_missing`), and sealing a new plan, scoring a holdout and promotion are refused. There is no command to reconcile a store with its anchor: restore a backup that is not behind the anchor, or start a new store (a new store cannot reuse the old anchor, and a spent holdout is only known to the old anchor and store). Without an anchor, restoring an older backup brings a spent holdout back into the store; such a holdout was scored without an anchor and is never promotable.
 
-Evidence: tested locally against the simulator only (`tests/test_backup.py`). No restore drill has been run against a real broker account.
+Evidence: tested locally against the simulator only (`tests/test_backup.py`; anchor and restore interplay in `tests/test_anchoring.py`). No restore drill has been run against a real broker account.
+
+## Dashboard
+
+`python -m astra serve` serves a French, GET-only dashboard on loopback. The page shows mode and live lock, the latest run with its declared source label and hash, runs, kill switch and freezes, reconciliations, orders and model versions; `/api/audit` and `/api/experiments` are served as JSON but not rendered. It does not show the attempt log, the evidence anchor state, data quality issues or service heartbeats. It has no authentication, authorization, TLS or rate limiting and must not be exposed beyond the local machine.
 
 ## Not implemented
 
-External service supervision (restart on crash, start at boot), alert delivery (e-mail/messaging), metrics endpoint beyond `/api/health`, log shipping, scheduled backups, and a continuous service wired to a real connector.
+External service supervision (restart on crash, start at boot), alert delivery (e-mail/messaging), metrics endpoint beyond `/api/health`, log shipping, scheduled or encrypted backups, drift monitoring, shadow-mode signal comparison, and a continuous service wired to a real connector or a real feed. In V5 terms (section 5.13 and gates F and H), operations and observability are partial: local logs, heartbeat, backup and a read-only local dashboard exist; supervision, alerting, secured remote access and a shadow service on a real feed do not.

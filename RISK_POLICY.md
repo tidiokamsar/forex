@@ -32,3 +32,23 @@ Exits must reduce an existing position. Hitting the daily loss limit freezes ent
 `governance.approve_risk_policy_change` implements a two-person rule: a `HUMAN_ADMIN` requester, a distinct human reviewer and a written reason. The proposed policy must still pass the RiskEngine's hard caps, and the approval is audited. Agents, strategies, models and LLMs are refused, and the refusal is audited.
 
 Models and strategies cannot raise these limits or expand the instrument allowlist. Current maxima are code constants; a caller may request stricter limits, and the engine snapshots any supplied allowlist into an immutable tuple. There is no runtime risk-policy editor. Any later critical-limit change requires separate human review, versioning, an audit event, and negative tests. LIVE is not supported or configurable.
+
+The research-integrity floors of `research_policy` (holdout reuse thresholds, minimum DSR returns and trades, PBO information floors) are a separate, provisional set of engineering parameters, also fixed in code; see [RESEARCH_PROTOCOL.md](RESEARCH_PROTOCOL.md). They are not risk limits and not calibrated statistical thresholds.
+
+## V5 Portfolio Risk Engine (5.9): status
+
+| Dimension | Status |
+|---|---|
+| Risk per trade from stop distance | Implemented (0.25% cap) |
+| Daily loss limit | Implemented (1% cap, per account, realized in the backtest, mark-to-market in the gateway) |
+| Weekly loss, drawdown and time under the last peak | Not implemented |
+| Exposure per instrument and per currency, correlation between positions | Not implemented (one position, EURUSD only) |
+| Margin and leverage | Partial: required versus free margin with illustrative specs; no leverage schedule, margin call or forced close |
+| Spread and data age | Implemented (3 pips, 120 s caps) |
+| Limits per account, broker and strategy | Partial: freezes and daily loss per account; no per-broker or per-strategy limits |
+| Gap, weekend and event risk | Not implemented |
+| Global circuit breaker and per-account freezes | Implemented (kill switch global, freezes per account) |
+| Martingale, loss-recovery sizing, stop removal | Absent by design; size always comes from the fixed fraction and the stop |
+| Kelly sizing | Not implemented (by design) |
+
+A dimension that cannot be computed is not yet systematically blocking: the engine blocks unknown specs, unknown quote age or spread, unknown margin conversion and an unverified mode, but the unimplemented dimensions above are simply not evaluated. All values were exercised on the simulator with synthetic data only.

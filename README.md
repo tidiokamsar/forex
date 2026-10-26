@@ -39,7 +39,8 @@ Open `http://127.0.0.1:8765`. All bundled data is **synthetic** (`data/synthetic
 | `service status` | Last heartbeat per service account (`alive`, age) |
 | `backup create [--dir ...] [--keep N]` | Consistent, integrity-checked SQLite backup with SHA-256 manifest (`ASTRA_BACKUP_DIR`, default `var/backups`) |
 | `backup verify PATH` | Check a backup's hash, integrity and row counts against its manifest |
-| `backup restore PATH --operator <name> --reason "..."` | Human restore (stop the service first; not enforced); every account with orders frozen until a consistent reconciliation |
+| `backup restore PATH --operator <name> --reason "..."` | Human restore, refused while a service heartbeat is alive; every account with orders frozen until a consistent reconciliation |
+| `attempts list\|count\|verify [--expected-head ROW_HASH]` | Read-only views of the hash-chained attempt registry: attempts, store-wide trial count, chain verification (see [RESEARCH_PROTOCOL.md](RESEARCH_PROTOCOL.md)) |
 | `serve` | Read-only loopback dashboard |
 | `ctrader-check --operator <name>` | Read-only cTrader DEMO connection check; sends no order (see [BROKERS.md](BROKERS.md)) |
 
@@ -58,7 +59,11 @@ Logs are JSON lines on stderr: `ASTRA_LOG_LEVEL` (default `WARNING`), `ASTRA_LOG
 | `validation`, `ml` | Walk-forward/holdout protocol; purged walk-forward ML baseline |
 | `strategy_validation` | Sealed multi-family walk-forward (SMA, momentum, breakout), baselines, cost stress, once-only holdout, registry evidence |
 | `overfitting` | CSCV probability of backtest overfitting and deflated Sharpe ratio (pure Python) |
-| `registry` | Experiment log, model versions, pre-registered criteria (including PBO and deflated Sharpe gates), promotion, rollback |
+| `registry` | Experiment log, model versions, pre-registered criteria (including PBO and deflated Sharpe gates), promotion with holdout re-derivation from the bars, rollback (Python API; no CLI promote) |
+| `attempts` | Append-only, hash-chained attempt registry; store-wide trial count for the deflated Sharpe ratio |
+| `research_policy` | Versioned, provisional research-integrity floors (`astra-research-policy-0.2.0-provisional`) |
+| `holdout_reuse` | Heuristic detection of a holdout that repeats a sealed price path |
+| `anchoring` | Evidence anchor interface; `LocalFileAnchor` only, not production grade |
 | `risk` | Independent RiskEngine with hard-capped policy |
 | `instruments` | Contract specs (illustrative), size rounding, margin |
 | `brokers` | Broker contract and `SimulatedBroker` |
@@ -90,10 +95,13 @@ Latest recorded result: see [ACCEPTANCE_REPORT.md](ACCEPTANCE_REPORT.md).
 ## Limits
 
 - Synthetic data only; no result here is evidence about real markets. Historical performance does not guarantee future results, and nothing here is financial advice.
-- Lot 3 overfitting checks (PBO, deflated Sharpe) are in independent review. On the small bundled fixture they are weak: the development DSR is `INCOMPLETE` and PBO runs on a sparse matrix. Their thresholds are starting values.
+- Overfitting checks (PBO, deflated Sharpe) need enough information: with CLI defaults on the small bundled fixture the assessment is `LOW_INFORMATION`, no PBO or DSR is reported and the promotion gate stays unmet. Thresholds and research-policy floors are provisional engineering values, not calibrated recommendations.
+- Lot 4 integrity controls (attempt registry, holdout reuse detection, re-derivation at promotion, evidence anchoring) are tamper-evident, not tamper-proof: the SQLite file owner can rewrite them. The only anchor shipped, `LocalFileAnchor`, is not production grade, and no external WORM anchor exists. Exploration outside a store is not counted. Promotion has never been exercised on real data.
+- Strategy candidates in the registry do not drive execution: the service and paper replay use `--strategy`, and `SHADOW` is a status only.
 - The cTrader demo adapter is tested offline only; its read-only `ctrader-check` has not been run against a real demo account, and DEMO order execution is disabled. Its reconnection, rate limiting and token handling are also tested offline only.
 - Backup/restore and the continuous service exist and are tested locally with the simulator only; the service CLI runs on the simulated broker and a synthetic feed. No restore drill against a real broker account.
-- Missing: external service supervision (restart, start at boot), alert delivery, authentication, dashboard TLS.
+- Missing: external service supervision (restart, start at boot), alert delivery, authentication, dashboard TLS, encrypted backups, CI, drift monitoring and the autonomous improvement loop. V5 component status: [ARCHITECTURE.md](ARCHITECTURE.md).
+- No profitability claim: no strategy or model has been shown to be profitable.
 - Instrument specifications and costs are illustrative; no swaps or financing are modelled.
 - The kill switch is global to a store; entry freezes and daily-loss state are per account. The SQLite audit trail is mutable by its owner.
 - The dashboard binds to loopback only; do not expose it.

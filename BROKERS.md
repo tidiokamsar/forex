@@ -8,6 +8,22 @@ The contract covers capabilities, connection state, account snapshot, quotes, ma
 
 Strategies, models and LLM outputs cannot reach an adapter. Only `OrderGateway` submits orders to it, with an execution permit issued after permission, schema, idempotency, emergency-control, mode, quote, RiskEngine and contract checks (see [ARCHITECTURE.md](ARCHITECTURE.md)). The read-only `ctrader-check` command calls the adapter's read methods directly and never submits.
 
+### V5 Execution Gateway & Multi-Broker Layer (5.10): status
+
+| Requirement | Status |
+|---|---|
+| Single execution boundary for every order | Implemented (`OrderGateway` plus single-use permits checked in `BrokerAdapter.submit_order`) |
+| Environment verified from a provider source | Implemented in code (`EnvironmentSource.PROVIDER_API`, cTrader `isLive`); never exercised against the real service |
+| Authorization, RiskEngine, freshness, spread, specs and margin checked just before sending | Implemented (gateway checks) |
+| Idempotent ids, explicit `UNKNOWN`, no blind resend after timeout | Implemented |
+| Reconciliation at start, after reconnect and periodically; foreign orders or positions block entries | Implemented (service and gateway, simulator and fake server only) |
+| No deposit, withdrawal or fund movement | Implemented (absent from the contract, tested) |
+| First connector validated by a real read-only check | **Not done**: `ctrader-check` has not yet been run by the user |
+| DEMO order execution | **Disabled** |
+| LIVE | **Locked** |
+| Comparison of the in-house JSON/WebSocket client with the official SDKs (for example the Python Protobuf SDK) | Not done; ADR-0004 records the JSON choice and keeps Protobuf as the fallback |
+| Second adapter, cross-adapter conformance tests | Not implemented |
+
 ## cTrader Open API adapter (selected 2026-10-25)
 
 `astra.brokers.ctrader.CTraderAdapter` speaks the documented JSON protocol over WebSocket to `wss://demo.ctraderapi.com:5036`, using a standard-library client (`brokers/websocket.py`). Status: **implemented and tested offline only.** It has not yet connected to the real service.
