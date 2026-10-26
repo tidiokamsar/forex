@@ -7,6 +7,7 @@ refused on input so a step such as 0.1 is never silently stored as
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
@@ -50,9 +51,14 @@ def require_aware(value: object, name: str) -> datetime:
     return value
 
 
+# ASCII only: a Unicode look-alike (full-width letters, a Cyrillic capital that looks like S, a zero-width
+# space) is upper-case and stripped but would be a different ledger key for the same asset.
+_SYMBOL_PATTERN = re.compile(r"[A-Z0-9][A-Z0-9_./:-]*")
+
+
 def require_symbol(value: object, name: str = "symbol") -> str:
-    if not isinstance(value, str) or not value or value != value.strip().upper():
-        raise ValueError(f"{name} must be a non-empty canonical upper-case string")
+    if not isinstance(value, str) or not _SYMBOL_PATTERN.fullmatch(value):
+        raise ValueError(f"{name} must be a non-empty canonical upper-case ASCII string")
     return value
 
 

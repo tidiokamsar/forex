@@ -7,8 +7,8 @@ As of 2026-10-26. Everything below is documentary evidence from two research dos
 
 The machine-readable source of truth is [src/astra/venues/venue_registry.json](src/astra/venues/venue_registry.json), loaded and validated by `astra.venues.registry`.
 
-- Registry version: **0.2.0** (was 0.1.0), `updated_on` 2026-10-26.
-- Content hash (SHA-256 of the canonical content): `4bdefaeac0e5eb5c6c81852dca4bb81f9d85f5501f8010e7aa63635b6a7eecad`.
+- Registry version: **0.3.0** (0.1.0, then 0.2.0, then 0.3.0, which records the offline Binance Spot tests), `updated_on` 2026-10-26.
+- Content hash (SHA-256 of the canonical content): `c22ec3194c642a10c2c602030a5af8da6353bde2c9713b3756b79701b9e64380`.
 - Check it: `PYTHONPATH=src python -m astra.venues.registry check`. After any edit: bump `registry_version`, then `PYTHONPATH=src python -m astra.venues.registry rehash`.
 
 **No live connection was made to any venue.** No account was opened, no credential or API key was used, no order was sent. No venue holds READ_ONLY_CONNECTED or any later status, and `can_trade` is False for every venue in this lot (`TRADING_ENABLED_IN_THIS_LOT = False`).
@@ -194,9 +194,4 @@ All sources accessed on 2026-10-26 unless a different date is shown. Quotes are 
 
 ## Registry tests (offline)
 
-`cd tests && PYTHONPATH=../src python -m unittest test_venue_registry` checks the schema, hash, gates and status rules. In this version two tests fail because they pin the 0.1.0 seed content, not because the registry is invalid:
-
-- `SeedTests.test_seeded_venues` expects exactly the nine seeded venue ids (including `goforex`).
-- `SchemaTests.test_reseal_file_round_trip` rewrites the version to `0.2.0` and expects the hash to break; the version is now 0.2.0, so nothing changes.
-
-These need a reviewed test update; the registry itself passes `check`.
+`cd tests && PYTHONPATH=../src python -m unittest test_venue_registry` checks the schema, hash, gates and status rules. All 20 tests pass on registry 0.3.0 (the tests that pinned the 0.1.0 seed were updated in 98a1e7e), and `python -m astra.venues.registry check` reports `ok 0.3.0 ... venues=15`. These are offline checks of the file, not evidence about any venue.

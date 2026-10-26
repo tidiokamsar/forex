@@ -516,6 +516,65 @@ class CryptoSpotPolicyValidationTests(unittest.TestCase):
         self.assertEqual(decision.policy_version, "crypto-spot-1-strict")
 
 
+class SpotVenueIdentityTests(unittest.TestCase):
+    """Pins the reason codes of the MV-A-15/MV-A-16 venue checks (MV-D-17) and the ASCII asset rule (A-17)."""
+
+    def test_non_canonical_venue_id_is_refused_with_its_reason(self):
+        for venue_id in ("binance_spot ", "BINANCE_SPOT", "binance-spot", "1binance", "binance_spot\n", "binance_\u017fpot"):
+            with self.subTest(venue_id=venue_id):
+                decision = CryptoSpotRiskPolicy().evaluate(buy(), context(venue_id=venue_id))
+                self.assertFalse(decision.allowed)
+                self.assertIn("venue_id_not_canonical", decision.reasons)
+
+    def test_canonical_venue_outside_the_registry_or_without_crypto_spot_is_refused(self):
+        for venue_id in ("binance_spot_a", "x", "ctrader"):
+            with self.subTest(venue_id=venue_id):
+                decision = CryptoSpotRiskPolicy().evaluate(buy(), context(venue_id=venue_id))
+                self.assertFalse(decision.allowed)
+                self.assertIn("venue_not_in_registry", decision.reasons)
+                self.assertNotIn("venue_id_not_canonical", decision.reasons)
+
+    def test_registered_spot_venue_is_exactly_binance_spot_and_still_allowed(self):
+        self.assertEqual(policies_module._registered_spot_venues(), frozenset({"binance_spot"}))
+        self.assertTrue(CryptoSpotRiskPolicy().evaluate(buy(), context()).allowed)
+
+    def test_unreadable_registry_refuses_every_venue(self):
+        from unittest import mock
+
+        from astra.venues.registry import RegistryError
+
+        policies_module._registered_spot_venues.cache_clear()
+        self.addCleanup(policies_module._registered_spot_venues.cache_clear)
+        for error in (RegistryError("broken"), OSError("missing"), ValueError("bad json")):
+            with self.subTest(error=type(error).__name__):
+                policies_module._registered_spot_venues.cache_clear()
+                with mock.patch.object(policies_module, "load_registry", side_effect=error):
+                    decision = CryptoSpotRiskPolicy().evaluate(buy(), context())
+                self.assertFalse(decision.allowed)
+                self.assertIn("venue_not_in_registry", decision.reasons)
+
+    def test_two_registered_venues_keep_separate_daily_caps(self):
+        from unittest import mock
+
+        with mock.patch.object(policies_module, "_registered_spot_venues",
+                               return_value=frozenset({"binance_spot", "second_spot"})):
+            policy = CryptoSpotRiskPolicy()
+            for i in range(5):
+                self.assertTrue(policy.evaluate(buy(intent_id=f"a{i}", quantity=Decimal("0.038")), context()).allowed)
+            full = policy.evaluate(buy(intent_id="a5", quantity=Decimal("0.038")), context())
+            self.assertIn("daily_notional_exceeds_cap", full.reasons)
+            other = policy.evaluate(buy(intent_id="b0", quantity=Decimal("0.038")), context(venue_id="second_spot"))
+            self.assertTrue(other.allowed, other.reasons)
+
+    def test_unicode_look_alike_assets_are_refused(self):
+        for asset in ("USDT\u200b", "\uff35\uff33\uff24\uff34", "U\u0405DT"):
+            with self.subTest(asset=asset.encode("unicode_escape")):
+                with self.assertRaises(ValueError):
+                    spot_spec(quote_asset=asset, symbol="BTC" + asset)
+                with self.assertRaises(ValueError):
+                    Balance(asset, Decimal(1), Decimal(0), NOW)
+
+
 class ForexPreCheckTests(unittest.TestCase):
     precheck = ForexCfdPreCheck()
 

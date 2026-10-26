@@ -402,6 +402,50 @@ class RateLimitTests(ServerCase):
         self.assertEqual(len(self.server.requests), 2)
 
 
+class ConcurrentStopTests(ServerCase):
+    """A-18: a response that arrives while a stricter stop is already in force never shortens it.
+
+    The other request's stop is set directly and the local pre-check is bypassed, which is what a
+    request already in flight sees.
+    """
+
+    def test_shorter_418_does_not_shorten_an_open_ended_ban(self):
+        from unittest import mock
+
+        self.server.script("/api/v3/ping", Scripted(418, {"code": -1003, "msg": "banned"}, {"Retry-After": "300"}))
+        connector = self.public()
+        http = connector._http
+        http._state.banned, http._state.banned_until = True, None
+        with mock.patch.object(http, "_check_blocks"), self.assertRaises(bs.BinanceIpBanned):
+            connector.ping()
+        self.assertTrue(http._state.banned)
+        self.assertIsNone(http._state.banned_until)
+
+    def test_shorter_418_does_not_shorten_a_longer_ban(self):
+        from unittest import mock
+
+        self.server.script("/api/v3/ping", Scripted(418, {"code": -1003, "msg": "banned"}, {"Retry-After": "300"}))
+        connector = self.public()
+        http = connector._http
+        longer = http._clock() + timedelta(hours=6)
+        http._state.banned, http._state.banned_until = True, longer
+        with mock.patch.object(http, "_check_blocks"), self.assertRaises(bs.BinanceIpBanned):
+            connector.ping()
+        self.assertEqual(http._state.banned_until, longer)
+
+    def test_shorter_429_does_not_shorten_a_longer_stop(self):
+        from unittest import mock
+
+        self.server.script("/api/v3/ping", Scripted(429, {"code": -1003, "msg": "Too many requests"}, {"Retry-After": "120"}))
+        connector = self.public()
+        http = connector._http
+        longer = http._clock() + timedelta(hours=1)
+        http._state.blocked_until = longer
+        with mock.patch.object(http, "_check_blocks"), self.assertRaises(BrokerRequestError):
+            connector.ping()
+        self.assertEqual(http._state.blocked_until, longer)
+
+
 class FailureMappingTests(ServerCase):
     def test_timeout_maps_to_broker_timeout_with_bounded_retries(self):
         self.server.script("/api/v3/ping", Scripted(body={}, delay=0.6), Scripted(body={}, delay=0.6))

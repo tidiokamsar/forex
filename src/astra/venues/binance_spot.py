@@ -24,7 +24,8 @@ Binance account, so ``account_environment()`` reports UNVERIFIED there
 whatever ``loopback_role`` says.
 
 Stop state: the HTTP 418 ban, the HTTP 429 stop and the local request-weight
-budget are shared process-wide per base URL, so a new connector instance
+budget are shared process-wide per provider scope (production, testnet,
+demo; Binance limits per IP), so a new connector instance
 respects a ban or budget hit by another one. Passing ``state_path`` also
 persists the ban and the 429 stop to a small JSON file, so a restarted
 process respects them too; an unreadable state file is refused.
@@ -682,7 +683,9 @@ class _BinanceHttp:
                         wait = retry_after if retry_after is not None else DEFAULT_429_BLOCK_SECONDS
                         until = self._clock() + timedelta(seconds=wait)
                     with self._lock:
-                        self._state.blocked_until = until
+                        # Keep the stricter stop: a concurrent 429 with a shorter Retry-After never shortens one.
+                        if self._state.blocked_until is None or until > self._state.blocked_until:
+                            self._state.blocked_until = until
                         self._state.save()
                     log_event(_LOG, "binance.rate_limited_stop", level=logging.WARNING, path=endpoint.path,
                               retry_after=wait, open_ended=wait is None)
@@ -711,8 +714,12 @@ class _BinanceHttp:
     def _ban(self, path: str, retry_after: float | None) -> None:
         until = None if retry_after is None else self._clock() + timedelta(seconds=retry_after)
         with self._lock:
+            # Keep the stricter ban: an open-ended or longer ban already in force is never shortened.
+            if not self._state.banned:
+                self._state.banned_until = until
+            elif self._state.banned_until is not None:
+                self._state.banned_until = None if until is None else max(self._state.banned_until, until)
             self._state.banned = True
-            self._state.banned_until = until
             self._state.save()
         log_event(_LOG, "binance.ip_banned", level=logging.ERROR, path=path,
                   banned_until=until.isoformat() if until else None)
