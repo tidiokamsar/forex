@@ -90,6 +90,6 @@ Offline and research only; no venue contacted by code, no account, no key, no or
 | MV-REG | Versioned venue registry (0.3.0, 15 venues), cumulative statuses, strict loader, all gates closed | DONE (local) | `venues/registry.py`, `venue_registry.json`, VENUE_REGISTRY.md; `test_venue_registry` |
 | MV-BIN | Binance Spot public-data connector and read-only account reader (GET only, provider-verified read-only key) | DONE (offline only); NOT READ_ONLY_CONNECTED | `venues/binance_spot.py`; `test_binance_spot` |
 | MV-RISK | Per-market risk policies and cost models (spot simulation only, derivatives refused) | DONE (local) | `markets/risk_policies.py`, `markets/costs.py`; `test_market_risk` |
-| MV-QA | Independent security (A) and QA (D) reviews, fixes MV-A-1..14 and MV-D-1..16 | DONE: final verdicts favourable, no critical/high/medium open, no expected failure left | `test_multi_venue_security_review`, `test_multi_venue_verification` |
+| MV-QA | Independent security (A) and QA (D) reviews, fixes MV-A-1..16 and MV-D-1..16 | DONE: final verdicts favourable (A on 1cf3c5b, D on edf4567), no critical/high/medium open, no expected failure left | `test_multi_venue_security_review`, `test_multi_venue_verification` |
 | MV-OPEN | Live read-only checks (cTrader, Binance), written eligibility confirmations, IBKR adapter, derivatives risk review, Ed25519 signing | TODO (human actions first) | `reports/MULTI_VENUE_REPORT.md` section 8 |
 

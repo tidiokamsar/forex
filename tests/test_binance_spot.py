@@ -12,6 +12,7 @@ import io
 import json
 import logging
 import pickle
+import time
 import unittest
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -407,6 +408,11 @@ class FailureMappingTests(ServerCase):
         connector = self.public(timeout=0.2, max_attempts=2)
         with self.assertRaises(BrokerTimeout):
             connector.ping()
+        # The fixture records a request on its own handler thread, which can lag behind the client's
+        # timeout on a loaded machine; wait (real time, bounded) for the second arrival before counting.
+        deadline = time.monotonic() + 5.0
+        while len(self.server.requests) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
         self.assertEqual(len(self.server.requests), 2)
         self.assertEqual(self.fake_time.sleeps, [0.5])
 
