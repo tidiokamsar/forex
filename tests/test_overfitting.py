@@ -13,13 +13,19 @@ from astra.overfitting import (
     DeflatedSharpeResult,
     PBOResult,
     TrialUniverse,
+    chi_square_survival,
     cross_sectional_variance,
     deflated_sharpe_from_moments,
     deflated_sharpe_ratio,
+    effective_sample_size,
     expected_maximum_sharpe,
+    ljung_box,
+    lo_scale_factor,
     probability_of_backtest_overfitting,
     resolve_trials,
+    sample_autocorrelations,
     selection_score_metric,
+    serial_dependence,
     sharpe_like,
 )
 
@@ -408,6 +414,99 @@ class ResolveTrialsTest(unittest.TestCase):
             TrialUniverse(n_trials=2, trial_sharpes=(math.nan,))
         with self.assertRaises(TypeError):
             self.resolve(universe={"n_trials": 9})
+
+
+def _ar1(rho, count, seed, mean=0.0, burn=500):
+    rng = random.Random(seed)
+    value, out = 0.0, []
+    for _ in range(count + burn):
+        value = rho * value + rng.gauss(0.0, 1.0)
+        out.append(value + mean)
+    return out[burn:]
+
+
+class SerialDependenceTest(unittest.TestCase):
+    """Policy 0.3.0: the DSR sample's autocorrelation is measured and T is replaced by Lo's effective size."""
+
+    def test_lo_scale_factor_reproduces_table_2(self):
+        # Lo (2002), Table 2 (AR(1) returns): q = 12 -> 3.46 (rho 0), 2.88 (rho 0.2), 4.17 (rho -0.2);
+        # q = 24, rho 0.5 -> 2.91. AR(1) autocorrelations are rho^k.
+        for rho, q, expected in ((0.0, 12, 3.46), (0.2, 12, 2.88), (-0.2, 12, 4.17), (0.5, 24, 2.91)):
+            with self.subTest(rho=rho, q=q):
+                value = lo_scale_factor(q, [rho**lag for lag in range(1, q)])
+                self.assertAlmostEqual(value, expected, places=2)
+                # Closed form for AR(1), Lo eq. 22.
+                closed = math.sqrt(q) * (1 + 2 * rho / (1 - rho) * (1 - (1 - rho**q) / (q * (1 - rho)))) ** -0.5
+                self.assertAlmostEqual(value, closed, places=12)
+
+    def test_effective_sample_size_formula(self):
+        # T = 100, rho = (0.5, 0.25): inflation = 1 + 2 * (0.99 * 0.5 + 0.98 * 0.25) = 2.48; T_eff = 100 / 2.48.
+        effective, inflation = effective_sample_size(100, (0.5, 0.25))
+        self.assertAlmostEqual(inflation, 2.48, places=12)
+        self.assertAlmostEqual(effective, 100 / 2.48, places=12)
+        # eta(T)^2 = T_eff: the whole-sample Sharpe scale factor of Lo eq. 20 with the same lags.
+        self.assertAlmostEqual(lo_scale_factor(100, (0.5, 0.25)) ** 2, effective, places=9)
+        # Negative autocorrelation never raises the sample size above T (conservative).
+        effective, inflation = effective_sample_size(100, (-0.4,))
+        self.assertAlmostEqual(inflation, 1 - 2 * 0.99 * 0.4, places=12)
+        self.assertEqual(effective, 100.0)
+
+    def test_autocorrelation_and_ljung_box_by_hand(self):
+        # x = 1, 2, 3, 4: centred -1.5, -0.5, 0.5, 1.5; sum of squares 5; lag-1 products 0.75 - 0.25 + 0.75.
+        rho = sample_autocorrelations([1.0, 2.0, 3.0, 4.0], 1)
+        self.assertAlmostEqual(rho[0], 1.25 / 5, places=15)
+        # Q = T (T + 2) rho_1^2 / (T - 1) = 4 * 6 * 0.0625 / 3 = 0.5; chi-square(1) tail of 0.5.
+        statistic, p_value = ljung_box(rho, 4)
+        self.assertAlmostEqual(statistic, 0.5, places=12)
+        self.assertAlmostEqual(p_value, math.erfc(math.sqrt(0.25)), places=10)
+        with self.assertRaises(ValueError):
+            sample_autocorrelations([1.0, 2.0, 3.0], 2)
+        with self.assertRaises(ValueError):
+            sample_autocorrelations([0.5] * 10, 1)
+
+    def test_chi_square_survival(self):
+        self.assertAlmostEqual(chi_square_survival(3.841458820694124, 1), 0.05, places=9)
+        self.assertAlmostEqual(chi_square_survival(11.070497693516351, 5), 0.05, places=9)
+        self.assertAlmostEqual(chi_square_survival(4.0, 2), math.exp(-2.0), places=12)  # dof 2: exp(-x/2)
+        self.assertAlmostEqual(chi_square_survival(40.0, 2), math.exp(-20.0), delta=1e-15)
+        self.assertEqual(chi_square_survival(0.0, 3), 1.0)
+
+    def test_ar1_sample_recovers_rho_and_effective_size(self):
+        # rho = 0.5, T = 4000: rho_1 within 3 standard errors (~0.014) of 0.5, and with 5 lags the
+        # inflation is close to 1 + 2 * sum_{k<=5} 0.5^k = 2.9375, so T_eff / T is close to 0.340.
+        values = _ar1(0.5, 4000, seed=11, mean=0.05)
+        dependence = serial_dependence(values, 5)
+        self.assertAlmostEqual(dependence.autocorrelations[0], 0.5, delta=0.045)
+        self.assertAlmostEqual(dependence.effective_observations / 4000, 1 / 2.9375, delta=0.04)
+        self.assertLess(dependence.ljung_box_p_value, 1e-12)
+        iid = deflated_sharpe_ratio(values, n_trials=5)
+        adjusted = deflated_sharpe_ratio(values, n_trials=5, autocorrelation_lags=5)
+        self.assertLess(adjusted.probability, iid.probability)
+        self.assertAlmostEqual(adjusted.effective_observations, dependence.effective_observations, places=9)
+        self.assertEqual(adjusted.serial_dependence["lags"], 5)
+        # The null trial variance follows the effective size: 1 / (T_eff - 1).
+        self.assertAlmostEqual(adjusted.trial_sharpe_variance, 1 / (dependence.effective_observations - 1), places=15)
+
+    def test_iid_sample_is_unchanged_within_tolerance(self):
+        values = _ar1(0.0, 2000, seed=5, mean=0.04)
+        dependence = serial_dependence(values, 5)
+        self.assertLess(dependence.max_abs_autocorrelation, 0.1)
+        # Sampling noise of 5 estimated autocorrelations (sd of the inflation ~ 2 * sqrt(5 / T) = 0.1)
+        # can only lower T_eff (positive noise counts, negative is capped): allow 3 standard deviations.
+        self.assertGreater(dependence.effective_observations, 0.70 * 2000)
+        iid = deflated_sharpe_ratio(values, n_trials=5)
+        adjusted = deflated_sharpe_ratio(values, n_trials=5, autocorrelation_lags=5)
+        self.assertAlmostEqual(adjusted.probability, iid.probability, delta=0.03)
+        self.assertEqual(iid.effective_observations, 2000.0)
+        self.assertIsNone(iid.serial_dependence)
+
+    def test_effective_observations_are_bounded(self):
+        with self.assertRaises(ValueError):
+            deflated_sharpe_from_moments(sharpe=0.1, n_observations=100, skewness=0.0, kurtosis=3.0, n_trials=2,
+                                         trial_sharpe_variance=0.01, effective_observations=150.0)
+        _sr0, adjusted = deflated_sharpe_from_moments(sharpe=0.1, n_observations=100, skewness=0.0, kurtosis=3.0,
+                                                     n_trials=1, trial_sharpe_variance=0.01, effective_observations=50.0)
+        self.assertAlmostEqual(adjusted, NORMAL.cdf(0.1 * math.sqrt(49) / math.sqrt(1 + 0.5 * 0.01)), places=12)
 
 
 class SerializationTest(unittest.TestCase):

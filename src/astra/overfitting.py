@@ -65,6 +65,10 @@ EULER_MASCHERONI = 0.5772156649015329
 IN_SAMPLE_TIE_POLICY = "worst_out_of_sample_among_in_sample_ties_then_lowest_index"
 DEFAULT_METRIC_NAME = "sharpe_like(mean / sample stdev)"
 NULL_TRIAL_VARIANCE = "null_sampling_variance_1_over_T_minus_1"
+SERIAL_DEPENDENCE_METHOD = (
+    "sample autocorrelations rho_1..rho_m; Ljung-Box Q; T_eff = T / max(1 + 2 sum (1 - k/T) rho_k, 1) "
+    "(Lo 2002, eq. 19-20, truncated at m lags)"
+)
 # Fewer trial Sharpe values than this give a cross-sectional variance too noisy to rely on alone.
 MIN_TRIAL_SHARPES_FOR_VARIANCE = 5
 
@@ -115,6 +119,9 @@ class DeflatedSharpeResult:
     trial_sharpe_variance: float = 0.0
     trial_sharpe_variance_source: str = NULL_TRIAL_VARIANCE
     kurtosis_convention: str = "non-excess (normal = 3)"
+    # Sample length used in the statistic: n_observations (i.i.d.) or the effective size T_eff.
+    effective_observations: float | None = None
+    serial_dependence: dict | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -337,22 +344,183 @@ def deflated_sharpe_from_moments(
     kurtosis: float,
     n_trials: int,
     trial_sharpe_variance: float,
+    effective_observations: float | None = None,
 ) -> tuple[float, float]:
     """Return ``(SR0, DSR)`` from summary statistics (DSR paper eq. 2; ``kurtosis`` non-excess).
 
-    Useful when only moments are known, as in the paper's numerical example.
+    Useful when only moments are known, as in the paper's numerical example. With
+    ``effective_observations`` (``T_eff <= T``, see ``serial_dependence``) the
+    statistic uses ``sqrt(T_eff - 1)`` instead of ``sqrt(T - 1)``.
     """
 
     for value, name in ((sharpe, "sharpe"), (skewness, "skewness"), (kurtosis, "kurtosis")):
         if not _finite(value):
             raise ValueError(f"{name} must be a finite real number")
     _require_int(n_observations, "n_observations", 2)
+    length = float(n_observations)
+    if effective_observations is not None:
+        if not _finite(effective_observations) or not 1.0 < effective_observations <= n_observations:
+            raise ValueError("effective_observations must be finite, above 1 and at most n_observations")
+        length = float(effective_observations)
     benchmark = expected_maximum_sharpe(n_trials, trial_sharpe_variance)
     denominator = 1.0 - skewness * sharpe + (kurtosis - 1.0) / 4.0 * sharpe**2
     if not denominator > 0:
         raise ValueError("the Sharpe ratio standard-error term is not positive for these returns")
-    statistic = (sharpe - benchmark) * math.sqrt(n_observations - 1) / math.sqrt(denominator)
+    statistic = (sharpe - benchmark) * math.sqrt(length - 1.0) / math.sqrt(denominator)
     return benchmark, _STANDARD_NORMAL.cdf(statistic)
+
+
+@dataclass(frozen=True, slots=True)
+class SerialDependence:
+    """Serial dependence of a return series and the effective sample size it implies.
+
+    ``autocorrelations[k - 1]`` is the sample autocorrelation at lag ``k``
+    (``sum (x_t - m)(x_{t-k} - m) / sum (x_t - m)^2``, the estimator of the
+    Ljung-Box statistic). ``variance_inflation`` is
+    ``1 + 2 * sum_{k=1..lags} (1 - k / T) * rho_k``: by Lo (2002, eq. 19-20) the
+    variance of the ``T``-period sum is ``T * sigma^2 * variance_inflation`` (with
+    the sum truncated at ``lags``), so the Sharpe of the whole sample is
+    ``eta(T) * SR`` with ``eta(T)^2 = T / variance_inflation``.
+    ``effective_observations = T / max(variance_inflation, 1)``: negative
+    autocorrelation is never allowed to raise the sample size (conservative).
+    """
+
+    n_observations: int
+    lags: int
+    autocorrelations: tuple[float, ...]
+    ljung_box_q: float
+    ljung_box_p_value: float
+    variance_inflation: float
+    effective_observations: float
+    method: str = SERIAL_DEPENDENCE_METHOD
+
+    @property
+    def max_abs_autocorrelation(self) -> float:
+        return max((abs(value) for value in self.autocorrelations), default=0.0)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["autocorrelations"] = list(self.autocorrelations)
+        payload["max_abs_autocorrelation"] = self.max_abs_autocorrelation
+        json.dumps(payload, allow_nan=False)
+        return payload
+
+
+def sample_autocorrelations(values: Sequence[float], lags: int) -> tuple[float, ...]:
+    """Sample autocorrelations at lags ``1..lags`` (biased estimator, common denominator)."""
+
+    series = _validated_series(values)
+    _require_int(lags, "lags", 1)
+    count = len(series)
+    if count <= lags + 1:
+        raise ValueError(f"{lags} autocorrelation lags need more than {lags + 1} observations")
+    mean = math.fsum(series) / count
+    centred = [value - mean for value in series]
+    denominator = math.fsum(value * value for value in centred)
+    if denominator <= 0 or negligible_deviation(math.sqrt(denominator / count), series):
+        raise ValueError("returns have zero or negligible variance; autocorrelations are undefined")
+    return tuple(
+        math.fsum(centred[index] * centred[index - lag] for index in range(lag, count)) / denominator
+        for lag in range(1, lags + 1)
+    )
+
+
+def ljung_box(autocorrelations: Sequence[float], n_observations: int) -> tuple[float, float]:
+    """Ljung-Box (1978) ``Q = T (T + 2) sum_k rho_k^2 / (T - k)`` and its chi-square(h) upper-tail p-value."""
+
+    lags = len(autocorrelations)
+    _require_int(lags, "lags", 1)
+    _require_int(n_observations, "n_observations", lags + 2)
+    statistic = n_observations * (n_observations + 2) * math.fsum(
+        value * value / (n_observations - lag) for lag, value in enumerate(autocorrelations, start=1)
+    )
+    return statistic, chi_square_survival(statistic, lags)
+
+
+def chi_square_survival(statistic: float, degrees_of_freedom: int) -> float:
+    """``P[X >= statistic]`` for ``X ~ chi-square(degrees_of_freedom)`` (regularized upper gamma)."""
+
+    _require_int(degrees_of_freedom, "degrees_of_freedom", 1)
+    if not _finite(statistic) or statistic < 0:
+        raise ValueError("statistic must be a finite non-negative number")
+    return _regularized_upper_gamma(degrees_of_freedom / 2.0, statistic / 2.0)
+
+
+def _regularized_upper_gamma(a: float, x: float) -> float:
+    # Series for x < a + 1, Lentz continued fraction otherwise (standard numerical recipe).
+    if x == 0.0:
+        return 1.0
+    log_prefix = -x + a * math.log(x) - math.lgamma(a)
+    if x < a + 1.0:
+        term = total = 1.0 / a
+        denominator = a
+        for _ in range(10_000):
+            denominator += 1.0
+            term *= x / denominator
+            total += term
+            if abs(term) < abs(total) * 1e-15:
+                break
+        return max(0.0, 1.0 - total * math.exp(log_prefix))
+    tiny = 1e-300
+    b = x + 1.0 - a
+    c = 1.0 / tiny
+    d = 1.0 / b
+    h = d
+    for index in range(1, 10_000):
+        an = -index * (index - a)
+        b += 2.0
+        d = an * d + b
+        d = tiny if abs(d) < tiny else d
+        c = b + an / c
+        c = tiny if abs(c) < tiny else c
+        d = 1.0 / d
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < 1e-15:
+            break
+    return min(1.0, math.exp(log_prefix) * h)
+
+
+def lo_scale_factor(q: int, autocorrelations: Sequence[float]) -> float:
+    """Lo (2002) eq. 20: ``eta(q) = q / sqrt(q + 2 sum_{k=1..q-1} (q - k) rho_k)``.
+
+    Autocorrelations beyond the supplied ones are taken as zero.
+    """
+
+    _require_int(q, "q", 1)
+    rho = list(autocorrelations)[: q - 1]
+    variance = q + 2.0 * math.fsum((q - lag) * value for lag, value in enumerate(rho, start=1))
+    if not variance > 0:
+        raise ValueError("autocorrelations imply a non-positive variance of the aggregated return")
+    return q / math.sqrt(variance)
+
+
+def effective_sample_size(n_observations: int, autocorrelations: Sequence[float]) -> tuple[float, float]:
+    """Return ``(T_eff, variance_inflation)``, ``T_eff = T / max(1 + 2 sum (1 - k/T) rho_k, 1)``."""
+
+    _require_int(n_observations, "n_observations", 2)
+    inflation = 1.0 + 2.0 * math.fsum(
+        (1.0 - lag / n_observations) * value for lag, value in enumerate(autocorrelations, start=1)
+    )
+    return n_observations / max(inflation, 1.0), inflation
+
+
+def serial_dependence(values: Sequence[float], lags: int) -> SerialDependence:
+    """Autocorrelations, Ljung-Box statistic and effective sample size of ``values``."""
+
+    rho = sample_autocorrelations(values, lags)
+    count = len(values)
+    statistic, p_value = ljung_box(rho, count)
+    effective, inflation = effective_sample_size(count, rho)
+    return SerialDependence(
+        n_observations=count,
+        lags=lags,
+        autocorrelations=rho,
+        ljung_box_q=statistic,
+        ljung_box_p_value=p_value,
+        variance_inflation=inflation,
+        effective_observations=effective,
+    )
 
 
 def deflated_sharpe_ratio(
@@ -360,6 +528,7 @@ def deflated_sharpe_ratio(
     *,
     n_trials: int,
     trial_sharpe_variance: float | None = None,
+    autocorrelation_lags: int | None = None,
 ) -> DeflatedSharpeResult:
     """Deflated Sharpe ratio of the selected strategy (Bailey and Lopez de Prado, 2014).
 
@@ -372,6 +541,11 @@ def deflated_sharpe_ratio(
     With ``n_trials == 1`` it reduces to the probabilistic Sharpe ratio against 0.
     ``trial_sharpe_variance`` must be in the same per-period unit as the returns
     (never an annualized variance with per-period returns).
+
+    With ``autocorrelation_lags`` the sample's serial dependence is measured
+    (``serial_dependence``) and ``T`` is replaced by the effective sample size
+    ``T_eff`` (Lo 2002, eq. 19-20) in the statistic and in the default null
+    variance ``1 / (T_eff - 1)``. Without it the returns are treated as i.i.d.
     """
 
     values = _validated_series(returns)
@@ -389,7 +563,11 @@ def deflated_sharpe_ratio(
     m4 = sum((value - mean) ** 4 for value in values) / count
     skewness = m3 / m2**1.5
     kurtosis = m4 / m2**2
-    variance = 1.0 / (count - 1) if trial_sharpe_variance is None else trial_sharpe_variance
+    dependence = None if autocorrelation_lags is None else serial_dependence(values, autocorrelation_lags)
+    length = float(count) if dependence is None else dependence.effective_observations
+    if length <= 2.0:
+        raise ValueError(f"effective sample size {length:.3f} is too small for a deflated Sharpe ratio")
+    variance = 1.0 / (length - 1.0) if trial_sharpe_variance is None else trial_sharpe_variance
     source = NULL_TRIAL_VARIANCE if trial_sharpe_variance is None else "supplied"
     benchmark, probability = deflated_sharpe_from_moments(
         sharpe=sharpe,
@@ -398,6 +576,7 @@ def deflated_sharpe_ratio(
         kurtosis=kurtosis,
         n_trials=n_trials,
         trial_sharpe_variance=variance,
+        effective_observations=None if dependence is None else length,
     )
     return DeflatedSharpeResult(
         observed_sharpe=sharpe,
@@ -409,6 +588,8 @@ def deflated_sharpe_ratio(
         kurtosis=kurtosis,
         trial_sharpe_variance=float(variance),
         trial_sharpe_variance_source=source,
+        effective_observations=length,
+        serial_dependence=None if dependence is None else dependence.to_dict(),
     )
 
 

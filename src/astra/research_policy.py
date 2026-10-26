@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, fields
 
-RESEARCH_POLICY_VERSION = "astra-research-policy-0.2.0-provisional"
+RESEARCH_POLICY_VERSION = "astra-research-policy-0.3.0-provisional"
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,25 +79,62 @@ class StatisticalPolicy:
     min_pbo_nonzero_row_fraction: float = 0.5
     min_pbo_slices: int = 4
     min_pbo_trades_per_slice: int = 1  # each PBO variant needs this many trades per slice on average
+    # Serial dependence of the DSR sample (policy 0.3.0, provisional engineering values that need a
+    # statistical review; not tuned on any candidate). Autocorrelations rho_1..rho_m of the per-bar
+    # returns are measured with m = dsr_autocorrelation_lags; the DSR uses the effective sample size
+    # T_eff = T / max(1 + 2 sum (1 - k/T) rho_k, 1) (Lo 2002) and is not published when
+    # T_eff < min_dsr_effective_returns or when any |rho_k| > max_dsr_abs_autocorrelation (the
+    # truncated correction is then too weak an approximation).
+    dsr_autocorrelation_lags: int = 5
+    min_dsr_effective_returns: int = 30
+    max_dsr_abs_autocorrelation: float = 0.3
+
+    def __post_init__(self) -> None:
+        if not 1 <= self.dsr_autocorrelation_lags < self.min_dsr_returns:
+            raise ValueError("require 1 <= dsr_autocorrelation_lags < min_dsr_returns")
+        if not 0.0 < self.max_dsr_abs_autocorrelation < 1.0:
+            raise ValueError("require 0 < max_dsr_abs_autocorrelation < 1")
 
     def payload(self) -> dict:
         return {"version": RESEARCH_POLICY_VERSION, **asdict(self)}
 
 
-def statistical_policy_below_floor(applied: object) -> tuple[str, ...]:
-    """Names of statistical floors recorded as applied that are below ``StatisticalPolicy()`` (fail closed).
+# Direction in which each statistical value may move without weakening the check; "equal" values
+# change what is measured and must match the reviewed policy exactly.
+_STATISTICAL_STRICTER_WHEN = {
+    "min_dsr_returns": "higher",
+    "min_dsr_trades": "higher",
+    "min_pbo_nonzero_row_fraction": "higher",
+    "min_pbo_slices": "higher",
+    "min_pbo_trades_per_slice": "higher",
+    "dsr_autocorrelation_lags": "equal",
+    "min_dsr_effective_returns": "higher",
+    "max_dsr_abs_autocorrelation": "lower",
+}
 
-    Every floor is stricter when higher. A missing, non-numeric or boolean value is
-    reported too, so a report without the record (or minted without it) cannot pass.
+
+def statistical_policy_below_floor(applied: object) -> tuple[str, ...]:
+    """Names of statistical values recorded as applied that are looser than ``StatisticalPolicy()`` (fail closed).
+
+    Floors are stricter when higher, ``max_dsr_abs_autocorrelation`` when lower,
+    and ``dsr_autocorrelation_lags`` must equal the policy. A missing, non-numeric
+    or boolean value is reported too, so a report without the record (or minted
+    without it) cannot pass.
     """
 
     floor = asdict(StatisticalPolicy())
     if not isinstance(applied, dict):
         return tuple(floor)
     below = []
-    for name, minimum in floor.items():
+    for name, reference in floor.items():
         value = applied.get(name)
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value or value < minimum:
+        direction = _STATISTICAL_STRICTER_WHEN[name]
+        invalid = isinstance(value, bool) or not isinstance(value, (int, float)) or value != value
+        if invalid or (
+            (direction == "higher" and value < reference)
+            or (direction == "lower" and value > reference)
+            or (direction == "equal" and value != reference)
+        ):
             below.append(name)
     return tuple(below)
 

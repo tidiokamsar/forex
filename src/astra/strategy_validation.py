@@ -85,6 +85,11 @@ MIN_DSR_RETURNS = STATISTICAL_POLICY.min_dsr_returns
 # needs this many trades in its sample, and each PBO variant at least one trade per slice (Lot 4, N-1).
 MIN_DSR_TRADES = STATISTICAL_POLICY.min_dsr_trades
 MIN_PBO_TRADES_PER_SLICE = STATISTICAL_POLICY.min_pbo_trades_per_slice
+# Serial dependence of the DSR sample (policy 0.3.0): the DSR uses Lo's (2002) effective sample size
+# and is withheld when that size is too small or the dependence too strong for the correction.
+DSR_AUTOCORRELATION_LAGS = STATISTICAL_POLICY.dsr_autocorrelation_lags
+MIN_DSR_EFFECTIVE_RETURNS = STATISTICAL_POLICY.min_dsr_effective_returns
+MAX_DSR_ABS_AUTOCORRELATION = STATISTICAL_POLICY.max_dsr_abs_autocorrelation
 MIN_PBO_NONZERO_ROW_FRACTION = STATISTICAL_POLICY.min_pbo_nonzero_row_fraction
 # C(2, 1) = 2 combinations can only give PBO 0, 0.5 or 1; at least 4 slices (6 combinations) are required.
 MIN_PBO_SLICES = STATISTICAL_POLICY.min_pbo_slices
@@ -112,7 +117,8 @@ EXCLUDED_FAMILIES = {
 }
 DSR_SAMPLE = (
     "per-bar mark-to-market net return (P&L / initial equity) of the final selected candidate on "
-    "development test windows (never used for selection), plus the holdout bars once evaluated"
+    "development test windows (never used for selection), plus the holdout bars once evaluated; serial "
+    "dependence measured over DSR_AUTOCORRELATION_LAGS lags and T replaced by the effective size (Lo 2002)"
 )
 DSR_TRIAL_VARIANCE = (
     "largest of: 1 / (T - 1) for the DSR sample length T; the sample variance across candidates of the per-bar "
@@ -288,6 +294,8 @@ class OverfittingAssessment:
     dsr_trade_count: int | None = None
     # StatisticalPolicy payload and the floors actually applied by this call (Lot 4, P-4).
     statistical_policy: dict | None = None
+    # Autocorrelations, Ljung-Box and effective sample size of the DSR sample (policy 0.3.0).
+    dsr_serial_dependence: dict | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1158,8 +1166,21 @@ def applied_statistical_policy() -> dict[str, Any]:
             "min_pbo_nonzero_row_fraction": MIN_PBO_NONZERO_ROW_FRACTION,
             "min_pbo_slices": MIN_PBO_SLICES,
             "min_pbo_trades_per_slice": MIN_PBO_TRADES_PER_SLICE,
+            "dsr_autocorrelation_lags": DSR_AUTOCORRELATION_LAGS,
+            "min_dsr_effective_returns": MIN_DSR_EFFECTIVE_RETURNS,
+            "max_dsr_abs_autocorrelation": MAX_DSR_ABS_AUTOCORRELATION,
         },
     }
+
+
+def _dsr_dependence(measure, returns, errors):
+    """Serial dependence of the DSR sample, or ``None`` with the error recorded when it cannot be measured."""
+
+    try:
+        return measure(list(returns), DSR_AUTOCORRELATION_LAGS)
+    except (ValueError, ArithmeticError) as exc:
+        errors.append(f"deflated_sharpe: {type(exc).__name__}: {exc}")
+        return None
 
 
 def assess_overfitting(
@@ -1223,6 +1244,7 @@ def assess_overfitting(
             probability_of_backtest_overfitting,
             resolve_trials,
             selection_score_metric,
+            serial_dependence,
         )
     except ImportError:
         return OverfittingAssessment(
@@ -1239,6 +1261,7 @@ def assess_overfitting(
     low_information: list[str] = []
     pbo = pbo_payload = dsr = dsr_payload = dsr_plan_only = None
     variance_used: float | None = None
+    dependence_payload: dict | None = None
     n_trials_used: int | None = None
     resolution_payload: dict | None = None
     nonzero_rows = sum(1 for row in matrix if any(value != 0.0 for value in row))
@@ -1305,12 +1328,30 @@ def assess_overfitting(
             f"deflated_sharpe: {active_returns} non-zero of {len(returns)} returns "
             f"(need at least {MIN_DSR_RETURNS} non-zero)"
         )
+    elif (dependence := _dsr_dependence(serial_dependence, returns, errors)) is None:
+        pass  # the measurement raised; the error is recorded
+    elif dependence.max_abs_autocorrelation > MAX_DSR_ABS_AUTOCORRELATION:
+        # Strong dependence: the truncated effective-size correction is too weak an approximation.
+        dependence_payload = _json_safe(dependence.to_dict())
+        low_information.append(
+            f"deflated_sharpe: max |autocorrelation| {dependence.max_abs_autocorrelation:.3f} over lags "
+            f"1..{DSR_AUTOCORRELATION_LAGS} (allowed at most {MAX_DSR_ABS_AUTOCORRELATION})"
+        )
+    elif dependence.effective_observations < MIN_DSR_EFFECTIVE_RETURNS:
+        dependence_payload = _json_safe(dependence.to_dict())
+        low_information.append(
+            f"deflated_sharpe: effective sample size {dependence.effective_observations:.1f} of {len(returns)} "
+            f"returns (need at least {MIN_DSR_EFFECTIVE_RETURNS})"
+        )
     else:
+        dependence_payload = _json_safe(dependence.to_dict())
         try:
+            # The trial-Sharpe null floor 1 / (T - 1) uses the effective size too (Lo 2002).
+            effective_length = max(2, math.floor(dependence.effective_observations))
             resolution = resolve_trials(
                 plan_trials=variants_tested,
                 plan_trial_sharpes=sharpes,
-                sample_length=len(returns),
+                sample_length=effective_length,
                 sharpe_unit=DSR_SHARPE_UNIT,
                 bar_seconds=bar_seconds,
                 universe=trial_universe,
@@ -1318,7 +1359,7 @@ def assess_overfitting(
             plan_resolution = resolve_trials(
                 plan_trials=variants_tested,
                 plan_trial_sharpes=sharpes,
-                sample_length=len(returns),
+                sample_length=effective_length,
                 sharpe_unit=DSR_SHARPE_UNIT,
                 bar_seconds=bar_seconds,
             )
@@ -1326,12 +1367,16 @@ def assess_overfitting(
             variance_used = max((resolution.trial_sharpe_variance, *explicit))
             n_trials_used = resolution.n_trials
             resolution_payload = _json_safe(resolution.to_dict())
-            result = deflated_sharpe_ratio(list(returns), n_trials=n_trials_used, trial_sharpe_variance=variance_used)
+            result = deflated_sharpe_ratio(
+                list(returns), n_trials=n_trials_used, trial_sharpe_variance=variance_used,
+                autocorrelation_lags=DSR_AUTOCORRELATION_LAGS,
+            )
             dsr, dsr_payload = _finite_or_none(result.probability), _json_safe(result.to_dict())
             plan_only = deflated_sharpe_ratio(
                 list(returns),
                 n_trials=variants_tested,
                 trial_sharpe_variance=max((plan_resolution.trial_sharpe_variance, *explicit)),
+                autocorrelation_lags=DSR_AUTOCORRELATION_LAGS,
             )
             dsr_plan_only = _finite_or_none(plan_only.probability)
         except (ValueError, ArithmeticError) as exc:
@@ -1354,6 +1399,7 @@ def assess_overfitting(
         n_trials_used=n_trials_used,
         trial_resolution=resolution_payload,
         deflated_sharpe_probability_plan_only=dsr_plan_only,
+        dsr_serial_dependence=dependence_payload,
         **common,
     )
 
