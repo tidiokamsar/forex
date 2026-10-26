@@ -20,7 +20,11 @@ from astra.venues.registry import (
     reseal_file,
 )
 
-SEEDED = {"ctrader", "binance_spot", "binance_futures", "mt5", "iq_option", "goforex", "interactive_brokers", "oanda", "fxcm"}
+# Registry 0.2.0 (evidence from the 2026-10-26 dossiers): the goforex placeholder became two domain records.
+SEEDED = {
+    "ctrader", "binance_spot", "binance_futures", "mt5", "iq_option", "interactive_brokers", "oanda", "fxcm",
+    "ic_markets_global", "pepperstone", "fxpro", "deriv", "exness", "goforexfx_com", "goforextrading_com",
+}
 
 
 def raw_document():
@@ -196,7 +200,8 @@ class SchemaTests(unittest.TestCase):
 
     def test_verified_statuses_need_evidence(self):
         document = raw_document()
-        record = document["venues"][1]  # binance_spot: no evidence, no api_url
+        record = next(item for item in document["venues"] if item["venue_id"] == "binance_spot")
+        record["api_url"], record["evidence"] = None, []  # strip what OFFICIAL_API_VERIFIED requires
         record["statuses"] = [
             {"status": "DISCOVERED", "since": "2026-10-26", "note": "t"},
             {"status": "OFFICIAL_API_VERIFIED", "since": "2026-10-26", "note": "t"},
@@ -204,6 +209,7 @@ class SchemaTests(unittest.TestCase):
         ]
         self.assertRejected(resealed(document), "requires api_url and evidence")
         document = raw_document()
+        document["venues"][0]["eligibility_conditions"] = []
         document["venues"][0]["statuses"] = [
             {"status": "DISCOVERED", "since": "2026-10-26", "note": "t"},
             {"status": "UNVERIFIED", "since": "2026-10-26", "note": "t"},
@@ -228,7 +234,7 @@ class SchemaTests(unittest.TestCase):
         with workspace_tempdir() as folder:
             path = f"{folder}/registry.json"
             document = raw_document()
-            document["registry_version"] = "0.2.0"
+            document["registry_version"] = "9.9.9"  # any version other than the shipped one
             with open(path, "w", encoding="utf-8") as handle:
                 json.dump(document, handle)
             with self.assertRaises(RegistryError):
@@ -236,7 +242,7 @@ class SchemaTests(unittest.TestCase):
             digest = reseal_file(path)
             loaded = load_registry(path)
             self.assertEqual(loaded.content_sha256, digest)
-            self.assertEqual(loaded.registry_version, "0.2.0")
+            self.assertEqual(loaded.registry_version, "9.9.9")
 
 
 if __name__ == "__main__":
