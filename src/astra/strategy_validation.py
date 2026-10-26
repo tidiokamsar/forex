@@ -429,6 +429,11 @@ def _evaluate_strategy_walk_forward(
     )
     resolved_hash, hash_kind = _resolve_dataset_hash(history, dataset_sha256)
     identity_hash = _dataset_identity_sha256(history)
+    if data_source in AUTHENTIC_DATA_SOURCE_TYPES and (
+        resolved_hash in KNOWN_SYNTHETIC_DATASETS or identity_hash in KNOWN_SYNTHETIC_DATASETS
+    ):
+        # A declared label cannot turn a known synthetic dataset into evidence (Lot 4 phase 5, A5-2).
+        raise ValueError(f"this dataset is a known synthetic fixture; it cannot be labelled {data_source}")
     implementation_hash = _implementation_sha256()
     descriptors = tuple(candidate.descriptor() for candidate in chosen)
     families = tuple(family for family in FAMILIES if any(c.family == family for c in chosen))
@@ -937,6 +942,14 @@ AUTHENTIC_DATA_SOURCE_TYPES = frozenset(
 )
 NON_AUTHENTIC_DATA_SOURCE_TYPES = frozenset({"SYNTHETIC", "SIMULATED"})
 DATA_SOURCE_TYPES = AUTHENTIC_DATA_SOURCE_TYPES | NON_AUTHENTIC_DATA_SOURCE_TYPES | {"UNKNOWN"}
+
+
+# Fingerprints of the bundled synthetic fixture (data/synthetic_eurusd_m15.csv): source bytes and
+# canonical market-bar identity. Labels are otherwise declared, not attested (see DATA_POLICY.md).
+KNOWN_SYNTHETIC_DATASETS = frozenset({
+    "16402dc19dc55033e851b1f796aed2a872a19d0a9648ede39f1dfb59ab5d5ef8",
+    "134b228026da2239dec8dbb0590b87bda4ce5e1a78177521a5595248d3cffae7",
+})
 
 
 def normalize_data_source_type(source_type: str | None) -> str:

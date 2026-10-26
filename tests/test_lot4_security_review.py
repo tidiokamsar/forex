@@ -956,12 +956,9 @@ class Phase5Tests(_Phase3Case):
             second = self.score(report, store)
         self.assertFalse(isinstance(peek, StrategyHoldoutEvaluation) and isinstance(second, StrategyHoldoutEvaluation))
 
-    # CONFIRMED DEFECT A5-2 (low-medium): the data-provenance gate trusts the declared label even for the one
-    # file ASTRA knows is synthetic. The bundled fixture is pinned by DEMO_FIXTURE_SHA256 and always SYNTHETIC
-    # without --csv, but `--csv <that same file> --source-type HISTORICAL` seals it as HISTORICAL, so the
-    # dataset_not_authentic gate passes. (SECURITY.md documents that labels are declared; this known-hash case
-    # is cheap to refuse.)
-    @unittest.expectedFailure
+    # FIXED IN LOT 4 PHASE 5 (was CONFIRMED DEFECT A5-2, low-medium): the bundled fixture, known by its source
+    # bytes and canonical bar identity (strategy_validation.KNOWN_SYNTHETIC_DATASETS), cannot be sealed under an
+    # authentic label. Other data labels remain declared, not attested (SECURITY.md, DATA_POLICY.md).
     def test_bundled_synthetic_fixture_cannot_be_sealed_as_historical(self):
         from astra.cli import PROJECT_ROOT
 
@@ -975,6 +972,18 @@ class Phase5Tests(_Phase3Case):
             return  # refused: the secure outcome
         result = json.loads(output.getvalue())
         self.assertEqual(result["report"]["plan_manifest"]["data_source"]["source_type"], "SYNTHETIC")
+
+    def test_reserialized_synthetic_fixture_cannot_be_labelled_authentic(self):
+        # Integrator regression for A5-2: different bytes, same bars (canonical identity) are still refused.
+        from astra.cli import PROJECT_ROOT
+        from astra.data import load_bars_csv
+        from astra.strategy_validation import evaluate_strategy_walk_forward
+
+        bars = load_bars_csv(PROJECT_ROOT / "data" / "synthetic_eurusd_m15.csv", source_type="SYNTHETIC").bars
+        with overfitting_double(), self.assertRaisesRegex(ValueError, "known synthetic fixture"):
+            evaluate_strategy_walk_forward(bars, hypothesis="relabelled fixture", source_type="HISTORICAL")
+        with overfitting_double():  # the honest label is still accepted
+            evaluate_strategy_walk_forward(bars, hypothesis="fixture", source_type="SYNTHETIC")
 
     def test_regression_lowered_statistical_floors_are_flagged_and_lags_must_match(self):
         from astra.research_policy import StatisticalPolicy, statistical_policy_below_floor
