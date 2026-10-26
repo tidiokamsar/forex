@@ -674,7 +674,7 @@ class SharedStopStateTests(ServerCase):
             with self.assertRaises(bs.BinanceIpBanned):
                 self.public(state_path=state).ping()
             document = json.loads(state.read_text(encoding="utf-8"))
-            self.assertTrue(document["hosts"][self.server.base_url]["banned"])
+            self.assertTrue(document["hosts"][f"loopback:{self.server.base_url}"]["banned"])  # state key per provider scope (MV-A-10)
             bs.reset_host_states_for_tests()  # simulates a restarted process
             with self.assertRaises(bs.BinanceIpBanned):
                 self.public(state_path=state).ping()

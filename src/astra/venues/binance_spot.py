@@ -429,6 +429,22 @@ def _host_state(key: str, state_path: str | Path | None) -> _HostState:
     return state
 
 
+def _state_key(base: _BaseUrl) -> str:
+    """Scope of the shared ban/429/weight state (MV-A-10).
+
+    Binance bans and weighs per IP, so every production and public-data host
+    (api, api1..api4, api-gcp, data-api, with or without an explicit port)
+    shares one state; testnet and demo each have their own. A loopback test
+    server keeps its own state per URL.
+    """
+
+    if base.loopback:
+        return f"loopback:{base.url}"
+    if base.role in ("production", "public_data"):
+        return "binance:production"
+    return f"binance:{base.role}"
+
+
 def reset_host_states_for_tests() -> None:
     """TEST ONLY: forget the in-memory per-host state (persisted files are left untouched)."""
 
@@ -474,8 +490,8 @@ class _BinanceHttp:
         if base.loopback:
             handlers.append(urllib.request.ProxyHandler({}))
         self._opener = urllib.request.build_opener(*handlers)
-        # Ban, 429 stop and weight budget are shared by every instance for this base URL.
-        self._state = _host_state(base.url, state_path)
+        # Ban, 429 stop and weight budget are shared by every instance for this provider scope (per IP).
+        self._state = _host_state(_state_key(base), state_path)
         self._lock = self._state.lock
         self.requests_sent = 0
 

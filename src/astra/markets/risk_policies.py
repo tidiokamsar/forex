@@ -556,6 +556,8 @@ class CryptoSpotRiskPolicy:
         if intent.side is SpotSide.BUY:
             daily = self._buy_checks(intent, context, spec, book, cost_model, quantity, price, notional, fee_quote,
                                      balances, reasons)
+            # Every refusal check runs before booking, so a refused BUY never consumes the day's budget (MV-A-12).
+            reasons.extend(self._price_band(intent.side, price, book))
             if not reasons and daily is not None:
                 # Check and book atomically, so concurrent or split orders cannot all pass a stale total.
                 record = SpotBuyRecord(context.venue_id, spec.symbol, spec.quote_asset, notional,
@@ -565,7 +567,7 @@ class CryptoSpotRiskPolicy:
                     reasons.append(refusal)
         else:
             self._sell_checks(spec, quantity, balances, reasons)
-        reasons.extend(self._price_band(intent.side, price, book))
+            reasons.extend(self._price_band(intent.side, price, book))
 
         verdict = Verdict.REFUSE if reasons else Verdict.ALLOW
         return MarketRiskDecision(
@@ -927,13 +929,28 @@ class FixedExpiryOptionsRiskPolicy:
 MarketRiskPolicy = ForexCfdPreCheck | CryptoSpotRiskPolicy | CryptoFuturesRiskPolicy | FixedExpiryOptionsRiskPolicy
 
 
+# One process-wide BUY ledger for the default spot policy, so the daily cap holds across policy_for() calls
+# (MV-A-11). It is in memory: a restart starts empty until a persisted ledger exists (documented residual).
+_DEFAULT_SPOT_LEDGER = SpotBuyLedger()
+
+
+def reset_default_spot_ledger_for_tests() -> None:
+    """TEST ONLY: replace the process-wide default spot ledger with an empty one."""
+
+    global _DEFAULT_SPOT_LEDGER
+    _DEFAULT_SPOT_LEDGER = SpotBuyLedger()
+
+
 def policy_for(market_type: MarketType) -> MarketRiskPolicy:
-    """Default policy instance per market type; there is no shared fallback."""
+    """Default policy instance per market type; there is no shared fallback.
+
+    The crypto spot policy shares the process-wide BUY ledger.
+    """
 
     if market_type is MarketType.FOREX_CFD:
         return ForexCfdPreCheck()
     if market_type is MarketType.CRYPTO_SPOT:
-        return CryptoSpotRiskPolicy()
+        return CryptoSpotRiskPolicy(ledger=_DEFAULT_SPOT_LEDGER)
     if market_type is MarketType.CRYPTO_FUTURES:
         return CryptoFuturesRiskPolicy()
     if market_type is MarketType.FIXED_EXPIRY_OPTIONS:
