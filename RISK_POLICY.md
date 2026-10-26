@@ -55,7 +55,9 @@ A dimension that cannot be computed is not yet systematically blocking: the engi
 
 ## Per-market risk policies (multi-venue lot)
 
-`astra.markets.risk_policies` holds one policy per market type and `astra.markets.costs` one cost model per market type. Rules are not shared between markets unless their assumptions match. Every decision is a `MarketRiskDecision` (ALLOW or REFUSE, reason codes, policy name and **policy version**). The modules are pure: they import no gateway, permit or broker adapter, and nothing in this lot can send a crypto order. The only order path stays `OrderGateway` -> `ExecutionPermit` -> `BrokerAdapter.submit_order`.
+`astra.markets.risk_policies` holds one policy per market type and `astra.markets.costs` one cost model per market type. Rules are not shared between markets unless their assumptions match. Every decision is a `MarketRiskDecision` (ALLOW or REFUSE, reason codes, policy name, **policy version**, the parameters it ran with and their sha256 fingerprint). The modules import no gateway, no permit and no concrete broker adapter. They do load `astra.brokers.base` through `astra.venues.contract` (needed for `ensure_fresh` and `Balance`); that module defines the abstract, permit-guarded `BrokerAdapter`, which nothing here calls, and a test asserts it is the only `astra.brokers` module loaded. Nothing in this lot can send a crypto order. The only order path stays `OrderGateway` -> `ExecutionPermit` -> `BrokerAdapter.submit_order`.
+
+A decision is data, not an authority token: a future gate must re-evaluate instead of trusting one. Construction still refuses impossible outcomes: a crypto spot ALLOW outside SIMULATION, any derivatives ALLOW, a Forex pre-check ALLOW in LIVE, and an ALLOW without parameters or with a fingerprint that does not match them. The Forex pre-check ALLOW may be reported in DEMO because it is advisory: the RiskEngine stays the authority and refuses everything but SIMULATION.
 
 ### Forex / CFD
 
@@ -69,25 +71,30 @@ Costs reuse `CostModel`; `forex_cost_model` derives a per-unit commission only w
 
 ### Crypto spot
 
-`CryptoSpotRiskPolicy` (version `crypto-spot-1`, frozen). Values are **provisional engineering parameters**, not calibrated and not advice; a policy may be made stricter, never looser than these ceilings:
+`CryptoSpotRiskPolicy` (version `crypto-spot-1`, frozen and final: subclassing raises `TypeError`). Values are **provisional engineering parameters**, not calibrated and not advice. They live in `CryptoSpotRiskParameters`, whose defaults are the reviewed values and whose constructor refuses anything looser against literal ceilings (the `MAX_*` module constants are documentation only; patching them changes nothing). A policy may be made stricter, never looser; a stricter policy has a different parameter fingerprint.
 
 | Control | Ceiling | Action |
 |---|---:|---|
 | Notional per BUY order | 2% of free quote balance | Refuse (no resize) |
-| BUY notional per UTC day (including this order) | 10% of free quote balance | Refuse; an unknown day total refuses |
-| Quote (bookTicker) age | 5 s | Refuse stale, future-dated or unknown |
+| BUY notional per UTC day, per venue and quote asset (including this order) | 10% of free quote balance | Refuse; the total comes from the policy's ledger |
+| Limit price deviation from the touch | 1% (BUY above ask x 1.01, SELL below bid x 0.99) | Refuse (`limit_price_outside_band`) |
+| Quote (bookTicker) and fee-asset price age | 5 s | Refuse stale, future-dated or unknown |
 | Symbol spec and status age | 300 s | Refuse |
 | Balance age | 30 s | Refuse |
 | Fee schedule age | 24 h | Refuse |
-| Slippage assumption | 0.05% per side, `UNCALIBRATED` | Used in net expectancy |
+| Slippage assumption | at least 0.05% per side, label `Calibration.UNCALIBRATED` | Floor enforced; used in net expectancy |
 | Leverage | 1 (fixed) | No other value can be configured |
 | Shorting | Not allowed (fixed) | SELL limited to the free base balance |
 
-Also refused: any mode other than SIMULATION (ALLOW is reachable only there in this lot; `LIVE` is always refused), kill switch active or unknown, borrowing enabled or unknown, symbol status other than `TRADING`, symbol mismatch, unknown or missing base/quote balance (a missing asset is unknown, not zero), insufficient free quote for the BUY, unknown or mismatched fees, a fee asset that cannot be valued or is not held, a BUY without a stop below the price, a BUY without a strategy edge, and a non-positive net expectancy (edge minus two worst-rate fees, one spread and two slippage legs). Quantity and price are rounded down through `CryptoSpotSpec` and then checked with `order_violations` (step, tick, minimum and maximum quantity, minimum notional).
+Also refused: any mode other than SIMULATION (ALLOW is reachable only there in this lot; `LIVE` is always refused), kill switch active or unknown, borrowing enabled or unknown, unknown venue, symbol status other than `TRADING`, symbol mismatch, unknown or missing base/quote balance (a missing asset is unknown, not zero), insufficient free quote for the BUY, unknown or mismatched fees, a fee asset that cannot be valued, whose price is stale or undated, or that is not held, a locked or crossed book or an empty book side (refused by `BookTicker`), a BUY without a stop below the price, a BUY without a strategy edge, and a non-positive net expectancy (edge minus two worst-rate fees, one spread and two slippage legs). Quantity and price are rounded down through `CryptoSpotSpec` and then checked with `order_violations` (step, tick, minimum and maximum quantity, minimum notional). The slippage label is an enum with the single member `UNCALIBRATED`; free text such as "CALIBRATED" is refused until a reviewed calibration exists.
 
-Notional caps apply to BUY orders, which open or add exposure; a SELL only reduces holdings and is bounded by the free base balance.
+Notional caps apply to BUY orders, which open or add exposure; a SELL only reduces holdings and is bounded by the free base balance and the price band.
 
-Martingale and loss recovery are refused by construction: after a negative realized day P&L, a BUY larger than the previous BUY is refused (`risk_increase_after_loss`); a BUY while the strategy position is below its average entry is refused (`adding_to_losing_position`); `evaluate_stop_change` refuses stop removal and widening and allows only tightening. The policy has no size multiplier.
+**Daily ledger.** Each policy instance holds an append-only `SpotBuyLedger` (no delete or update method). Every ALLOWED BUY is booked with venue, symbol, quote asset, notional, UTC timestamp, intent id and parameter fingerprint, and the cap check and the booking happen atomically under one lock, so split or concurrent orders cannot all pass a stale total. The day boundary is UTC midnight. A booking dated before the last one is refused (`ledger_time_regression`). The caller's `day_buy_notional` is still required (unknown refuses), but it can only raise the total, never lower it. `dataclasses.replace` keeps the same ledger. Residual: the ledger is in memory. A caller that builds a new policy instance, or restarts the process, starts from an empty ledger unless it shares or persists one; that is acceptable only while no crypto order path exists.
+
+Martingale and loss recovery are refused by construction. After a negative realized day P&L, the caller must state the last BUY notional (unknown refuses, `last_buy_notional_unknown`). A BUY larger than that value, or larger than the ledger's last booked BUY when that is smaller, is refused (`risk_increase_after_loss`). A BUY while base holdings exist but no position state is given is refused (`position_unknown`). A BUY while the strategy position is below its average entry is refused (`adding_to_losing_position`). `evaluate_stop_change` refuses stop removal and widening and allows only tightening. The policy has no size multiplier.
+
+**Residual trust.** `position` (quantity, average entry, stop), `last_buy_notional` and the intent's `expected_edge_fraction` remain caller-supplied. The policy narrows them as described above but cannot verify them.
 
 ### Crypto futures / perpetuals and fixed-expiry options
 

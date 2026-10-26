@@ -180,10 +180,7 @@ class SpotPolicyLoopholeTests(unittest.TestCase):
         self.assertIn("daily_notional_unknown",
                       self.policy.evaluate(buy(), context(day_buy_notional=None)).reasons)
 
-    # MV-D-8 (Medium): after a losing day the size-increase check runs only when last_buy_notional is known.
-    # With it left None (unknown), a BUY far larger than any earlier one is allowed: an unknown value is
-    # treated as "no constraint", contrary to "None means unknown and is refused".
-    @unittest.expectedFailure
+    # FIXED (was MV-D-8, Medium; same fix as MV-A-8): after a losing day an unknown last_buy_notional refuses.
     def test_unknown_last_buy_after_a_loss_is_refused(self):
         losing = context(day_realized_pnl=Decimal("-500"), last_buy_notional=None)
         decision = self.policy.evaluate(buy(quantity=Decimal("0.04")), losing)
@@ -193,10 +190,8 @@ class SpotPolicyLoopholeTests(unittest.TestCase):
         losing = context(day_realized_pnl=Decimal("-500"), last_buy_notional=Decimal("500"))
         self.assertIn("risk_increase_after_loss", self.policy.evaluate(buy(), losing).reasons)
 
-    # MV-D-9 (Low-Medium): adding to a losing position is detected only through the optional ``position``.
-    # With base holdings in the balances (0.5 BTC) and position=None, the policy cannot know the entry price
-    # and still allows the BUY instead of refusing an unknown position.
-    @unittest.expectedFailure
+    # FIXED (was MV-D-9, Low-Medium): a BUY with a non-zero base balance and position=None is refused as
+    # position_unknown. Residual: the position content itself stays caller-supplied.
     def test_holdings_without_position_state_are_refused(self):
         decision = self.policy.evaluate(buy(), context(balances=balances(base="0.5"), position=None))
         self.assertIs(decision.verdict, Verdict.REFUSE)
@@ -209,25 +204,21 @@ class SpotPolicyLoopholeTests(unittest.TestCase):
                 self.assertIn(code, self.policy.evaluate_stop_change(under, new_stop).reasons)
         self.assertIs(self.policy.evaluate_stop_change(under, Decimal("56000")).verdict, Verdict.ALLOW)
 
-    # MV-D-10 (Low): caps can only be tightened, but the slippage assumption can be set to 0 and relabelled
-    # (calibration is free text), which loosens the net-expectancy check without any recorded evidence.
-    @unittest.expectedFailure
+    # FIXED (was MV-D-10, Low): the calibration label is the Calibration enum (UNCALIBRATED only; free text
+    # raises) and the policy floors slippage at the reviewed 0.0005 per side.
     def test_slippage_cannot_be_loosened_below_the_provisional_value(self):
         with self.assertRaises(ValueError):
             CryptoSpotRiskPolicy(slippage=SlippageAssumption(Decimal(0), calibration="CALIBRATED"))
 
-    # MV-D-11 (Low): BookTicker accepts a locked book (bid == ask) and zero quantities; the cost model then
-    # charges no spread. The Binance connector refuses such books, but the policy input type does not.
-    @unittest.expectedFailure
+    # FIXED (was MV-D-11, Low): BookTicker refuses a locked or crossed book and an empty side.
     def test_locked_or_empty_book_is_refused_by_the_policy_input(self):
         with self.assertRaises(ValueError):
             book(ask_price=Decimal("50000.00"))
         with self.assertRaises(ValueError):
             book(bid_qty=Decimal("0"))
 
-    # MV-D-12 (Low): a SELL is checked only against the free base balance; a SELL limit far below the bid
-    # (here 1% of it) is allowed, so the "reduce only" path can dump holdings at any price.
-    @unittest.expectedFailure
+    # FIXED (was MV-D-12, Low): a limit may not cross the touch by more than max_limit_deviation_fraction
+    # (1%, provisional): no SELL below bid * 0.99, no BUY above ask * 1.01 (limit_price_outside_band).
     def test_sell_far_below_the_market_is_refused(self):
         decision = self.policy.evaluate(sell(limit_price=Decimal("500.00")), context())
         self.assertIs(decision.verdict, Verdict.REFUSE)
@@ -265,10 +256,10 @@ class SpotPolicyLoopholeTests(unittest.TestCase):
 
 
 class ImportAndDocHonestyTests(unittest.TestCase):
-    # MV-D-13 (Low; wording): RISK_POLICY.md says the policy modules "import no ... broker adapter", but
-    # importing astra.markets.risk_policies loads astra.brokers.base (through astra.venues.contract), which
-    # defines the BrokerAdapter ABC with submit_order. No order can be sent from it (abstract, permit-guarded),
-    # but the statement is stronger than the code; the existing test does not list astra.brokers.base.
+    # MV-D-13 (Low; wording) - WORDING FIXED, BEHAVIOUR ACCEPTED: RISK_POLICY.md and the module docstring now
+    # say that astra.brokers.base (abstract, permit-guarded BrokerAdapter) is loaded through
+    # astra.venues.contract, and test_market_risk asserts it is the only astra.brokers module loaded. The module
+    # is still loaded, so this test keeps failing; removing the import belongs to venues.contract (not owned here).
     @unittest.expectedFailure
     def test_policy_modules_do_not_load_the_broker_adapter_module(self):
         code = "import sys, astra.markets.risk_policies; print('astra.brokers.base' in sys.modules)"

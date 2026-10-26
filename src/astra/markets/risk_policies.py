@@ -16,24 +16,43 @@ Martingale sizing, adding to a losing position, removing or widening a stop
 and raising risk after losses are refused by construction: no input can scale
 size up after a loss, and the checks below reject the patterns explicitly.
 
-The decisions are data. No connector, gateway, permit or adapter is imported:
-the only order path in ASTRA remains ``OrderGateway`` -> ``ExecutionPermit`` ->
+The decisions are data. No connector, gateway, permit or concrete broker
+adapter is imported. ``astra.venues.contract`` (used for ``ensure_fresh`` and
+``Balance``) loads ``astra.brokers.base``, which defines the abstract,
+permit-guarded ``BrokerAdapter``; nothing here calls it. The only order path in
+ASTRA remains ``OrderGateway`` -> ``ExecutionPermit`` ->
 ``BrokerAdapter.submit_order``, and no crypto order can be sent in this lot.
+
+Residual trust: ``position``, ``last_buy_notional`` and the intent's
+``expected_edge_fraction`` are caller-supplied. The policy narrows them (an
+unknown position with holdings refuses, the ledger's last BUY bounds the
+caller's value) but cannot verify them.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal, localcontext
 from enum import StrEnum
+from threading import Lock
 
 from ..models import RunMode
 from ..venues.contract import Balance, MarketType, StaleDataError, ensure_fresh
 from ..venues.registry import TRADING_ENABLED_IN_THIS_LOT
 from . import crypto_futures, fixed_expiry_options
 from .common import require_text, to_decimal
-from .costs import BookTicker, CryptoSpotCostModel, CryptoSpotFeeSchedule, FeeUnknown, SlippageAssumption, SpotSide
+from .costs import (
+    BookTicker,
+    Calibration,
+    CryptoSpotCostModel,
+    CryptoSpotFeeSchedule,
+    FeeUnknown,
+    SlippageAssumption,
+    SpotSide,
+)
 from .crypto_spot import CryptoSpotSpec
 from .forex_cfd import ForexCfdSpec
 
@@ -46,9 +65,42 @@ class Verdict(StrEnum):
     REFUSE = "REFUSE"
 
 
+Parameters = tuple[tuple[str, str], ...]
+
+# Modes in which an ALLOW verdict may exist at all, per market type. Crypto spot: SIMULATION only in this
+# lot. Forex/CFD: the pre-check is advisory (the RiskEngine is the authority and refuses everything but
+# SIMULATION), so its ALLOW may also be reported in DEMO. Derivatives: never.
+_ALLOW_MODES: dict[MarketType, frozenset[str]] = {
+    MarketType.CRYPTO_SPOT: frozenset({"SIMULATION"}),
+    MarketType.FOREX_CFD: frozenset({"SIMULATION", "DEMO"}),
+    MarketType.CRYPTO_FUTURES: frozenset(),
+    MarketType.FIXED_EXPIRY_OPTIONS: frozenset(),
+}
+
+
+def canonical_parameters(values: dict[str, object]) -> tuple[Parameters, str]:
+    """Sorted ``(name, str(value))`` pairs and the sha256 of their canonical JSON."""
+
+    pairs = tuple(sorted((str(key), str(value)) for key, value in values.items()))
+    return pairs, _fingerprint(pairs)
+
+
+def _fingerprint(pairs: Parameters) -> str:
+    payload = json.dumps([list(pair) for pair in pairs], separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(payload.encode("ascii")).hexdigest()
+
+
 @dataclass(frozen=True, slots=True)
 class MarketRiskDecision:
-    """Structured outcome. Every decision records the policy name and version."""
+    """Structured outcome: policy name, version, parameters and their fingerprint.
+
+    A decision is data, not an authority token: anyone can construct one, so a
+    future gate must re-evaluate rather than trust it. Construction still
+    refuses impossible outcomes: ALLOW outside the modes listed in
+    ``_ALLOW_MODES`` (crypto spot only in SIMULATION, derivatives never), and
+    ALLOW without recorded parameters or with a fingerprint that does not
+    match them.
+    """
 
     market_type: MarketType
     verdict: Verdict
@@ -61,6 +113,8 @@ class MarketRiskDecision:
     notional: Decimal | None = None
     estimated_fee_quote: Decimal | None = None
     notes: tuple[str, ...] = ()
+    parameters: Parameters = ()
+    parameters_fingerprint: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.market_type, MarketType):
@@ -74,6 +128,17 @@ class MarketRiskDecision:
             raise ValueError("an ALLOW decision carries no refusal reason")
         if self.verdict is Verdict.REFUSE and not reasons:
             raise ValueError("a REFUSE decision needs at least one reason")
+        if self.verdict is Verdict.ALLOW and self.mode not in _ALLOW_MODES[self.market_type]:
+            raise ValueError(f"{self.market_type.value} cannot be ALLOWED in mode {self.mode!r}")
+        if not isinstance(self.parameters, tuple) or not all(
+            isinstance(p, tuple) and len(p) == 2 and all(isinstance(x, str) for x in p) for p in self.parameters
+        ):
+            raise TypeError("parameters must be a tuple of (name, value) string pairs")
+        if self.parameters or self.parameters_fingerprint:
+            if self.parameters_fingerprint != _fingerprint(self.parameters):
+                raise ValueError("parameters_fingerprint does not match the recorded parameters")
+        elif self.verdict is Verdict.ALLOW:
+            raise ValueError("an ALLOW decision must record its parameters and fingerprint")
         object.__setattr__(self, "reasons", reasons)
 
     @property
@@ -187,7 +252,12 @@ class ForexCfdPreCheck:
                 return ["requested_lots_outside_contract_limits"]
         return []
 
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {"name": self.name, "version": self.version, "authority": "astra.risk.RiskEngine"}
+
     def _decision(self, mode: object, reasons: list[str]) -> MarketRiskDecision:
+        pairs, fingerprint = canonical_parameters(self.parameters)
         return MarketRiskDecision(
             MarketType.FOREX_CFD,
             Verdict.REFUSE if reasons else Verdict.ALLOW,
@@ -195,19 +265,25 @@ class ForexCfdPreCheck:
             self.name,
             self.version,
             _mode_label(mode),
-            notes=("pre-check only; astra.risk.RiskEngine remains the authority",),
+            notes=("pre-check only (advisory); astra.risk.RiskEngine remains the authority",),
+            parameters=pairs,
+            parameters_fingerprint=fingerprint,
         )
 
 
 # ---------------------------------------------------------------- Crypto spot
 
 # Provisional engineering ceilings (not calibrated, not advice). A policy may be stricter, never looser.
+# These names are DOCUMENTATION ONLY: validation uses literals inside CryptoSpotRiskParameters, so patching
+# a module global cannot admit a looser policy.
 MAX_ORDER_NOTIONAL_FRACTION = Decimal("0.02")
 MAX_DAILY_NOTIONAL_FRACTION = Decimal("0.10")
 MAX_QUOTE_AGE_SECONDS = 5.0
 MAX_SPEC_AGE_SECONDS = 300.0
 MAX_BALANCE_AGE_SECONDS = 30.0
 MAX_FEE_AGE_SECONDS = 86_400.0
+MIN_SLIPPAGE_FRACTION_PER_SIDE = Decimal("0.0005")
+MAX_LIMIT_DEVIATION_FRACTION = Decimal("0.01")
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,41 +316,120 @@ class CryptoSpotRiskContext:
 
     mode: RunMode
     now: datetime
+    venue_id: str
     spec: CryptoSpotSpec | None
     book: BookTicker | None
     balances: tuple[Balance, ...] | None
     fees: CryptoSpotFeeSchedule | None
-    day_buy_notional: Decimal | None
     day_realized_pnl: Decimal | None
     borrowing_enabled: bool | None
     kill_switch_active: bool = False
+    # Caller's view of the day's BUY total, used only as an extra floor: the policy's ledger total is always
+    # applied and the larger wins. None is unknown and refuses a BUY.
+    day_buy_notional: Decimal | None = None
+    # Residual: position, last_buy_notional and the intent's expected_edge_fraction are caller-supplied.
     position: SpotPosition | None = None
     last_buy_notional: Decimal | None = None
     fee_asset_price_in_quote: Decimal | None = None
+    fee_asset_price_as_of: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
-class CryptoSpotRiskPolicy:
-    """Versioned spot policy. Values are PROVISIONAL engineering parameters, not calibrated."""
+class SpotBuyRecord:
+    venue_id: str
+    symbol: str
+    quote_asset: str
+    notional: Decimal
+    recorded_at: datetime
+    intent_id: str
+    policy_fingerprint: str
 
-    name: str = "crypto_spot"
-    version: str = "crypto-spot-1"
-    max_order_notional_fraction: Decimal = MAX_ORDER_NOTIONAL_FRACTION
-    max_daily_notional_fraction: Decimal = MAX_DAILY_NOTIONAL_FRACTION
-    max_quote_age_seconds: float = MAX_QUOTE_AGE_SECONDS
-    max_spec_age_seconds: float = MAX_SPEC_AGE_SECONDS
-    max_balance_age_seconds: float = MAX_BALANCE_AGE_SECONDS
-    max_fee_age_seconds: float = MAX_FEE_AGE_SECONDS
-    slippage: SlippageAssumption = field(default_factory=SlippageAssumption)
+    @property
+    def utc_day(self) -> date:
+        return self.recorded_at.astimezone(UTC).date()
+
+
+class SpotBuyLedger:
+    """Append-only record of ALLOWED spot BUY notionals; the day boundary is UTC midnight.
+
+    There is no delete or update method. Records must not go back in time, so
+    a buy cannot be booked onto an earlier day. The ledger is in memory: a
+    caller that wants the daily cap to hold across policy instances or process
+    restarts must share (and later persist) one ledger.
+    """
+
+    __slots__ = ("_last_time", "_lock", "_records")
+
+    def __init__(self) -> None:
+        self._records: list[SpotBuyRecord] = []
+        self._lock = Lock()
+        self._last_time: datetime | None = None
+
+    @property
+    def records(self) -> tuple[SpotBuyRecord, ...]:
+        with self._lock:
+            return tuple(self._records)
+
+    def day_total(self, venue_id: str, quote_asset: str, day: date) -> Decimal:
+        """BUY notional for one venue and quote asset on one UTC day, across symbols."""
+
+        with self._lock:
+            return self._day_total_locked(venue_id, quote_asset, day)
+
+    def last_buy_notional(self, venue_id: str, symbol: str) -> Decimal | None:
+        with self._lock:
+            for record in reversed(self._records):
+                if record.venue_id == venue_id and record.symbol == symbol:
+                    return record.notional
+            return None
+
+    def _day_total_locked(self, venue_id: str, quote_asset: str, day: date) -> Decimal:
+        total = Decimal(0)
+        for record in self._records:
+            if record.venue_id == venue_id and record.quote_asset == quote_asset and record.utc_day == day:
+                total += record.notional
+        return total
+
+    def _record_within_cap(self, record: SpotBuyRecord, daily_cap: Decimal, floor: Decimal) -> str | None:
+        """Atomically append ``record`` if the day's total stays within ``daily_cap``; else return a reason."""
+
+        if not isinstance(record, SpotBuyRecord):
+            raise TypeError("record must be a SpotBuyRecord")
+        with self._lock:
+            if self._last_time is not None and record.recorded_at < self._last_time:
+                return "ledger_time_regression"
+            used = max(self._day_total_locked(record.venue_id, record.quote_asset, record.utc_day), floor)
+            if used + record.notional > daily_cap:
+                return "daily_notional_exceeds_cap"
+            self._records.append(record)
+            self._last_time = record.recorded_at
+            return None
+
+
+@dataclass(frozen=True, slots=True)
+class CryptoSpotRiskParameters:
+    """Reviewed spot parameters. Defaults are the reviewed values; looser values are refused.
+
+    The ceilings are literals in ``__post_init__`` on purpose: they are not
+    read from module globals, so patching a constant cannot loosen them.
+    """
+
+    max_order_notional_fraction: Decimal = Decimal("0.02")
+    max_daily_notional_fraction: Decimal = Decimal("0.10")
+    max_quote_age_seconds: float = 5.0
+    max_spec_age_seconds: float = 300.0
+    max_balance_age_seconds: float = 30.0
+    max_fee_age_seconds: float = 86_400.0
+    slippage_fraction_per_side: Decimal = Decimal("0.0005")
+    slippage_calibration: Calibration = Calibration.UNCALIBRATED
+    max_limit_deviation_fraction: Decimal = Decimal("0.01")
     leverage: int = 1
     allow_short: bool = False
 
     def __post_init__(self) -> None:
-        require_text(self.name, "name")
-        require_text(self.version, "version")
         for attr, ceiling in (
-            ("max_order_notional_fraction", MAX_ORDER_NOTIONAL_FRACTION),
-            ("max_daily_notional_fraction", MAX_DAILY_NOTIONAL_FRACTION),
+            ("max_order_notional_fraction", Decimal("0.02")),
+            ("max_daily_notional_fraction", Decimal("0.10")),
         ):
             value = getattr(self, attr)
             if not _is_decimal(value) or not Decimal(0) < value <= ceiling:
@@ -282,20 +437,85 @@ class CryptoSpotRiskPolicy:
         if self.max_order_notional_fraction > self.max_daily_notional_fraction:
             raise ValueError("max_order_notional_fraction must not exceed max_daily_notional_fraction")
         for attr, ceiling in (
-            ("max_quote_age_seconds", MAX_QUOTE_AGE_SECONDS),
-            ("max_spec_age_seconds", MAX_SPEC_AGE_SECONDS),
-            ("max_balance_age_seconds", MAX_BALANCE_AGE_SECONDS),
-            ("max_fee_age_seconds", MAX_FEE_AGE_SECONDS),
+            ("max_quote_age_seconds", 5.0),
+            ("max_spec_age_seconds", 300.0),
+            ("max_balance_age_seconds", 30.0),
+            ("max_fee_age_seconds", 86_400.0),
         ):
             value = getattr(self, attr)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= ceiling:
                 raise ValueError(f"{attr} must be within (0, {ceiling}]")
-        if not isinstance(self.slippage, SlippageAssumption):
-            raise TypeError("slippage must be a SlippageAssumption")
-        if self.leverage != 1 or isinstance(self.leverage, bool):
+        slip = self.slippage_fraction_per_side
+        if not _is_decimal(slip) or not Decimal("0.0005") <= slip < Decimal(1):
+            raise ValueError("slippage_fraction_per_side must be at least the reviewed 0.0005 and below 1")
+        if not isinstance(self.slippage_calibration, Calibration):
+            raise ValueError("slippage_calibration must be a Calibration member")
+        band = self.max_limit_deviation_fraction
+        if not _is_decimal(band) or not Decimal(0) < band <= Decimal("0.01"):
+            raise ValueError("max_limit_deviation_fraction must be a Decimal in (0, 0.01]")
+        if isinstance(self.leverage, bool) or self.leverage != 1:
             raise ValueError("spot policy has no leverage: leverage must be 1")
         if self.allow_short is not False:
             raise ValueError("spot policy does not short: allow_short must be False")
+
+    def canonical(self) -> tuple[Parameters, str]:
+        return canonical_parameters({f: getattr(self, f) for f in self.__dataclass_fields__})
+
+
+@dataclass(frozen=True, slots=True)
+class CryptoSpotRiskPolicy:
+    """Versioned spot policy. Values are PROVISIONAL engineering parameters, not calibrated.
+
+    Final: subclassing raises ``TypeError``, so no override can reuse the
+    reviewed name and version. The flat fields are validated through
+    ``CryptoSpotRiskParameters``; every decision records those parameters and
+    their sha256 fingerprint.
+    """
+
+    name: str = "crypto_spot"
+    version: str = "crypto-spot-1"
+    max_order_notional_fraction: Decimal = Decimal("0.02")
+    max_daily_notional_fraction: Decimal = Decimal("0.10")
+    max_quote_age_seconds: float = 5.0
+    max_spec_age_seconds: float = 300.0
+    max_balance_age_seconds: float = 30.0
+    max_fee_age_seconds: float = 86_400.0
+    slippage: SlippageAssumption = field(default_factory=SlippageAssumption)
+    max_limit_deviation_fraction: Decimal = Decimal("0.01")
+    leverage: int = 1
+    allow_short: bool = False
+    ledger: SpotBuyLedger = field(default_factory=SpotBuyLedger, compare=False, repr=False)
+    parameters: CryptoSpotRiskParameters = field(init=False, compare=False)
+    parameters_fingerprint: str = field(init=False, compare=False)
+    _parameter_pairs: Parameters = field(init=False, compare=False, repr=False)
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        raise TypeError("CryptoSpotRiskPolicy is final; define a new reviewed policy instead of subclassing")
+
+    def __post_init__(self) -> None:
+        require_text(self.name, "name")
+        require_text(self.version, "version")
+        if not isinstance(self.slippage, SlippageAssumption):
+            raise TypeError("slippage must be a SlippageAssumption")
+        if not isinstance(self.ledger, SpotBuyLedger):
+            raise TypeError("ledger must be a SpotBuyLedger")
+        parameters = CryptoSpotRiskParameters(
+            max_order_notional_fraction=self.max_order_notional_fraction,
+            max_daily_notional_fraction=self.max_daily_notional_fraction,
+            max_quote_age_seconds=self.max_quote_age_seconds,
+            max_spec_age_seconds=self.max_spec_age_seconds,
+            max_balance_age_seconds=self.max_balance_age_seconds,
+            max_fee_age_seconds=self.max_fee_age_seconds,
+            slippage_fraction_per_side=self.slippage.fraction_per_side,
+            slippage_calibration=self.slippage.calibration,
+            max_limit_deviation_fraction=self.max_limit_deviation_fraction,
+            leverage=self.leverage,
+            allow_short=self.allow_short,
+        )
+        pairs, fingerprint = parameters.canonical()
+        object.__setattr__(self, "parameters", parameters)
+        object.__setattr__(self, "parameters_fingerprint", fingerprint)
+        object.__setattr__(self, "_parameter_pairs", pairs)
 
     # -- public API
 
@@ -312,6 +532,8 @@ class CryptoSpotRiskPolicy:
         if context.borrowing_enabled is not False:
             reasons.append("borrowing_enabled_or_unknown")
         reasons.extend(self._intent_shape(intent))
+        if not isinstance(context.venue_id, str) or not context.venue_id.strip():
+            reasons.append("venue_unknown")
 
         spec, book = context.spec, context.book
         reasons.extend(self._market_data(intent, context))
@@ -332,10 +554,18 @@ class CryptoSpotRiskPolicy:
             fee_quote = self._fee_checks(intent, context, cost_model, spec, quantity, price, balances, reasons)
 
         if intent.side is SpotSide.BUY:
-            self._buy_checks(intent, context, spec, book, cost_model, quantity, price, notional, fee_quote,
-                             balances, reasons)
+            daily = self._buy_checks(intent, context, spec, book, cost_model, quantity, price, notional, fee_quote,
+                                     balances, reasons)
+            if not reasons and daily is not None:
+                # Check and book atomically, so concurrent or split orders cannot all pass a stale total.
+                record = SpotBuyRecord(context.venue_id, spec.symbol, spec.quote_asset, notional,
+                                       context.now, intent.intent_id, self.parameters_fingerprint)
+                refusal = self.ledger._record_within_cap(record, *daily)
+                if refusal is not None:
+                    reasons.append(refusal)
         else:
             self._sell_checks(spec, quantity, balances, reasons)
+        reasons.extend(self._price_band(intent.side, price, book))
 
         verdict = Verdict.REFUSE if reasons else Verdict.ALLOW
         return MarketRiskDecision(
@@ -353,6 +583,8 @@ class CryptoSpotRiskPolicy:
                 "decision is data only; no crypto order can be sent in this lot",
                 f"slippage assumption {self.slippage.fraction_per_side} per side is {self.slippage.calibration}",
             ),
+            parameters=self._parameter_pairs,
+            parameters_fingerprint=self.parameters_fingerprint,
         )
 
     def evaluate_stop_change(
@@ -376,6 +608,8 @@ class CryptoSpotRiskPolicy:
             self.name,
             self.version,
             _mode_label(mode),
+            parameters=self._parameter_pairs,
+            parameters_fingerprint=self.parameters_fingerprint,
         )
 
     # -- checks
@@ -463,8 +697,8 @@ class CryptoSpotRiskPolicy:
         reasons.extend(_freshness("fees", fees.as_of, self.max_fee_age_seconds, context.now))
         return CryptoSpotCostModel(fees, self.slippage)
 
-    @staticmethod
     def _fee_checks(
+        self,
         intent: CryptoSpotOrderIntent,
         context: CryptoSpotRiskContext,
         cost_model: CryptoSpotCostModel,
@@ -482,6 +716,9 @@ class CryptoSpotRiskPolicy:
             reasons.append("fee_asset_conversion_unknown")
             return None
         if fee.asset not in (spec.base_asset, spec.quote_asset):
+            # The fee asset is valued at a caller-supplied price: it must be as fresh as the quote.
+            reasons.extend(_freshness("fee_asset_price", context.fee_asset_price_as_of, self.max_quote_age_seconds,
+                                      context.now))
             held = None if balances is None else balances.get(fee.asset)
             if held is None:
                 reasons.append(f"balance_unknown:{fee.asset}")
@@ -502,13 +739,17 @@ class CryptoSpotRiskPolicy:
         fee_quote: Decimal | None,
         balances: dict[str, Balance] | None,
         reasons: list[str],
-    ) -> None:
+    ) -> tuple[Decimal, Decimal] | None:
+        """Append BUY refusals; return ``(daily_cap, caller_floor)`` for the atomic ledger booking, if known."""
+
         stop = intent.stop_price
         if stop is None:
             reasons.append("stop_required")
         elif not _is_decimal(stop) or stop <= 0 or stop >= price:
             reasons.append("invalid_stop")
 
+        venue_known = isinstance(context.venue_id, str) and bool(context.venue_id.strip())
+        daily: tuple[Decimal, Decimal] | None = None
         quote_balance = None if balances is None else balances.get(spec.quote_asset)
         if quote_balance is not None:
             free_quote = quote_balance.free
@@ -523,22 +764,43 @@ class CryptoSpotRiskPolicy:
                 daily_cap = free_quote * self.max_daily_notional_fraction
             if notional > order_cap:
                 reasons.append("order_notional_exceeds_cap")
-            day_used = context.day_buy_notional
-            if not _is_decimal(day_used) or day_used < 0:
+            # The day total comes from the policy's ledger; a caller value can only raise it.
+            floor = context.day_buy_notional
+            if floor is None:
                 reasons.append("daily_notional_unknown")
-            elif day_used + notional > daily_cap:
-                reasons.append("daily_notional_exceeds_cap")
+            elif not _is_decimal(floor) or floor < 0:
+                reasons.append("daily_notional_invalid")
+            elif venue_known:
+                day = context.now.astimezone(UTC).date()
+                used = max(self.ledger.day_total(context.venue_id, spec.quote_asset, day), floor)
+                if used + notional > daily_cap:
+                    reasons.append("daily_notional_exceeds_cap")
+                daily = (daily_cap, floor)
 
         pnl = context.day_realized_pnl
         if not _is_decimal(pnl):
             reasons.append("day_realized_pnl_unknown")
         elif pnl < 0:
-            last = context.last_buy_notional
-            if last is not None and (not _is_decimal(last) or notional > last):
-                # Martingale and loss-recovery sizing: size never grows after a loss.
-                reasons.append("risk_increase_after_loss")
+            # Martingale and loss-recovery sizing: size never grows after a loss. The caller must state the last
+            # BUY (unknown refuses); the ledger's last booked BUY, when smaller, bounds that claim.
+            caller_last = context.last_buy_notional
+            if caller_last is None:
+                reasons.append("last_buy_notional_unknown")
+            elif not _is_decimal(caller_last) or caller_last <= 0:
+                reasons.append("last_buy_notional_invalid")
+            else:
+                reference = caller_last
+                ledger_last = self.ledger.last_buy_notional(context.venue_id, spec.symbol) if venue_known else None
+                if ledger_last is not None:
+                    reference = min(reference, ledger_last)
+                if notional > reference:
+                    reasons.append("risk_increase_after_loss")
 
         position = context.position
+        base_balance = None if balances is None else balances.get(spec.base_asset)
+        if position is None and base_balance is not None and base_balance.total > 0:
+            # Holdings exist but their entry price and stop are unknown: adding to a loser cannot be ruled out.
+            reasons.append("position_unknown")
         if position is not None:
             if not isinstance(position, SpotPosition) or not _is_decimal(position.average_entry_price):
                 reasons.append("position_state_invalid")
@@ -555,6 +817,19 @@ class CryptoSpotRiskPolicy:
                 reasons.append("expected_edge_invalid")
             elif cost_model.net_expectancy_fraction(edge, book) <= 0:
                 reasons.append("net_expectancy_not_positive")
+        return daily
+
+    def _price_band(self, side: SpotSide, price: Decimal, book: BookTicker) -> list[str]:
+        """A limit may not cross the touch by more than the band: no BUY far above the ask, no SELL far below the bid."""
+
+        with localcontext() as ctx:
+            ctx.prec = _PRECISION
+            band = self.max_limit_deviation_fraction
+            if side is SpotSide.BUY and price > book.ask_price * (1 + band):
+                return ["limit_price_outside_band"]
+            if side is SpotSide.SELL and price < book.bid_price * (1 - band):
+                return ["limit_price_outside_band"]
+        return []
 
     @staticmethod
     def _sell_checks(
@@ -567,7 +842,8 @@ class CryptoSpotRiskPolicy:
 
     def _refuse(self, mode: str, reasons: list[str]) -> MarketRiskDecision:
         return MarketRiskDecision(
-            MarketType.CRYPTO_SPOT, Verdict.REFUSE, tuple(reasons) or ("refused",), self.name, self.version, mode
+            MarketType.CRYPTO_SPOT, Verdict.REFUSE, tuple(reasons) or ("refused",), self.name, self.version, mode,
+            parameters=self._parameter_pairs, parameters_fingerprint=self.parameters_fingerprint,
         )
 
 
@@ -622,8 +898,10 @@ class CryptoFuturesRiskPolicy:
         reasons = [DERIVATIVES_NOT_ENABLED_REASON]
         if crypto_futures.ENABLED is not False:
             reasons.append("enabled_flag_set_without_reviewed_policy")
+        pairs, fingerprint = canonical_parameters({"name": self.name, "version": self.version, "allow": "never"})
         return MarketRiskDecision(
-            MarketType.CRYPTO_FUTURES, Verdict.REFUSE, tuple(reasons), self.name, self.version, _mode_label(mode)
+            MarketType.CRYPTO_FUTURES, Verdict.REFUSE, tuple(reasons), self.name, self.version, _mode_label(mode),
+            parameters=pairs, parameters_fingerprint=fingerprint,
         )
 
 
@@ -639,8 +917,10 @@ class FixedExpiryOptionsRiskPolicy:
         reasons = [DERIVATIVES_NOT_ENABLED_REASON]
         if fixed_expiry_options.ENABLED is not False:
             reasons.append("enabled_flag_set_without_reviewed_policy")
+        pairs, fingerprint = canonical_parameters({"name": self.name, "version": self.version, "allow": "never"})
         return MarketRiskDecision(
-            MarketType.FIXED_EXPIRY_OPTIONS, Verdict.REFUSE, tuple(reasons), self.name, self.version, _mode_label(mode)
+            MarketType.FIXED_EXPIRY_OPTIONS, Verdict.REFUSE, tuple(reasons), self.name, self.version, _mode_label(mode),
+            parameters=pairs, parameters_fingerprint=fingerprint,
         )
 
 
@@ -667,19 +947,26 @@ __all__ = [
     "MAX_BALANCE_AGE_SECONDS",
     "MAX_DAILY_NOTIONAL_FRACTION",
     "MAX_FEE_AGE_SECONDS",
+    "MAX_LIMIT_DEVIATION_FRACTION",
     "MAX_ORDER_NOTIONAL_FRACTION",
     "MAX_QUOTE_AGE_SECONDS",
     "MAX_SPEC_AGE_SECONDS",
+    "MIN_SLIPPAGE_FRACTION_PER_SIDE",
     "OPTIONS_REVIEW_REQUIREMENTS",
     "CryptoFuturesRiskPolicy",
     "CryptoSpotOrderIntent",
     "CryptoSpotRiskContext",
+    "CryptoSpotRiskParameters",
     "CryptoSpotRiskPolicy",
     "FixedExpiryOptionsRiskPolicy",
     "ForexCfdPreCheck",
     "MarketRiskDecision",
     "MarketRiskPolicy",
+    "Parameters",
+    "SpotBuyLedger",
+    "SpotBuyRecord",
     "SpotPosition",
     "Verdict",
+    "canonical_parameters",
     "policy_for",
 ]
