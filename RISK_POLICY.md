@@ -52,3 +52,46 @@ The research-integrity floors of `research_policy` (holdout reuse thresholds, mi
 | Kelly sizing | Not implemented (by design) |
 
 A dimension that cannot be computed is not yet systematically blocking: the engine blocks unknown specs, unknown quote age or spread, unknown margin conversion and an unverified mode, but the unimplemented dimensions above are simply not evaluated. All values were exercised on the simulator with synthetic data only.
+
+## Per-market risk policies (multi-venue lot)
+
+`astra.markets.risk_policies` holds one policy per market type and `astra.markets.costs` one cost model per market type. Rules are not shared between markets unless their assumptions match. Every decision is a `MarketRiskDecision` (ALLOW or REFUSE, reason codes, policy name and **policy version**). The modules are pure: they import no gateway, permit or broker adapter, and nothing in this lot can send a crypto order. The only order path stays `OrderGateway` -> `ExecutionPermit` -> `BrokerAdapter.submit_order`.
+
+### Forex / CFD
+
+The existing `RiskEngine` and `OrderGateway` checks above remain the authority and are unchanged. `ForexCfdPreCheck` (version `forex-cfd-precheck-1`) is a contract-data pre-check that is necessary, never sufficient. It refuses:
+
+- an ILLUSTRATIVE `ForexCfdSpec` outside SIMULATION, and `LIVE` in every case;
+- outside SIMULATION: unknown swap (long, short or unit), unknown commission or commission currency, unknown account currency, or a missing conversion rate for any currency the position touches (quote, margin, commission, currency-denominated swap) that is not the account currency;
+- in every mode: an ambiguous lot conversion (contract size not a multiple of the unit step, or requested lots that do not map to a whole step) and requested lots outside the contract limits.
+
+Costs reuse `CostModel`; `forex_cost_model` derives a per-unit commission only when the commission basis (`PER_SIDE` or `ROUND_TURN`) is explicit and the commission currency is the quote currency.
+
+### Crypto spot
+
+`CryptoSpotRiskPolicy` (version `crypto-spot-1`, frozen). Values are **provisional engineering parameters**, not calibrated and not advice; a policy may be made stricter, never looser than these ceilings:
+
+| Control | Ceiling | Action |
+|---|---:|---|
+| Notional per BUY order | 2% of free quote balance | Refuse (no resize) |
+| BUY notional per UTC day (including this order) | 10% of free quote balance | Refuse; an unknown day total refuses |
+| Quote (bookTicker) age | 5 s | Refuse stale, future-dated or unknown |
+| Symbol spec and status age | 300 s | Refuse |
+| Balance age | 30 s | Refuse |
+| Fee schedule age | 24 h | Refuse |
+| Slippage assumption | 0.05% per side, `UNCALIBRATED` | Used in net expectancy |
+| Leverage | 1 (fixed) | No other value can be configured |
+| Shorting | Not allowed (fixed) | SELL limited to the free base balance |
+
+Also refused: any mode other than SIMULATION (ALLOW is reachable only there in this lot; `LIVE` is always refused), kill switch active or unknown, borrowing enabled or unknown, symbol status other than `TRADING`, symbol mismatch, unknown or missing base/quote balance (a missing asset is unknown, not zero), insufficient free quote for the BUY, unknown or mismatched fees, a fee asset that cannot be valued or is not held, a BUY without a stop below the price, a BUY without a strategy edge, and a non-positive net expectancy (edge minus two worst-rate fees, one spread and two slippage legs). Quantity and price are rounded down through `CryptoSpotSpec` and then checked with `order_violations` (step, tick, minimum and maximum quantity, minimum notional).
+
+Notional caps apply to BUY orders, which open or add exposure; a SELL only reduces holdings and is bounded by the free base balance.
+
+Martingale and loss recovery are refused by construction: after a negative realized day P&L, a BUY larger than the previous BUY is refused (`risk_increase_after_loss`); a BUY while the strategy position is below its average entry is refused (`adding_to_losing_position`); `evaluate_stop_change` refuses stop removal and widening and allows only tightening. The policy has no size multiplier.
+
+### Crypto futures / perpetuals and fixed-expiry options
+
+`CryptoFuturesRiskPolicy` and `FixedExpiryOptionsRiskPolicy` always REFUSE with `market type not enabled: requires derivatives risk review`, in every mode, consistent with `ENABLED = False`. The funding model (`FundingCostAssumption`) is a data structure only. A future derivatives review must settle at least:
+
+- futures: initial and maintenance margin (per tier, provider-sourced), mark and index price sources and staleness, funding sign convention and cost, liquidation distance with a buffer (ASTRA never computes a liquidation price), margin mode (isolated or cross), cross-contract and cross-venue exposure, leverage schedule, auto-deleverage, position mode and reduce-only semantics;
+- fixed-expiry options: expiry schedule and settlement source, payout and premium terms including the tie rule, premium budget, product restrictions or prohibitions for retail clients in the user's jurisdiction, expected value net of the payout asymmetry, early close and requote rules.
