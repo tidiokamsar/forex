@@ -447,6 +447,28 @@ class PersistedStateMigrationTests(unittest.TestCase):
                 return  # refusing an unmapped entry is the secure outcome
             self.assertTrue(connector.is_banned)
 
+    # CONFIRMED DEFECT MV-A-14 (low, fail-closed lock-out): save() rewrites only the scope key and leaves the legacy
+    # base-URL entry in the file. After a human acknowledge_ban_cleared(), the new key says "not banned" but the
+    # legacy entry still says banned (open-ended); on the next restart attach() ORs them and the ban is back, so
+    # an acknowledgement can never stick until someone edits the file by hand. No network.
+    @unittest.expectedFailure
+    def test_acknowledged_ban_stays_cleared_after_restart_with_a_legacy_entry(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "binance_state.json"
+            path.write_text(json.dumps({
+                "schema": bs.STATE_SCHEMA, "schema_version": bs.STATE_SCHEMA_VERSION,
+                "hosts": {"https://api.binance.com": {"banned": True, "banned_until": None, "blocked_until": None}},
+            }), encoding="utf-8")
+            connector = bs.BinanceSpotPublicData("https://api.binance.com", state_path=path)
+            self.assertTrue(connector.is_banned)
+            connector.acknowledge_ban_cleared()
+            self.assertFalse(connector.is_banned)
+            bs.reset_host_states_for_tests()  # simulates a restarted process
+            restarted = bs.BinanceSpotPublicData("https://api.binance.com", state_path=path)
+            self.assertFalse(restarted.is_banned)
+
 
 if __name__ == "__main__":
     unittest.main()
