@@ -6,6 +6,7 @@ astra.venues.binance_spot.
 """
 
 import ast
+import copy
 import dataclasses
 import io
 import json
@@ -15,7 +16,9 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
+from _support import workspace_tempdir
 from astra.brokers.base import (
     BrokerRequestError,
     BrokerTimeout,
@@ -78,6 +81,9 @@ class FakeTime:
 
 class ServerCase(unittest.TestCase):
     def setUp(self):
+        # Stop state is process-wide per base URL; a reused ephemeral port must not inherit it.
+        bs.reset_host_states_for_tests()
+        self.addCleanup(bs.reset_host_states_for_tests)
         self.clock = FakeClock()
         self.server = FakeBinanceServer(api_key=KEY, api_secret=SECRET, clock_ms=self.clock.peek_ms).start()
         self.addCleanup(self.server.stop)
@@ -361,7 +367,7 @@ class RateLimitTests(ServerCase):
         with self.assertRaises(BrokerRequestError):
             connector.ping()
         self.assertEqual(len(self.server.requests), 1)  # no hammering
-        self.fake_time.now += 121
+        self.clock.advance(121)
         connector.ping()
         self.assertEqual(len(self.server.requests), 2)
 
@@ -475,7 +481,8 @@ class ReadOnlyKeyTests(ServerCase):
         self.assertEqual(account_query["recvWindow"], "5000")
         self.assertEqual(account_query["omitZeroBalances"], "true")
         self.assertIn("signature", account_query)
-        self.assertEqual(reader.account_environment(), (VenueEnvironment.LIVE, EnvironmentSource.PROVIDER_API))
+        # A loopback fake is never provider evidence, even with loopback_role="production" (MV-A-2).
+        self.assertEqual(reader.account_environment(), (VenueEnvironment.LIVE, EnvironmentSource.UNVERIFIED))
         # Verified once; not re-read within the re-verification window.
         reader.balances()
         self.assertEqual(self.server.paths().count("/sapi/v1/account/apiRestrictions"), 1)
@@ -628,6 +635,186 @@ class RegistryGateTests(ServerCase):
         wrong = dataclasses.replace(public_ok, venue_id="other_venue")
         with self.assertRaises(bs.RegistryGateRefused):
             bs.BinanceSpotPublicData(self.server.base_url, loopback_role="public_data", registry_record=wrong).ping()
+
+
+class SharedStopStateTests(ServerCase):
+    """MV-A-3: ban, 429 stop and weight budget are process-wide per base URL, optionally persisted."""
+
+    def test_ban_and_429_stop_shared_by_new_instances(self):
+        self.server.script("/api/v3/ping", Scripted(418, {"code": -1003, "msg": "banned"}, {"Retry-After": "300"}))
+        with self.assertRaises(bs.BinanceIpBanned):
+            self.public().ping()
+        with self.assertRaises(bs.BinanceIpBanned):
+            self.public().ping()
+        with self.assertRaises(bs.BinanceIpBanned):
+            self.reader().verify_read_only()  # same host, other class
+        self.assertEqual(len(self.server.requests), 1)
+        self.clock.advance(301)
+        self.public().ping()
+        self.server.script("/api/v3/ping", Scripted(429, {}, {"Retry-After": "120"}))
+        with self.assertRaises(BrokerRequestError):
+            self.public().ping()
+        with self.assertRaises(BrokerRequestError):
+            self.public().ping()
+        self.assertEqual(len(self.server.requests), 3)
+
+    def test_weight_budget_shared_by_instances(self):
+        self.server.used_weight = 4790
+        self.public().ping()
+        sent = len(self.server.requests)
+        with self.assertRaises(BrokerRequestError) as ctx:
+            self.public().symbol_rules()
+        self.assertEqual(ctx.exception.error_code, "LOCAL_WEIGHT_BUDGET")
+        self.assertEqual(len(self.server.requests), sent)
+
+    def test_ban_persisted_across_processes(self):
+        with workspace_tempdir() as directory:
+            state = Path(directory) / "binance_state.json"
+            self.server.script("/api/v3/ping", Scripted(418, {"code": -1003, "msg": "banned"}))
+            with self.assertRaises(bs.BinanceIpBanned):
+                self.public(state_path=state).ping()
+            document = json.loads(state.read_text(encoding="utf-8"))
+            self.assertTrue(document["hosts"][self.server.base_url]["banned"])
+            bs.reset_host_states_for_tests()  # simulates a restarted process
+            with self.assertRaises(bs.BinanceIpBanned):
+                self.public(state_path=state).ping()
+            self.assertEqual(len(self.server.requests), 1)
+            self.public(state_path=state).acknowledge_ban_cleared()
+            bs.reset_host_states_for_tests()
+            self.public(state_path=state).ping()
+            self.assertEqual(len(self.server.requests), 2)
+
+    def test_unreadable_state_file_refused(self):
+        with workspace_tempdir() as directory:
+            state = Path(directory) / "binance_state.json"
+            state.write_text("{not json", encoding="utf-8")
+            with self.assertRaises(bs.BinanceConfigurationError):
+                self.public(state_path=state)
+            state.write_text(json.dumps({"schema": "other", "hosts": {}}), encoding="utf-8")
+            with self.assertRaises(bs.BinanceConfigurationError):
+                self.public(state_path=state)
+
+
+class QaFixTests(ServerCase):
+    def test_429_with_unusable_retry_after_stops_until_acknowledged(self):
+        # MV-D-1
+        for header in ("400000", "soon", "-5", "nan"):
+            with self.subTest(header=header):
+                bs.reset_host_states_for_tests()
+                self.server.requests.clear()
+                self.server.script("/api/v3/ping", Scripted(429, {}, {"Retry-After": header}))
+                connector = self.public()
+                with self.assertRaises(BrokerRequestError) as ctx:
+                    connector.ping()
+                self.assertIsNone(ctx.exception.retry_after_seconds)
+                self.clock.advance(4 * 86_400)
+                self.fake_time.now += 4 * 86_400
+                with self.assertRaises(BrokerRequestError):
+                    self.public().ping()
+                self.assertEqual(len(self.server.requests), 1)
+                connector.acknowledge_ban_cleared()
+                connector.ping()
+
+    def test_429_without_retry_after_blocks_sixty_seconds(self):
+        self.server.script("/api/v3/ping", Scripted(429, {}))
+        connector = self.public()
+        with self.assertRaises(BrokerRequestError) as ctx:
+            connector.ping()
+        self.assertEqual(ctx.exception.retry_after_seconds, 60.0)
+        self.clock.advance(61)
+        connector.ping()
+
+    def test_provider_weight_limit_never_raises_the_budget(self):
+        self.server.rate_limits[0]["limit"] = 12_000
+        connector = self.public()
+        connector.symbol_rules(("BTCUSDT",))
+        self.assertEqual(connector.weight_limit, 6000)
+
+    def test_duplicated_symbol_refused_in_every_copy(self):
+        # MV-D-2
+        entry = self.server.symbols[0]
+        self.server.symbols = [entry, entry, entry, self.server.symbols[1]]
+        connector = self.public()
+        rules = connector.symbol_rules()
+        self.assertEqual(set(rules), {"ETHBTC"})
+        self.assertIn("duplicate", connector.rejected_symbols["BTCUSDT"])
+
+    def test_absurd_filter_values_rejected(self):
+        # MV-D-3
+        from binance_fixture import symbol_entry
+
+        self.server.symbols = [
+            symbol_entry("AAAUSDT", "AAA", "USDT", tick="1E-99"),
+            symbol_entry("BBBUSDT", "BBB", "USDT", step="1E+12"),
+            symbol_entry("CCCUSDT", "CCC", "USDT", max_qty="1E+30"),
+            symbol_entry("BTCUSDT", "BTC", "USDT"),
+        ]
+        connector = self.public()
+        self.assertEqual(set(connector.symbol_rules()), {"BTCUSDT"})
+        self.assertIn("sanity range", connector.rejected_symbols["AAAUSDT"])
+
+    def test_spec_carries_and_enforces_price_and_notional_bounds(self):
+        # MV-D-5
+        rules = self.public().symbol_rules(("BTCUSDT",))["BTCUSDT"]
+        spec = rules.to_spec(Decimal("0.001"), Decimal("0.001"))
+        self.assertEqual((spec.min_price, spec.max_price, spec.max_notional),
+                         (Decimal("0.01"), Decimal("1000000"), Decimal("9000000")))
+        self.assertIn("price_above_maximum", spec.order_violations("0.001", "2000000.00"))
+        self.assertIn("price_below_minimum", spec.order_violations("1000", "0.001"))
+        self.assertIn("notional_above_maximum", spec.order_violations("9000", "1000.01"))
+        self.assertEqual(spec.order_violations("0.001", "65000.00"), ())
+
+
+class ReviewFixTests(ServerCase):
+    def test_in_memory_record_refused_for_real_host(self):
+        # MV-A-1: no socket is opened; the gate refuses before _send.
+        shipped = venue_registry.load_registry().get("binance_spot")
+        S = venue_registry.VenueStatus
+        forged = dataclasses.replace(shipped, statuses=tuple(
+            venue_registry.StatusGrant(s, "2026-10-26", "forged")
+            for s in (S.DISCOVERED, S.OFFICIAL_API_VERIFIED, S.REGION_ELIGIBILITY_VERIFIED, S.READ_ONLY_CONNECTED)))
+        with patch.object(bs._BinanceHttp, "_send", side_effect=AssertionError("network used")):
+            with self.assertRaises(bs.RegistryGateRefused):
+                bs.BinanceSpotPublicData(registry_record=forged).ping()
+            reader = bs.BinanceSpotAccountReader(SecretValue(KEY), SecretValue(SECRET), registry_record=forged)
+            with self.assertRaises(bs.RegistryGateRefused):
+                reader.balances()
+
+    def test_real_production_host_yields_provider_api_after_signed_read(self):
+        # MV-A-2 counterpart: a real production host (patched transport, gate patched open) is evidence.
+        def send(_self, url, _headers):
+            path = url.split("://", 1)[1].split("/", 1)[1].split("?", 1)[0]
+            bodies = {
+                "api/v3/time": {"serverTime": self.clock.peek_ms()},
+                "sapi/v1/account/apiRestrictions": bs_restrictions(),
+                "api/v3/account": {"accountType": "SPOT", "balances": [], "canTrade": False},
+            }
+            return 200, {}, json.dumps(bodies[path]).encode()
+
+        with patch.object(bs._BinanceHttp, "_send", send), patch.object(bs.venue_registry, "can_read_account", return_value=True):
+            reader = bs.BinanceSpotAccountReader(SecretValue(KEY), SecretValue(SECRET), clock=self.clock)
+            self.assertEqual(reader.account_environment(), (VenueEnvironment.LIVE, EnvironmentSource.UNVERIFIED))
+            self.assertEqual(reader.balances(), ())
+            self.assertEqual(reader.account_environment(), (VenueEnvironment.LIVE, EnvironmentSource.PROVIDER_API))
+
+    def test_reverify_interval_bounded(self):
+        # MV-A-4
+        for value in (float("inf"), float("nan"), 0, 0.5, 3601, 1e12, True, "300", None):
+            with self.subTest(value=value), self.assertRaises(bs.BinanceConfigurationError):
+                self.reader(reverify_after_seconds=value)
+        self.reader(reverify_after_seconds=1)
+        self.reader(reverify_after_seconds=3600)
+
+    def test_secret_value_not_pickled_or_copied_in_clear(self):
+        # MV-A-5
+        secret = SecretValue(SECRET)
+        for protocol in range(pickle.HIGHEST_PROTOCOL + 1):
+            with self.assertRaises(TypeError):
+                pickle.dumps(secret, protocol=protocol)
+        self.assertIs(copy.copy(secret), secret)
+        self.assertIs(copy.deepcopy(secret), secret)
+        self.assertIs(copy.deepcopy({"k": secret})["k"], secret)
+        self.assertEqual(secret.reveal(), SECRET)
 
 
 class NoWriteEndpointTests(unittest.TestCase):

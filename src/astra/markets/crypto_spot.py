@@ -20,26 +20,62 @@ from .common import require_aware, require_symbol, require_text, to_decimal
 
 TRADING_STATUS = "TRADING"
 _PRECISION = 60
+# Upper bound on the digits a step computation may need. Beyond it the input is refused with
+# ValueError instead of being rounded (which could round up) or raising decimal.InvalidOperation.
+MAX_STEP_PRECISION = 120
+
+
+def _digits_needed(value: Decimal, step: Decimal) -> int:
+    """Significant digits needed to represent ``value / step`` and the result on the step grid exactly."""
+
+    exponents = [d.as_tuple().exponent for d in (value, step)]
+    if not all(isinstance(e, int) for e in exponents):
+        raise ValueError("value and step must be finite")
+    top = max(value.adjusted() if value else 0, step.adjusted())
+    return top - min(exponents) + 2
 
 
 def floor_to_step(value: object, step: Decimal, name: str = "value") -> Decimal:
-    """Largest multiple of ``step`` not above ``value`` (``value`` >= 0)."""
+    """Largest multiple of ``step`` not above ``value`` (``value`` >= 0).
+
+    Exact up to ``MAX_STEP_PRECISION`` digits; inputs that would need more
+    raise ``ValueError`` so callers fail closed. The result is never above
+    ``value``.
+    """
 
     amount = to_decimal(value, name)
     if amount < 0:
         raise ValueError(f"{name} must not be negative")
     if step <= 0:
         raise ValueError("step must be positive")
-    with localcontext() as context:
-        context.prec = _PRECISION
-        steps = (amount / step).to_integral_value(rounding=ROUND_FLOOR)
-        return (steps * step).quantize(step)
+    digits = _digits_needed(amount, step)
+    if digits > MAX_STEP_PRECISION:
+        raise ValueError(f"{name}/step ratio needs {digits} digits, above the {MAX_STEP_PRECISION}-digit bound")
+    try:
+        with localcontext() as context:
+            context.prec = max(_PRECISION, digits)
+            context.rounding = ROUND_FLOOR
+            steps = (amount / step).to_integral_value(rounding=ROUND_FLOOR)
+            result = (steps * step).quantize(step)
+    except ArithmeticError as exc:  # decimal.InvalidOperation and friends
+        raise ValueError(f"{name} cannot be rounded to step {step}") from exc
+    if result > amount or amount - result >= step:
+        raise ValueError(f"{name} cannot be rounded exactly to step {step}")
+    return result
 
 
 def _on_step(value: Decimal, step: Decimal) -> bool:
-    with localcontext() as context:
-        context.prec = _PRECISION
-        return value % step == 0
+    """True when ``value`` is an exact multiple of ``step``; False when that cannot be decided exactly."""
+
+    try:
+        digits = _digits_needed(value, step)
+        if digits > MAX_STEP_PRECISION:
+            return False
+        with localcontext() as context:
+            context.prec = max(_PRECISION, digits)
+            return value % step == 0
+    except (ArithmeticError, ValueError):
+        return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +95,10 @@ class CryptoSpotSpec:
     taker_fee: Decimal
     source: str
     as_of: datetime
+    # Optional exchange bounds (None: not reported). Zero disables a bound, as in Binance PRICE_FILTER.
+    min_price: Decimal | None = None
+    max_price: Decimal | None = None
+    max_notional: Decimal | None = None
 
     def __post_init__(self) -> None:
         require_symbol(self.symbol)
@@ -85,6 +125,17 @@ class CryptoSpotSpec:
                 raise ValueError(f"{name} must be a non-negative integer")
         require_text(self.source, "source")
         require_aware(self.as_of, "as_of")
+        for name in ("min_price", "max_price", "max_notional"):
+            value = getattr(self, name)
+            if value is not None:
+                value = to_decimal(value, name)
+                if value < 0:
+                    raise ValueError(f"{name} must not be negative")
+                object.__setattr__(self, name, value)
+        if self.min_price and self.max_price and self.min_price > self.max_price:
+            raise ValueError("min_price must not exceed max_price")
+        if self.max_notional and self.max_notional < self.min_notional:
+            raise ValueError("max_notional must not be below min_notional")
 
     @property
     def is_trading(self) -> bool:
@@ -130,6 +181,12 @@ class CryptoSpotSpec:
             reasons.append("quantity_not_on_step")
         if not _on_step(px, self.tick_size):
             reasons.append("price_not_on_tick")
+        if self.min_price and px < self.min_price:
+            reasons.append("price_below_minimum")
+        if self.max_price and px > self.max_price:
+            reasons.append("price_above_maximum")
         if not self.notional_ok(qty, px):
             reasons.append("notional_below_minimum")
+        if self.max_notional and self.notional(qty, px) > self.max_notional:
+            reasons.append("notional_above_maximum")
         return tuple(reasons)

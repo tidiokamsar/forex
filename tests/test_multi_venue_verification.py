@@ -40,10 +40,9 @@ SRC = ROOT / "src"
 
 
 class RateLimitAdversarialTests(ServerCase):
-    # MV-D-1 (Medium): a 429 whose Retry-After exceeds 3 days + 60 s (or is not a number) is treated as absent
+    # FIXED (was MV-D-1) (Medium): a 429 whose Retry-After exceeds 3 days + 60 s (or is not a number) is treated as absent
     # and blocks locally for only 60 s, although the provider asked for longer; resuming early is exactly what
     # escalates a 429 into a 418 IP ban. A 418 with the same header is open-ended (safe); a 429 is not.
-    @unittest.expectedFailure
     def test_429_with_retry_after_beyond_three_days_keeps_blocking(self):
         self.server.script("/api/v3/ping", Scripted(429, {"code": -1003, "msg": "Too many requests"},
                                                     {"Retry-After": "400000"}))
@@ -96,9 +95,8 @@ class ExchangeInfoAdversarialTests(ServerCase):
         connector = self.public()
         return connector.symbol_rules(), connector.rejected_symbols
 
-    # MV-D-2 (Low): duplicate detection drops the symbol on its second entry and then accepts the third
+    # FIXED (was MV-D-2) (Low): duplicate detection drops the symbol on its second entry and then accepts the third
     # entry of the same symbol as if it were unique.
-    @unittest.expectedFailure
     def test_a_symbol_listed_three_times_is_rejected(self):
         entry = symbol_entry("BTCUSDT", "BTC", "USDT")
         rules, rejected = self.rules_with([entry, entry, entry])
@@ -122,18 +120,16 @@ class ExchangeInfoAdversarialTests(ServerCase):
         self.assertEqual(set(rules), {"BTCUSDT"})
         self.assertGreaterEqual(len(rejected), len(bad) - 1)  # the non-object entry is keyed "None"
 
-    # MV-D-3 (Low; extreme Decimals): an absurd tick or step (1E-99) is accepted as a rule; rounding a
+    # FIXED (was MV-D-3) (Low; extreme Decimals): an absurd tick or step (1E-99) is accepted as a rule; rounding a
     # price on it then raises decimal.InvalidOperation instead of a ValueError or a refusal.
-    @unittest.expectedFailure
     def test_absurd_tick_is_rejected_at_parse_time(self):
         entry = symbol_entry("BTCUSDT", "BTC", "USDT", tick="1E-99")
         rules, _rejected = self.rules_with([entry])
         self.assertNotIn("BTCUSDT", rules)
 
-    # MV-D-5 (Low; no order path yet): the PRICE_FILTER bounds (minPrice, maxPrice) and NOTIONAL maxNotional
+    # FIXED (was MV-D-5) (Low; no order path yet): the PRICE_FILTER bounds (minPrice, maxPrice) and NOTIONAL maxNotional
     # are parsed into BinanceSymbolRules but dropped by to_spec(); CryptoSpotSpec.order_violations therefore
     # accepts a price above maxPrice. (The tick grid from zero is correct: filters.md states price % tickSize.)
-    @unittest.expectedFailure
     def test_spec_enforces_price_bounds_and_max_notional(self):
         rules, _ = self.rules_with([symbol_entry("BTCUSDT", "BTC", "USDT")])
         spec = rules["BTCUSDT"].to_spec(Decimal("0.001"), Decimal("0.001"))
@@ -141,11 +137,10 @@ class ExchangeInfoAdversarialTests(ServerCase):
 
 
 class ExtremeDecimalTests(unittest.TestCase):
-    # MV-D-4 (Low; extreme Decimals): floor_to_step works at a fixed 60-digit precision; when value/step needs
+    # FIXED (was MV-D-4) (Low; extreme Decimals): floor_to_step works at a fixed 60-digit precision; when value/step needs
     # more digits, quantize() raises decimal.InvalidOperation (an ArithmeticError, not a ValueError), so
     # CryptoSpotRiskPolicy.evaluate raises on a 1E+70 quantity instead of returning REFUSE, and callers that
     # catch (TypeError, ValueError) are bypassed.
-    @unittest.expectedFailure
     def test_floor_to_step_never_rounds_up_and_never_raises_arithmetic_errors(self):
         value = Decimal("0." + "9" * 65)
         self.assertLessEqual(floor_to_step(value, Decimal("1E-70")), value)
