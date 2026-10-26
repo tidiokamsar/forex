@@ -254,7 +254,7 @@ class LedgerRecheckTests(unittest.TestCase):
     # price band is checked, so a BUY refused only for limit_price_outside_band is still recorded. RISK_POLICY.md
     # says "Every ALLOWED BUY is booked"; the phantom notional consumes daily cap and becomes the ledger's last
     # BUY (a refused decision mutates state).
-    @unittest.expectedFailure
+    # FIXED (was MV-D-14, same defect as MV-A-12): every check runs before booking.
     def test_refused_buy_is_not_booked(self):
         policy = CryptoSpotRiskPolicy()
         decision = policy.evaluate(buy(limit_price=Decimal("51000.00")), context(balances=balances(base="0")))
