@@ -927,5 +927,76 @@ class Phase4DetectorTests(ReuseVerdictPolicyTests):
                 self.seal_direct(new, f"N{index}", 2100 + index, f"{index:064d}")
 
 
+# =============================================================================================
+# Phase 5: final review of 91faef4. Ids A5-n.
+# =============================================================================================
+
+
+class Phase5Tests(_Phase3Case):
+    scratch_copy = Phase4EvidenceTests.scratch_copy  # reuse the helper without re-running the phase 4 tests
+
+    # CONFIRMED DEFECT A5-1 (low, inherent to LocalFileAnchor, covered by the promotion waiver): the A4-D-2 fix
+    # refuses a peek in an unanchored copy, but a copy of the store file plus a copy of the anchor file is a
+    # consistent pair (same anchor_id, same checkpoints). The holdout is scored in the copied pair, and the
+    # original store then scores it "for the first time", anchored before scoring. SECURITY.md accepts this
+    # through the non-production waiver ("a hand-crafted anchor chain is not detected").
+    @unittest.expectedFailure
+    def test_peek_in_a_copied_store_and_anchor_pair_is_refused(self):
+        anchor, store = self.anchored_store()
+        with overfitting_double():
+            report = evaluate(store=store)
+        copied_anchor = LocalFileAnchor(Path(self.database).parent / "anchor-copy.jsonl")
+        shutil.copyfile(anchor.path, copied_anchor.path)
+        scratch = Path(self.database).parent / "scratch.sqlite3"
+        shutil.copyfile(self.database, scratch)
+        peek = second = None
+        with contextlib.suppress(ValueError):
+            peek = self.score(report, BacktestStore(scratch, anchor=copied_anchor))
+        with contextlib.suppress(ValueError):
+            second = self.score(report, store)
+        self.assertFalse(isinstance(peek, StrategyHoldoutEvaluation) and isinstance(second, StrategyHoldoutEvaluation))
+
+    # CONFIRMED DEFECT A5-2 (low-medium): the data-provenance gate trusts the declared label even for the one
+    # file ASTRA knows is synthetic. The bundled fixture is pinned by DEMO_FIXTURE_SHA256 and always SYNTHETIC
+    # without --csv, but `--csv <that same file> --source-type HISTORICAL` seals it as HISTORICAL, so the
+    # dataset_not_authentic gate passes. (SECURITY.md documents that labels are declared; this known-hash case
+    # is cheap to refuse.)
+    @unittest.expectedFailure
+    def test_bundled_synthetic_fixture_cannot_be_sealed_as_historical(self):
+        from astra.cli import PROJECT_ROOT
+
+        fixture = PROJECT_ROOT / "data" / "synthetic_eurusd_m15.csv"
+        output, errors = io.StringIO(), io.StringIO()
+        env = {"ASTRA_DATABASE": str(Path(self.database).parent / "cli.sqlite3")}
+        with patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            code = main(["evaluate-strategies", "--csv", str(fixture), "--source-type", "HISTORICAL",
+                         "--source-name", "relabelled", "--interval-seconds", "900"])
+        if code != 0:
+            return  # refused: the secure outcome
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["report"]["plan_manifest"]["data_source"]["source_type"], "SYNTHETIC")
+
+    def test_regression_lowered_statistical_floors_are_flagged_and_lags_must_match(self):
+        from astra.research_policy import StatisticalPolicy, statistical_policy_below_floor
+
+        applied = asdict(StatisticalPolicy())
+        self.assertEqual(statistical_policy_below_floor(applied), ())
+        for name, value in (("min_dsr_effective_returns", 10), ("max_dsr_abs_autocorrelation", 0.9),
+                            ("dsr_autocorrelation_lags", 6), ("dsr_autocorrelation_lags", 1), ("min_dsr_trades", True),
+                            ("max_dsr_abs_autocorrelation", math.nan)):
+            with self.subTest(name=name, value=value):
+                self.assertIn(name, statistical_policy_below_floor({**applied, name: value}))
+        self.assertEqual(len(statistical_policy_below_floor(None)), len(applied))
+
+    def test_regression_rederivation_refuses_a_bound_copy_without_its_anchor(self):
+        _anchor, store = self.anchored_store()
+        with overfitting_double():
+            report = evaluate(store=store)
+        with self.assertRaises(ValueError):
+            self.score(report, self.scratch_copy())
+        with self.assertRaises(ValueError):
+            rederive_holdout_evidence(BARS, report.plan_manifest, store=self.scratch_copy("scratch2.sqlite3"))
+
+
 if __name__ == "__main__":
     unittest.main()
