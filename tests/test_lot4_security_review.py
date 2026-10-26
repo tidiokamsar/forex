@@ -780,10 +780,8 @@ class Phase4EvidenceTests(_Phase3Case):
         shutil.copyfile(self.database, scratch)
         return BacktestStore(scratch)  # no anchor: ASTRA_EVIDENCE_ANCHOR is not set in tests
 
-    # CONFIRMED DEFECT A4-D-1 (medium): the C-2 fix duck-types the store: any object with a
-    # holdout_for_protocol() answering {"status": "COMPLETED"} turns rederive_holdout_evidence back into a
-    # store-free oracle for a sealed, never-scored plan.
-    @unittest.expectedFailure
+    # FIXED IN LOT 4 ROUND 5 (was CONFIRMED DEFECT A4-D-1, medium): the C-2 fix duck-typed the store. Only a
+    # BacktestStore itself is accepted now, and the consumed evaluation is read with SQL from its file.
     def test_rederivation_cannot_be_fooled_by_a_stub_store(self):
         report = self.seal_original()
         stub = types.SimpleNamespace(holdout_for_protocol=lambda _protocol_id: {"status": "COMPLETED"})
@@ -798,21 +796,29 @@ class Phase4EvidenceTests(_Phase3Case):
     # and the original store then scores the same holdout as if for the first time, anchored before scoring
     # and therefore promotable. The integrator's own C-1 test adaptation uses exactly this copy. Neither the
     # anchor nor the original attempt log can know about the copy.
-    @unittest.expectedFailure
+    # FIXED IN LOT 4 ROUND 5: a store whose binding table names an anchor refuses unanchored scoring, and the
+    # copy carries the binding row, so the peek itself is refused. The assertion is generalised to "not both
+    # the peek and the first-time scoring succeed" (it used to require the peek to succeed). Deleting the
+    # binding row in the copy (triggers dropped), or simulating outside ASTRA, is the documented inherent limit.
     def test_holdout_peeked_in_a_copy_of_the_store_cannot_be_scored_again(self):
         _anchor, store = self.anchored_store()
         with overfitting_double():
             report = evaluate(store=store)
-        self.assertIsInstance(self.score(report, self.scratch_copy()), StrategyHoldoutEvaluation)  # the peek
-        second = None
+        peek = second = None
+        with contextlib.suppress(ValueError):
+            peek = self.score(report, self.scratch_copy())
         with contextlib.suppress(ValueError):
             second = self.score(report, store)
-        self.assertNotIsInstance(second, StrategyHoldoutEvaluation)
+        self.assertNotIsInstance(peek, StrategyHoldoutEvaluation)
+        self.assertFalse(isinstance(peek, StrategyHoldoutEvaluation) and isinstance(second, StrategyHoldoutEvaluation))
 
     # CONFIRMED DEFECT A4-D-3 (medium): new store + new anchor. The binding stops swapping the anchor of a used
     # store, but nothing links a fresh database file to the anchors that already recorded the holdout as
     # consumed: the same bars and plan are sealed, anchored before scoring and scored again. The non-production
     # waiver at promotion is the only remaining trace, and a production adapter would need a global registry.
+    # RESIDUAL (Lot 4 round 5, structural): kept as an expected failure on purpose. Only one production anchor
+    # per deployment, shared by every store and refusing consumed holdout fingerprints, could close it; none
+    # exists. Documented in SECURITY.md and RESEARCH_PROTOCOL.md (evidence anchoring).
     @unittest.expectedFailure
     def test_same_holdout_cannot_be_rescored_in_a_new_store_with_a_new_anchor(self):
         _anchor, store = self.anchored_store()
@@ -832,7 +838,8 @@ class Phase4EvidenceTests(_Phase3Case):
     # CONFIRMED DEFECT A4-D-6 (low, fail-closed lock-out): a crash between anchor.append() and
     # _record_binding() on the first anchoring leaves an anchor with a checkpoint and an unbound store; every
     # later seal or scoring is refused for good (store_not_bound_to_anchor) and nothing can repair it.
-    @unittest.expectedFailure
+    # FIXED IN LOT 4 ROUND 5: the binding is written before the first checkpoint, with that checkpoint's identity;
+    # an empty anchor is accepted for a bound but unused store, so either crash point is completed next time.
     def test_crash_between_anchor_append_and_binding_is_recoverable(self):
         _anchor, store = self.anchored_store()
         with patch("astra.anchoring._record_binding", side_effect=OSError("crash")), contextlib.suppress(OSError):

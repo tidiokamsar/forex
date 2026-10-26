@@ -703,6 +703,7 @@ def _evaluate_strategies(args: argparse.Namespace, config: AppConfig, dataset) -
             dataset_sha256=dataset.sha256,
             store=store,
             experiment_id=experiment_id,
+            source_type=dataset.source_type,  # sealed in the plan; promotion reads it from there
         )
         selected = next((item for item in report.final_candidate_selection if item.selected), None)
         registered = None

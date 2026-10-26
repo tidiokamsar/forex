@@ -116,6 +116,8 @@ class AnchoredPromotionTests(HoldoutRederivationTests):
                          {"evidence_anchor_not_production_grade"})
         self.assertEqual(self.integrity(self.registry.check_promotion("wf", "1", holdout_bars=BARS,
                                                                       allow_non_production_anchor=True)), set())
+        # Lot 4 round 5 (data provenance): the fixture's plan carries no source label, so it fails closed.
+        self.assertIn("dataset_provenance_unknown", self.registry.check_promotion("wf", "1", holdout_bars=BARS))
         self.assertFalse(self.anchor.production_grade)
 
     def test_missing_anchor_blocks_promotion(self):

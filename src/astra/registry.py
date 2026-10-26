@@ -772,6 +772,15 @@ def verify_holdout_provenance(
     anchor_record = report.get("evidence_anchor") if isinstance(report.get("evidence_anchor"), dict) else {}
     if anchor_record.get("anchored_before_scoring") is not True:
         failures.append("holdout_scored_without_anchor")
+    # Data provenance (directive V5, Lot 4 round 5): read from the sealed plan only, never from a caller.
+    # Synthetic or simulated bars can never back a promotion; a missing or unknown label fails closed.
+    from .strategy_validation import AUTHENTIC_DATA_SOURCE_TYPES, NON_AUTHENTIC_DATA_SOURCE_TYPES, plan_data_source_type
+
+    source_type = plan_data_source_type(plan)
+    if source_type in NON_AUTHENTIC_DATA_SOURCE_TYPES:
+        failures.append(f"dataset_not_authentic:{source_type}")
+    elif source_type not in AUTHENTIC_DATA_SOURCE_TYPES:
+        failures.append("dataset_provenance_unknown")
     identity = manifest.get("dataset_identity")
     canonical = identity.get("canonical_sha256") if isinstance(identity, dict) else None
     if canonical is None or canonical != plan.get("dataset_identity_sha256"):
