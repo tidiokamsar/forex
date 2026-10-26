@@ -55,7 +55,7 @@ Tous les agents ont travaillé dans des worktrees Git isolés. Les relecteurs (A
 | 3 | 0ef781b | Non publiable : C-1, C-3, C-5 élevés | P-1 à P-10, pas d'élevé |
 | 4 | f1e0f76 | Pas d'élevé : A4-D-1 à A4-D-6 (moyen ou faible) | Publiable ; Q-1 à Q-4 |
 | 5 | 91faef4 puis 451ba7b | **Publiable comme outil de recherche, aucun critique ou élevé** | **Publiable, aucun critique ou élevé** ; R-1 et R-2 (moyen) |
-| 5b | e557506 (correctif R-1) | — | [VERDICT DE D SUR R-1] |
+| 5b | e557506 (correctif R-1) | — | **R-1 corrigé, aucun critique ou élevé, publiable** ; test de durée instable sous charge (faible), corrigé en b3da3cc |
 
 ## 4. Défauts trouvés et corrections intégrées
 
@@ -106,7 +106,7 @@ PYTHONPATH=src python -m unittest discover -s tests   # voir ci-dessous
 | 0ef781b (tour 3) | 560 | OK, 11 échecs attendus |
 | f1e0f76 (tour 4) | 614 | OK, 10 échecs attendus |
 | 91faef4 (tour 5) | 656 | 1 échec : valeur attendue périmée, corrigée en 451ba7b |
-| e557506 (final) | [NOMBRE] | [RÉSULTAT DE LA SUITE FINALE] |
+| e557506 (final) | 675 | OK, 15 échecs attendus (risques résiduels documentés) ; après b3da3cc, `test_lot4_verification` et `test_lot4_security_review` relancés : OK, 14 échecs attendus |
 
 - **Revues :** les relecteurs ont exécuté les modules un par un. Chaque test en échec attendu a été vérifié sans son décorateur : il échoue sur son assertion, pas sur une erreur.
 - **Simulations et validations externes :** tout est local, sur données synthétiques, avec un serveur cTrader simulé et des marches aléatoires. **Aucune validation externe** n'a eu lieu : pas de cTrader réel, pas de données réelles, pas de stockage WORM.
@@ -190,7 +190,7 @@ La version `astra-research-policy-0.5.0-provisional` est fixée dans le code. El
   - `main` est inchangée (60991ed) ;
   - aucun historique réécrit, aucun envoi forcé ;
   - les branches de lot précédentes ne sont pas modifiées.
-- **Publication :** [ÉTAT DE LA PUBLICATION].
+- **Publication :** branche `feat/lot4-integrite-quant` publiée sur `origin` après les verdicts favorables de A et D et une suite verte ; aucune autre branche n'a été poussée.
 
 ## 11. Risques résiduels et dépendances humaines
 

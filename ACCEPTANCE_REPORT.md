@@ -1,5 +1,14 @@
 # Acceptance report
 
+## Lot 4 research integrity (branch `feat/lot4-integrite-quant`, 2026-10-25/26)
+
+Scope: independent review of the Lot 3 holdout fixes, attempt registry, PBO/CSCV and DSR aligned with the real selection and with serial dependence, re-derivation of holdout evidence at promotion, holdout reuse detection with calibration, evidence anchor interface (local adapter, not production grade), versioned research policy 0.5.0, data provenance gate. Synthetic data only; no order sent, DEMO disabled, LIVE locked, no connection to cTrader.
+
+Verification on e557506: ruff `All checks passed!`; compileall exit 0; `Ran 675 tests in 1185.616s`, `OK (expected failures=15)`. After b3da3cc (CPU-time seal test, phase 5b tests): `test_lot4_verification` and `test_lot4_security_review` `OK (expected failures=14)`. Every expected failure is a documented residual (reports/LOT_04_REPORT.md section 4).
+
+Independent reviews: security agent A and QA agent D, five phases each, neither wrote the code they reviewed; final verdicts favourable for exploratory research tooling, no critical or high finding open; not a promotion-grade guarantee (needs an external production anchor, attested data provenance and authenticated human roles). Secret scan before publication: clean (38 changed files; no secret, database, anchor or key tracked; `.env.example` holds empty values only).
+
+
 ## Lot 1 corrections (branch `fix/lot1-securite`, 2026-10-25)
 
 Scope: C-01, C-03, C-05, C-07, C-08 fixed; C-04 shown not to be a defect; Git initialised on top of the remote's `Initial commit`. No order was sent, DEMO execution was not enabled, LIVE stays locked. No connection to any external broker was made.
