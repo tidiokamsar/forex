@@ -247,6 +247,31 @@ class SpotPolicyLoopholeTests(unittest.TestCase):
         self.assertIs(replace(frozen, version="crypto-spot-1b").leverage, 1)
 
 
+class LedgerRecheckTests(unittest.TestCase):
+    """Re-check of the round 2 fixes (8831d88): the daily ledger and the price band."""
+
+    # MV-D-14 (Low; accounting, fail-safe direction): the BUY is booked into the SpotBuyLedger before the
+    # price band is checked, so a BUY refused only for limit_price_outside_band is still recorded. RISK_POLICY.md
+    # says "Every ALLOWED BUY is booked"; the phantom notional consumes daily cap and becomes the ledger's last
+    # BUY (a refused decision mutates state).
+    @unittest.expectedFailure
+    def test_refused_buy_is_not_booked(self):
+        policy = CryptoSpotRiskPolicy()
+        decision = policy.evaluate(buy(limit_price=Decimal("51000.00")), context(balances=balances(base="0")))
+        self.assertIs(decision.verdict, Verdict.REFUSE)
+        self.assertEqual(policy.ledger.records, ())
+
+    def test_shared_ledger_stops_split_buys_at_the_daily_cap(self):
+        policy = CryptoSpotRiskPolicy()
+        flat = context(balances=balances(base="0"))
+        allowed = sum(policy.evaluate(buy(intent_id=f"s{i}", quantity=Decimal("0.04")), flat).allowed for i in range(8))
+        self.assertEqual(allowed, 5)  # 5 x 2% of 100000 USDT = the 10% daily cap
+
+    def test_band_cannot_be_widened(self):
+        with self.assertRaises(ValueError):
+            CryptoSpotRiskPolicy(max_limit_deviation_fraction=Decimal("0.05"))
+
+
 # --- 3. Import isolation and documentation honesty -------------------------------------------------
 
 
