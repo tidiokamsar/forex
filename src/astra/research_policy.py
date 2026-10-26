@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, fields
 
-RESEARCH_POLICY_VERSION = "astra-research-policy-0.2.0-provisional"
+RESEARCH_POLICY_VERSION = "astra-research-policy-0.3.0-provisional"
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,7 +31,7 @@ class HoldoutReusePolicy:
     informative_threshold: float = 0.25  # |standardized return| counted as a real move
     clip: float = 3.0  # robust z-scores are clipped so one aligned outlier cannot create a match
     # Second statistic, independent of correlation: share of aligned informative returns that are equal
-    # within match_tolerance times the new holdout's return scale. When a path of the pair drifts (half
+    # within match_tolerance times the new holdout's return scale. When a path of the pair drifts (drift_share
     # its returns at the median), each path's median is removed first (a shared drift is not a match);
     # a return is informative when it is further than the tolerance from that centre.
     match_tolerance: float = 0.05
@@ -47,6 +47,8 @@ class HoldoutReusePolicy:
     # Returns smaller than this fraction of the largest absolute return do not set the return scale
     # (a nudged zero is not a move).
     scale_floor_fraction: float = 0.01
+    # Share of returns at the median that makes a path a drift (its median is removed before matching).
+    drift_share: float = 0.75
 
     def __post_init__(self) -> None:
         if not 0.0 < self.suspect_abs_correlation <= self.conflict_abs_correlation < 1.0:
@@ -63,8 +65,8 @@ class HoldoutReusePolicy:
             raise ValueError("require 0 < conflict_match_chance_probability <= suspect_match_chance_probability < 1")
         if self.min_informative_points < 2:
             raise ValueError("min_informative_points must be at least 2")
-        if not 0.0 <= self.scale_floor_fraction < 1.0:
-            raise ValueError("invalid scale floor fraction")
+        if not 0.0 <= self.scale_floor_fraction < 1.0 or not 0.5 <= self.drift_share <= 1.0:
+            raise ValueError("invalid scale floor fraction or drift share")
 
     def payload(self) -> dict:
         return {"version": RESEARCH_POLICY_VERSION, **asdict(self)}
@@ -121,6 +123,7 @@ _STRICTER_WHEN = {
     "suspect_match_chance_probability": "higher",
     "min_informative_points": "any",
     "scale_floor_fraction": "any",
+    "drift_share": "any",
 }
 
 

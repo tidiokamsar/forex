@@ -1142,26 +1142,29 @@ class Round4DetectorTests(unittest.TestCase):
             with self.subTest(name):
                 self.assertEqual(set(values), {holdout_reuse.CONFLICT})
 
-    # PHASE4 FAIL Q-1 (Medium; regression vs 0ef781b on short tick-quantized holdouts): at the CLI default
+    # FIXED IN LOT 4 ROUND 5 (was PHASE4 FAIL Q-1): a discrete walk with half its returns at one tick count
+    # was treated as a drift and centred, which hid most of its moves; a path now drifts only with
+    # drift_share = 0.75 of its returns at the median. Original finding: at the CLI default
     # holdout length (20 bars) and at the 16-return floor, copies of a tick-quantized walk (the calibration's
     # own generator) are CLEAR, i.e. sealable and scoreable again: nudged by one tick 6/100 at 20 bars and
     # 21/100 at 16; inverted 2/100 and 5/100. The calibration suite measures copies at 40 returns only. On a
     # binary one-tick walk the 0ef781b detector missed a nudged 20-bar copy in 0 of 30 cases, this one in 5.
-    @unittest.expectedFailure
     def test_short_tick_copies_are_never_clear(self):
         for n in (16, 20):
             for name, values in _short_tick_copies(n).items():
                 with self.subTest(n=n, transform=name):
                     self.assertEqual(values.count(holdout_reuse.CLEAR), 0)
 
-    # PHASE4 FAIL Q-2 (Low): the sign is meant to be ignored (inverted quote), but at 16 returns an exact copy is
-    # never CLEAR while its inversion is CLEAR in 5 of 100 cases: the two transforms are not judged alike.
-    @unittest.expectedFailure
+    # FIXED IN LOT 4 ROUND 5 (was PHASE4 FAIL Q-2, Low): the sign is meant to be ignored (inverted quote), but at
+    # 16 returns an exact copy was never CLEAR while its inversion was CLEAR in 5 of 100 cases. The median of
+    # an even count took the upper middle value, so median(-x) != -median(x); it is now the mean of the two.
     def test_inverted_copy_gets_the_verdict_of_the_exact_copy(self):
         verdicts = _short_tick_copies(16)
         self.assertEqual(verdicts["exact"].count(holdout_reuse.CLEAR), verdicts["inverted"].count(holdout_reuse.CLEAR))
 
-    # PHASE4 FAIL Q-3 (Low; near-constant data only): rescaling the prices of a sub-tick trend by 2 and quoting
+    # PHASE4 FAIL Q-3 (Low; near-constant data only; DOCUMENTED, not fixed in round 5: re-quoting a doubled
+    # price to 1e-5 changes every rounding, so the moves left after removing the drift are independent; only
+    # the sub-tick price level is shared, and level correlations of independent walks are spurious): rescaling the prices of a sub-tick trend by 2 and quoting
     # again to 1e-5 changes the rounding pattern: the copy is CLEAR in 30 of 30 cases even at 120 returns.
     @unittest.expectedFailure
     def test_rescaled_quantized_sub_tick_trend_is_detected(self):

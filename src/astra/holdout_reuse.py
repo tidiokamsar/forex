@@ -12,15 +12,16 @@ phases (M15 resampled to M30, or the reverse), and with the sign ignored
 - window correlation: robust-standardized (median, median absolute deviation
   floored at the match tolerance, clipped) returns over aligned windows at
   every offset, windows of the new holdout starting every ``window // 4``
-  returns. A window needs ``min_informative_share`` real moves to be compared.
-  A window pair counts as correlated only when it is also correlated after
-  both windows are prewhitened by the mean lag-1 autocorrelation of the two
-  paths, so serially correlated independent data (AR(1)) does not create
-  matches. ``CONFLICT`` from ``conflict_abs_correlation``, ``SUSPECT`` from
+  returns, then over the whole overlap of every offset (at least two windows).
+  A window needs ``min_informative_share`` real moves to be compared. A
+  correlation counts only once confirmed (``_exact_correlation``): on windows
+  prewhitened by the mean lag-1 autocorrelation of the two paths, or because the
+  fit residual is not serially correlated (a noisy copy of a persistent path).
+  ``CONFLICT`` from ``conflict_abs_correlation``, ``SUSPECT`` from
   ``suspect_abs_correlation``.
 - match share: returns are compared as they are, or minus each path's median
-  when one path of the pair drifts (half its returns at the median: a shared
-  constant drift is not a match). A return is informative when it is further
+  when one path of the pair drifts (``drift_share`` of its returns at the
+  median: a shared constant drift is not a match). A return is informative when it is further
   than ``match_tolerance`` times the new holdout's return scale from that
   centre. At every offset, the share of aligned informative returns equal
   within that tolerance is measured over dense windows
@@ -33,7 +34,10 @@ phases (M15 resampled to M30, or the reverse), and with the sign ignored
   number of spans of its kind tested: ``CONFLICT`` at most
   ``conflict_match_chance_probability`` (a sparse span then counts runs of
   consecutive moves, not points); a whole-overlap span is ``SUSPECT`` at most
-  ``suspect_match_chance_probability``.
+  ``suspect_match_chance_probability``. A sparse new holdout is also compared on
+  the timing and direction of its moves only (a copy with rescaled or perturbed
+  moves). When even a copy with two changed returns could not be told from
+  chance, the pair fails closed (``UNDETERMINED``, ``match_not_discriminative``).
 - an old holdout with fewer than ``min_informative_points`` informative
   returns is recorded as ``old_holdout_uninformative`` and does not taint
   unrelated plans; if it is entirely constant (a constant drift, the bundled
@@ -49,7 +53,8 @@ tests/test_holdout_reuse_calibration.py and RESEARCH_PROTOCOL.md). Not
 detected: a shared run shorter than about one window; a copy with enough added
 noise (detection falls as the noise approaches the return scale, and an
 arbitrarily noisy copy cannot be told apart from independent data); a noisy
-copy of a sparse path; a copy of an old holdout with one or two moves; a
+copy of a sparse path beyond the direction of its moves; prices rescaled and
+re-quoted to the same tick; a copy of an old holdout with one or two moves; a
 nudged copy of a near-constant path whose old holdout has a few moves;
 resampling factors other than two. Distinct but strongly correlated data (two
 highly correlated currency pairs) is flagged like a copy, two independent
@@ -82,6 +87,7 @@ CONFLICT, SUSPECT, UNDETERMINED, CLEAR = "CONFLICT", "SUSPECT", "UNDETERMINED", 
 _SEVERITY = {CLEAR: 0, UNDETERMINED: 1, SUSPECT: 2, CONFLICT: 3}
 OLD_HOLDOUT_UNINFORMATIVE = "old_holdout_uninformative"
 NEW_HOLDOUT_UNINFORMATIVE = "new_holdout_uninformative"
+MATCH_NOT_DISCRIMINATIVE = "match_not_discriminative"
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,8 +126,13 @@ def worst(verdicts: Sequence[str]) -> str:
 
 
 def _median(values: Sequence[float]) -> float:
+    """Median (mean of the two middle values for an even count), so the median of -x is -median(x)."""
+
     ordered = sorted(values)
-    return ordered[len(ordered) // 2] if ordered else 0.0
+    if not ordered:
+        return 0.0
+    middle = len(ordered) // 2
+    return ordered[middle] if len(ordered) % 2 else (ordered[middle - 1] + ordered[middle]) / 2
 
 
 def _tolerance(values: Sequence[float], policy: HoldoutReusePolicy) -> float:
@@ -149,12 +160,23 @@ class _Profile:
         ordered = sorted((value, index) for index, value in enumerate(self.residuals) if self.informative[index])
         return [value for value, _ in ordered], [index for _, index in ordered]
 
+    def signs(self) -> _Profile:
+        """The same moves reduced to their direction: +1, -1, or 0 for a flat point."""
+
+        residuals = [math.copysign(1.0, value) if live else 0.0 for value, live in zip(self.residuals, self.informative,
+                                                                                         strict=True)]
+        return _Profile(residuals, 0.0, residuals, list(self.informative), self.count)
+
     @staticmethod
-    def drifting(values: Sequence[float], tolerance: float) -> bool:
-        """At least half the returns sit at the median: a near-constant (drift) path."""
+    def drifting(values: Sequence[float], tolerance: float, policy: HoldoutReusePolicy) -> bool:
+        """At least ``drift_share`` of the returns sit at the median: a near-constant (drift) path.
+
+        A discrete walk (moves of 0, 1 or 2 ticks) can have half its returns at one value; it is not a
+        drift, and centring it would hide most of its moves.
+        """
 
         median = _median(values)
-        return 2 * sum(abs(value - median) <= tolerance for value in values) >= len(values)
+        return sum(abs(value - median) <= tolerance for value in values) >= policy.drift_share * len(values)
 
     @classmethod
     def of(cls, values: Sequence[float], tolerance: float, centred: bool) -> _Profile:
@@ -239,6 +261,7 @@ def _window_length(n: int, m: int, policy: HoldoutReusePolicy) -> int:
 _UNIT_SCALE = 1 << 16
 _MIN_PATH_SCALE = 1 << 30
 _QUANTIZATION_MARGIN = 1e-3
+_WHITE_RESIDUAL = 0.5  # |lag-1 autocorrelation| of a fit residual still treated as noise
 _DIGIT = 8  # bytes per packed digit
 
 
@@ -311,32 +334,77 @@ def _packed_unit(unit: list[float]) -> int:
     return int.from_bytes(positive, sys.byteorder) - int.from_bytes(negative, sys.byteorder)
 
 
-def _exact_correlation(new: _CorrelationSide, old: _CorrelationSide, first: int, other: int, window: int) -> float:
-    """min(|raw correlation|, |prewhitened correlation|) of two aligned windows.
+def _lag1_of_residual(x: list[float], y: list[float]) -> float:
+    """Lag-1 autocorrelation of the residual of the least-squares fit of ``y`` on ``x`` (both centred)."""
 
-    Both windows are whitened with the same lag-1 coefficient (the mean of the two paths'), using
-    in-window values only, so two identical windows stay identical whatever the rest of each path.
+    mx, my = sum(x) / len(x), sum(y) / len(y)
+    xc, yc = [value - mx for value in x], [value - my for value in y]
+    energy = math.sumprod(xc, xc)
+    beta = math.sumprod(xc, yc) / energy if energy > 0.0 else 0.0
+    residual = [b - beta * a for a, b in zip(xc, yc, strict=True)]
+    total = math.sumprod(residual, residual)
+    return math.sumprod(residual[1:], residual[:-1]) / total if total > 0.0 else 0.0
+
+
+def _exact_correlation(new: _CorrelationSide, old: _CorrelationSide, first: int, other: int, length: int,
+                       policy: HoldoutReusePolicy, long_span: bool = False) -> float:
+    """|correlation| of two aligned spans if confirmed, else 0; never above the raw correlation.
+
+    Serially correlated independent paths correlate by chance over short spans. A raw correlation is
+    confirmed when the spans are also correlated after prewhitening (both whitened with the mean
+    lag-1 coefficient of the two paths, in-window values only), or when what the fit leaves is not
+    serially correlated (|lag-1| at most _WHITE_RESIDUAL): a noisy copy of a persistent path leaves
+    the added noise, two independent persistent paths leave a persistent difference. Prewhitening
+    alone would miss the noisy copy (the noise swamps its innovations). The residual test is used
+    over a ``long_span`` (the whole overlap of an offset, at least two windows) and, over a single
+    window, only for a raw correlation at ``conflict_abs_correlation`` or above: in one window the
+    lag-1 estimate is too noisy, and independent AR(1) 0.7 windows pass it near 0.95 by chance.
     """
 
-    x, y = new.standard[first:first + window], old.standard[other:other + window]
-    u, v = _unit(x, window), _unit(y, window)
+    x, y = new.standard[first:first + length], old.standard[other:other + length]
+    u, v = _unit(x, length), _unit(y, length)
     if u is None or v is None:
         return 0.0
-    value = abs(math.sumprod(u, v))
+    raw = abs(math.sumprod(u, v))
+    if (long_span or raw >= policy.conflict_abs_correlation) and abs(_lag1_of_residual(x, y)) <= _WHITE_RESIDUAL:
+        return raw
     phi = (new.phi + old.phi) / 2
-    u, v = _unit(_whitened(x, phi), window - 1), _unit(_whitened(y, phi), window - 1)
-    if u is None or v is None:
-        return 0.0
-    return min(value, abs(math.sumprod(u, v)))
+    u, v = _unit(_whitened(x, phi), length - 1), _unit(_whitened(y, phi), length - 1)
+    return 0.0 if u is None or v is None else min(raw, abs(math.sumprod(u, v)))
+
+
+def _max_overlap_correlation(new: _CorrelationSide, old: _CorrelationSide, window: int,
+                             policy: HoldoutReusePolicy, best: float) -> float:
+    """Largest confirmed |correlation| over the whole overlap of each offset (at least two windows).
+
+    Window correlations of a persistent path are noisy (little variance within one window); a
+    noisy copy of it still correlates over its whole length.
+    """
+
+    x, y = new.standard, old.standard
+    n, m = len(x), len(y)
+    for offset in range(2 * window - n, m - 2 * window + 1):
+        low, high = max(0, -offset), min(n, m - offset)
+        length = high - low
+        sx, sy = new.sums[high] - new.sums[low], old.sums[high + offset] - old.sums[low + offset]
+        vx = new.squares[high] - new.squares[low] - sx * sx / length
+        vy = old.squares[high + offset] - old.squares[low + offset] - sy * sy / length
+        if vx <= 1e-12 or vy <= 1e-12:
+            continue
+        value = abs(math.sumprod(x[low:high], y[low + offset:high + offset]) - sx * sy / length) / math.sqrt(vx * vy)
+        if value >= policy.suspect_abs_correlation and value > best:
+            best = max(best, _exact_correlation(new, old, low, low + offset, length, policy, long_span=True))
+            if best >= policy.conflict_abs_correlation:
+                return best
+    return best
 
 
 def _max_window_correlation(new: _CorrelationSide, old: _CorrelationSide, policy: HoldoutReusePolicy):
     """Largest aligned-window |correlation|, and whether each side had a window that could be compared.
 
     Windows of the new path start every ``window // 4`` returns and are compared with every window
-    of the old path (every offset). A pair at or above ``suspect_abs_correlation`` is confirmed on
-    the prewhitened paths (serial correlation alone must not create a match) and the smaller of the
-    two correlations is kept.
+    of the old path (every offset), then the whole overlap of every offset is compared too. A pair
+    at or above ``suspect_abs_correlation`` counts only once confirmed (``_exact_correlation``).
     """
 
     x, y = new.standard, old.standard
@@ -376,12 +444,12 @@ def _max_window_correlation(new: _CorrelationSide, old: _CorrelationSide, policy
             if value <= best:
                 continue
             if value >= suspect - margin:
-                value = _exact_correlation(new, old, first, starts[index], window)
+                value = _exact_correlation(new, old, first, starts[index], window, policy)
             if value > best:
                 best = value
                 if best >= conflict:
                     return best, True, True
-    return best, True, True
+    return _max_overlap_correlation(new, old, window, policy, best), True, True
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -411,6 +479,7 @@ class _Match:
     share: float | None = None  # share of the most significant span that reached conflict_match_share
     chance: float | None = None  # its chance probability, times the number of spans of its kind tested
     verdict: str = CLEAR
+    weak: bool = False  # a copy with two changed returns would still look like chance (see _match_share)
 
 
 def _match_share(a: _Profile, b: _Profile, sign: int, tolerance: float, policy: HoldoutReusePolicy) -> _Match:
@@ -448,6 +517,14 @@ def _match_share(a: _Profile, b: _Profile, sign: int, tolerance: float, policy: 
     chance_rate = len(codes) / live_pairs  # match rate of a live aligned pair over every alignment
     overlaps = [min(n, m - offset) - max(0, -offset) for offset in range(window - n, m - window + 1)]
     tested = {True: len(overlaps), False: sum(overlap - window + 1 for overlap in overlaps)}  # whole, windows
+    if a.count >= policy.min_informative_share * n or (abs(a.center) > tolerance and n < 2 * policy.window):
+        # A nudged close changes two returns. If even a copy with two changed returns would not reach
+        # suspect_match_chance_probability, the match share cannot tell a copy from chance here (short
+        # discrete paths that mostly repeat one move; drifts shorter than two windows with a few
+        # deviations): the pair fails closed instead of passing. Flat-centred sparse paths are exempt
+        # (a nudge adds moves to them, and their independent pairs must stay comparable).
+        nudged = _binomial_tail(max(0, a.count - 2), a.count, chance_rate) * tested[True]
+        result.weak = nudged > policy.suspect_match_chance_probability
     codes.sort()
     per_offset = Counter(map(floordiv, codes, repeat(stride)))
     needed = policy.min_informative_share * window
@@ -538,9 +615,9 @@ def assess_reuse(
     new, old = [float(value) for value in new], [float(value) for value in old]
     new_tolerance = _tolerance(new, policy)
     comparable = new_tolerance > 0.0 and _Profile.of(
-        new, new_tolerance, _Profile.drifting(new, new_tolerance)).count >= policy.min_informative_points
+        new, new_tolerance, _Profile.drifting(new, new_tolerance, policy)).count >= policy.min_informative_points
     notes: set[str] = set()
-    best, best_transform, best_share, match_suspect = None, None, None, None
+    best, best_transform, best_share, match_suspect, weak = None, None, None, None, False
     sides: dict[int, tuple[list[float], _CorrelationSide]] = {}  # keeps each list alive, so ids stay unique
 
     def side(values: list[float]) -> _CorrelationSide:
@@ -552,7 +629,7 @@ def assess_reuse(
         tolerance = _tolerance(a, policy)
         if tolerance <= 0.0:
             continue
-        centred = _Profile.drifting(a, tolerance) or _Profile.drifting(b, tolerance)
+        centred = _Profile.drifting(a, tolerance, policy) or _Profile.drifting(b, tolerance, policy)
         profile_a = _Profile.of(a, tolerance, centred)
         profile_b = _Profile.of(b, tolerance, centred)
         window = _window_length(len(a), len(b), policy)
@@ -569,14 +646,20 @@ def assess_reuse(
                 continue
             if profile_a.count < policy.min_informative_points:
                 continue
-            match = _match_share(profile_a, profile_b, factor, tolerance, policy)
-            if match.share is not None and (best_share is None or match.share > best_share):
-                best_share = match.share
-            if match.verdict != CLEAR:
-                label = f"{sign}{transform}:match_share={round(match.share, 4)},chance={match.chance:.3g}"
-                if match.verdict == CONFLICT:
-                    return ReuseAssessment(CONFLICT, None, label, True, tuple(sorted(notes)), round(match.share, 6))
-                match_suspect = match_suspect or label
+            matches = [("", _match_share(profile_a, profile_b, factor, tolerance, policy))]
+            if profile_a.count < policy.min_informative_share * len(a):
+                # A sparse path is also compared on the timing and direction of its moves only, so a
+                # copy with every move rescaled or perturbed is still matched (correlation cannot be).
+                matches.append(("signs:", _match_share(profile_a.signs(), profile_b.signs(), factor, 0.5, policy)))
+            weak = weak or (matches[0][1].weak and transform in ("same", "reversed"))  # at the holdout's own length
+            for kind, match in matches:
+                if match.share is not None and (best_share is None or match.share > best_share):
+                    best_share = match.share
+                if match.verdict != CLEAR:
+                    label = f"{kind}{sign}{transform}:match_share={round(match.share, 4)},chance={match.chance:.3g}"
+                    if match.verdict == CONFLICT:
+                        return ReuseAssessment(CONFLICT, None, label, True, tuple(sorted(notes)), round(match.share, 6))
+                    match_suspect = match_suspect or label
         value, new_windows, old_windows = _max_window_correlation(side(a), side(b), policy)
         if new_windows and not old_windows:
             notes.add(OLD_HOLDOUT_UNINFORMATIVE)
@@ -594,6 +677,9 @@ def assess_reuse(
         verdict, best_transform = SUSPECT, match_suspect
     elif not comparable:
         verdict = UNDETERMINED
+    elif weak:
+        verdict = UNDETERMINED
+        notes.add(MATCH_NOT_DISCRIMINATIVE)
     else:
         verdict = CLEAR
     return ReuseAssessment(verdict, None if best is None else round(best, 6), best_transform, comparable,
