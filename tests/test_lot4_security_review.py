@@ -521,9 +521,9 @@ class DetectorFalsePositiveAndCostTests(_StoreCase):
     def test_sealing_a_long_holdout_against_a_long_sealed_one_is_fast(self):
         rng = random.Random(1)
         self.seal([round(rng.gauss(0.0, 1e-4), 12) for _ in range(500)], "AAA", 2030, "a" * 64)
-        started = time.perf_counter()
+        started = time.process_time()  # CPU time: wall clock fails on a loaded machine (phase 5b)
         self.seal([round(rng.gauss(0.0, 1e-4), 12) for _ in range(500)], "BBB", 2031, "b" * 64)
-        self.assertLess(time.perf_counter() - started, 1.0)
+        self.assertLess(time.process_time() - started, 1.0)
 
     def test_regression_independent_gaussian_holdouts_are_not_refused(self):
         rng = random.Random(5)
