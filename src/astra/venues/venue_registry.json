@@ -1,14 +1,14 @@
 {
   "schema": "astra.venue_registry",
   "schema_version": 1,
-  "registry_version": "0.1.0",
+  "registry_version": "0.2.0",
   "updated_on": "2026-10-26",
-  "content_sha256": "5c59f2b342298959ef0319a94d9c85b7803bddfcbf2545db0730b5e47507242a",
+  "content_sha256": "4bdefaeac0e5eb5c6c81852dca4bb81f9d85f5501f8010e7aa63635b6a7eecad",
   "venues": [
     {
       "venue_id": "ctrader",
       "display_name": "cTrader Open API (Spotware)",
-      "legal_entity": null,
+      "legal_entity": "Spotware Systems Ltd (technology vendor, not a broker)",
       "jurisdiction": null,
       "market_types": [
         "FOREX_CFD"
@@ -24,8 +24,8 @@
         "LIVE"
       ],
       "permissions_required": [
-        "Open API application registered with Spotware",
-        "OAuth access token for a demo cTID trader account"
+        "Open API application registered and approved by Spotware",
+        "OAuth 2.0 authorisation-code grant for a cTID; scope 'accounts' (view only) for read-only use, 'trading' only after a reviewed change"
       ],
       "features": [
         "account read (trader, assets, reconcile, unrealized P&L)",
@@ -37,13 +37,18 @@
       "size_rules": [
         "ProtoOASymbol volumes are in 0.01 units (minVolume, stepVolume, maxVolume); values differ per broker"
       ],
-      "costs_known": [],
+      "costs_known": [
+        "Open API offered free by Spotware, which reserves the right to change pricing (terms of use, read 2026-10-26)",
+        "Trading costs depend on the cTrader broker; see the broker records"
+      ],
       "limitations": [
         "Adapter tested offline only; not READ_ONLY_CONNECTED.",
         "Demo host only; isLive=true accounts are refused by the adapter.",
         "No documented lookup by clientOrderId: unresolved orders require human review.",
         "Contract specs, commissions and swaps depend on the cTrader broker and are not recorded here.",
-        "Placeholder record: research agents add evidence; the integrator merges it."
+        "Spotware is a platform vendor that holds no client accounts; region eligibility is a property of the cTrader broker.",
+        "Rate limits: 50 requests/s per connection (non-historical), 5 requests/s for historical data; heartbeat at least every 10 s.",
+        "Live host not re-read in the 2026-10-26 research pass."
       ],
       "eligibility_conditions": [],
       "evidence": [
@@ -58,9 +63,34 @@
           "accessed_on": "2026-10-25"
         },
         {
-          "claim": "Account access uses an OAuth flow for a cTID account. Carried from the BROKERS.md documentation check of 2026-10-25; not re-verified for this registry.",
+          "claim": "The Open API is accessible to anyone with a cTID and supported by trading accounts of cTrader-affiliated brokers; Protobuf over TCP or JSON over WebSocket (research_forex.md 1.1).",
+          "source_url": "https://help.ctrader.com/open-api/",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "OAuth 2.0 authorisation code flow; scopes 'accounts' (view only) and 'trading'; access token about 30 days, refresh token without expiry (research_forex.md 1.1).",
           "source_url": "https://help.ctrader.com/open-api/account-authentication/",
-          "accessed_on": "2026-10-25"
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "An Open API application must be registered and approved by Spotware (research_forex.md 1.1).",
+          "source_url": "https://help.ctrader.com/open-api/api-application/",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "Rate limits 50 requests/s per connection, 5 requests/s for historical data; heartbeat every 10 s (research_forex.md 1.1).",
+          "source_url": "https://help.ctrader.com/open-api/faq/",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "Open API offered for free; no trading on behalf of a trader without explicit prior approval (research_forex.md 1.1).",
+          "source_url": "https://help.ctrader.com/open-api/terms-of-use/",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "Official Python SDK ctrader-open-api (Twisted based) is documented (research_forex.md 1.1).",
+          "source_url": "https://help.ctrader.com/open-api/python-SDK/python-sdk-index/",
+          "accessed_on": "2026-10-26"
         }
       ],
       "statuses": [
@@ -70,14 +100,14 @@
           "note": "Selected as first connector on 2026-10-25 (BROKERS.md)."
         },
         {
-          "status": "UNVERIFIED",
+          "status": "OFFICIAL_API_VERIFIED",
           "since": "2026-10-26",
-          "note": "Official API documentation not yet verified by a research pass for this registry."
+          "note": "Official Open API documentation (auth, scopes, rate limits, terms) read in the research pass of 2026-10-26 (docs/venues/research_forex.md section 1.1)."
         },
         {
           "status": "ELIGIBILITY_UNKNOWN",
           "since": "2026-10-26",
-          "note": "Country and account eligibility for the user is unknown."
+          "note": "Eligibility depends on the cTrader broker; no checked cTrader broker positively lists Guinea (research_forex.md sections 1.2 to 1.5)."
         }
       ],
       "tests_passed": [
@@ -85,35 +115,59 @@
         "offline resilience fixture: tests/test_ctrader_resilience.py"
       ],
       "validations_missing": [
-        "OFFICIAL_API_VERIFIED: re-verify the 2026-10-25 documentation check in a research pass",
-        "REGION_ELIGIBILITY_VERIFIED: which cTrader brokers serve the user's country, and the user's eligibility",
+        "REGION_ELIGIBILITY_VERIFIED: written confirmation from a cTrader broker that residents of the Republic of Guinea are accepted, by which entity, with Open API access",
         "READ_ONLY_CONNECTED: ctrader-check has not been run against the real demo service",
+        "re-read the live host and proxies-endpoints page (not re-read on 2026-10-26)",
         "comparison of the JSON client with the official Protobuf SDK",
         "provider-sourced contract specs, commissions and swaps per broker"
       ]
     },
     {
-      "venue_id": "binance_spot",
-      "display_name": "Binance Spot",
-      "legal_entity": null,
-      "jurisdiction": null,
+      "venue_id": "iq_option",
+      "display_name": "IQ Option",
+      "legal_entity": "SKY LADDER LLC (non-EEA entity; registration no. ILLC 004)",
+      "jurisdiction": "Antigua and Barbuda",
       "market_types": [
-        "CRYPTO_SPOT"
+        "FIXED_EXPIRY_OPTIONS",
+        "FOREX_CFD"
       ],
       "instruments": [],
       "api_name": null,
       "api_version": null,
       "api_url": null,
-      "environments": [],
+      "environments": [
+        "DEMO"
+      ],
       "permissions_required": [],
-      "features": [],
+      "features": [
+        "Digital, Turbo and Blitz option contracts; CFDs on stocks, FX, commodities, ETFs, indices and crypto (T&C)"
+      ],
       "size_rules": [],
       "costs_known": [],
       "limitations": [
-        "Placeholder record: research agents add evidence; the integrator merges it."
+        "No official public trading API; only unofficial or reverse-engineered APIs exist, which ASTRA policy forbids.",
+        "IQ Option's regulation page and T&C name no financial regulator or licence for SKY LADDER LLC.",
+        "The CySEC-licensed IQBroker Europe Ltd (CIF 247/14) serves EEA residents only and does not apply to Guinea.",
+        "Fixed-expiry options are disabled in ASTRA (astra.markets.fixed_expiry_options.ENABLED = False)."
       ],
       "eligibility_conditions": [],
-      "evidence": [],
+      "evidence": [
+        {
+          "claim": "Non-EEA entity is SKY LADDER LLC, Antigua and Barbuda, ILLC 004; no financial regulator or licence named (research_crypto_other.md 3.1).",
+          "source_url": "https://iqoption.com/en/regulation",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "General T&C restricted list does not name Guinea but includes a catch-all for other non-serviced countries; external bots used at own risk (research_crypto_other.md 3.2, 3.3).",
+          "source_url": "https://static.cdnroute.io/files//storage/public/db/8c/qd2if3ts707ksqfg.pdf",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "IQBroker Europe Ltd holds CySEC CIF licence 247/14 and may serve EEA residents only (research_crypto_other.md 3.1).",
+          "source_url": "https://www.cysec.gov.cy/en-GB/entities/investment-firms/cypriot/40647/",
+          "accessed_on": "2026-10-26"
+        }
+      ],
       "statuses": [
         {
           "status": "DISCOVERED",
@@ -123,44 +177,202 @@
         {
           "status": "UNVERIFIED",
           "since": "2026-10-26",
-          "note": "Official API documentation not yet verified by a research pass for this registry."
+          "note": "No official public trading API exists to verify (research_crypto_other.md section 3.3)."
         },
         {
           "status": "ELIGIBILITY_UNKNOWN",
           "since": "2026-10-26",
-          "note": "Country and account eligibility for the user is unknown."
+          "note": "Guinea not named in the T&C restricted list, but the list ends with a catch-all; no positive listing."
+        },
+        {
+          "status": "BLOCKED",
+          "since": "2026-10-26",
+          "note": "Blocked: no official API (decisive), no verified licence for the non-EEA entity, binary or digital options products."
         }
       ],
       "tests_passed": [],
       "validations_missing": [
-        "OFFICIAL_API_VERIFIED: official API documentation, URL and access date",
-        "REGION_ELIGIBILITY_VERIFIED: legal entity, jurisdiction and user eligibility",
+        "OFFICIAL_API_VERIFIED: not applicable while no official API exists",
+        "check the Antigua FSRC register for SKY LADDER LLC (the RA000008 claim comes only from affiliate sites); not decisive"
+      ]
+    },
+    {
+      "venue_id": "binance_spot",
+      "display_name": "Binance Spot",
+      "legal_entity": "ADGM Binance Entities: Nest Exchange Limited, Nest Clearing and Custody Limited, Nest Trading Limited (contracting entity for a Guinea resident UNVERIFIED)",
+      "jurisdiction": "United Arab Emirates (Abu Dhabi Global Market)",
+      "market_types": [
+        "CRYPTO_SPOT"
+      ],
+      "instruments": [],
+      "api_name": "Binance Spot API (REST, WebSocket API, market streams, FIX)",
+      "api_version": null,
+      "api_url": "https://developers.binance.com/docs/binance-spot-api-docs/rest-api/general-api-information",
+      "environments": [
+        "PUBLIC_DATA",
+        "TESTNET",
+        "DEMO",
+        "LIVE"
+      ],
+      "permissions_required": [
+        "public market data (security type NONE): no API key, data-api.binance.vision",
+        "account read (USER_DATA): API key with 'Enable Reading' only, Ed25519 recommended, IP-restricted; withdrawals never enabled (ASTRA design)",
+        "API key creation requires 2FA, a Spot Wallet deposit and completed identity verification"
+      ],
+      "features": [
+        "public endpoints: GET /api/v3/exchangeInfo, /api/v3/klines, /api/v3/ticker/bookTicker, /api/v3/time, /api/v3/ping",
+        "signed account read: GET /api/v3/account (IP weight 20), GET /api/v3/account/commission"
+      ],
+      "size_rules": [
+        "Symbol filters and live rate limits must be read at runtime from GET /api/v3/exchangeInfo"
+      ],
+      "costs_known": [
+        "Spot Regular user maker 0.100% / taker 0.100% (0.075% with BNB discount), read 2026-10-26",
+        "Account-specific rate from GET /api/v3/account/commission"
+      ],
+      "limitations": [
+        "Connectivity from the research machine failed on 2026-10-26 (timeouts on api.binance.com and data-api.binance.vision); cause UNVERIFIED.",
+        "REQUEST_WEIGHT 6,000/min per IP documented; ORDERS values inconsistent in the support FAQ; RAW_REQUESTS value UNVERIFIED.",
+        "HTTP 5XX means execution status UNKNOWN; 429 then 418 IP ban from 2 minutes to 3 days.",
+        "HMAC keys are marked deprecated; Ed25519 recommended.",
+        "Spot Testnet: GitHub login, separate keys, /api only, monthly reset, prices independent of live.",
+        "Market-data redistribution terms under the 2026 ADGM Terms UNVERIFIED: treat Binance data as internal use only.",
+        "No Binance adapter has connected to the real service; code existing does not mean integrated."
+      ],
+      "eligibility_conditions": [],
+      "evidence": [
+        {
+          "claim": "Spot REST base endpoints api.binance.com, api-gcp.binance.com, api1-4.binance.com; public market data on data-api.binance.vision; rate limiter types and 429/418 behaviour (research_crypto_other.md 1.5, 1.6).",
+          "source_url": "https://developers.binance.com/docs/binance-spot-api-docs/rest-api/general-api-information",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "data-api.binance.vision needs no API key and serves only public market-data endpoints (research_crypto_other.md 0, 1.5).",
+          "source_url": "https://developers.binance.com/docs/binance-spot-api-docs/faqs/market_data_only",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "GET /api/v3/account is USER_DATA with IP weight 20 and needs X-MBX-APIKEY plus a signature (research_crypto_other.md 1.5).",
+          "source_url": "https://developers.binance.com/docs/binance-spot-api-docs/rest-api/account-endpoints",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "Key types Ed25519 (recommended), RSA, HMAC (deprecated) (research_crypto_other.md 1.5).",
+          "source_url": "https://developers.binance.com/en/docs/products/spot/faqs/api_key_types",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "API key permissions, IP allow-list rules, and the 2FA, deposit and identity-verification prerequisites (research_crypto_other.md 1.3, 1.5).",
+          "source_url": "https://www.binance.com/en/support/faq/detail/360002502072",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "Spot Testnet endpoints and rules: GitHub sign-in, separate keys, virtual funds, monthly reset (research_crypto_other.md 1.7).",
+          "source_url": "https://testnet.binance.vision/",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "List of Prohibited Countries (updated 16 July 2025) does not list Guinea; absence is not proof of eligibility (research_crypto_other.md 1.2).",
+          "source_url": "https://www.binance.com/en/legal/list-of-prohibited-countries",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "iOS app Support Region List (updated 18 August 2026) does not show the Republic of Guinea; app availability only, a flag for human review (research_crypto_other.md 1.2).",
+          "source_url": "https://www.binance.com/en-GB/support-region-list",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "Spot Regular user fees 0.100% maker and taker (research_crypto_other.md 1.8).",
+          "source_url": "https://www.binance.com/en/fee/trading",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "API Key Terms: personal, limited, revocable licence; market abuse prohibited (research_crypto_other.md 1.9).",
+          "source_url": "https://www.binance.com/en-GB/legal/terms-binance-api",
+          "accessed_on": "2026-10-26"
+        }
+      ],
+      "statuses": [
+        {
+          "status": "DISCOVERED",
+          "since": "2026-10-26",
+          "note": "Named in the multi-venue brief of 2026-10-26."
+        },
+        {
+          "status": "OFFICIAL_API_VERIFIED",
+          "since": "2026-10-26",
+          "note": "Official Spot API documentation read in the research pass of 2026-10-26 (docs/venues/research_crypto_other.md section 1)."
+        },
+        {
+          "status": "ELIGIBILITY_UNKNOWN",
+          "since": "2026-10-26",
+          "note": "Guinea absent from the prohibited list but not positively confirmed; contracting entity, Guinean law and connectivity unresolved."
+        }
+      ],
+      "tests_passed": [],
+      "validations_missing": [
+        "REGION_ELIGIBILITY_VERIFIED: confirm through Binance support or onboarding which entity contracts with a Guinea resident and that Guinea is selectable at KYC",
+        "check Nest Exchange Ltd, Nest Clearing and Custody Ltd and Nest Trading Ltd on the FSRA ADGM register",
+        "Guinean law on crypto-asset trading and BCRG foreign-exchange controls",
+        "repeat GET /api/v3/ping and /api/v3/time from the production host and network",
+        "read RAW_REQUESTS and ORDERS values live from exchangeInfo",
+        "market-data redistribution terms under the 2026 ADGM Terms",
         "READ_ONLY_CONNECTED: supervised read-only connection check"
       ]
     },
     {
       "venue_id": "binance_futures",
-      "display_name": "Binance Futures",
-      "legal_entity": null,
-      "jurisdiction": null,
+      "display_name": "Binance Futures (USD-M and COIN-M)",
+      "legal_entity": "ADGM Binance Entities (Nest Exchange Limited operates the derivatives RIE per Binance's own disclosure)",
+      "jurisdiction": "United Arab Emirates (Abu Dhabi Global Market)",
       "market_types": [
         "CRYPTO_FUTURES"
       ],
       "instruments": [],
-      "api_name": null,
+      "api_name": "Binance USD-M and COIN-M Futures API",
       "api_version": null,
-      "api_url": null,
-      "environments": [],
-      "permissions_required": [],
+      "api_url": "https://developers.binance.com/docs/derivatives/usds-margined-futures/general-info",
+      "environments": [
+        "TESTNET",
+        "DEMO",
+        "LIVE"
+      ],
+      "permissions_required": [
+        "separate 'Futures' API key permission; cannot be enabled on a key created before the Futures account"
+      ],
       "features": [],
       "size_rules": [],
-      "costs_known": [],
+      "costs_known": [
+        "USD-M Regular user USDT maker 0.0200% / taker 0.0500% (0.0180% / 0.0450% with BNB), read 2026-10-26; COIN-M fees not captured"
+      ],
       "limitations": [
         "BLOCKED pending derivatives risk review.",
-        "Placeholder record: research agents add evidence; the integrator merges it."
+        "Numeric futures rate-limit values not captured; read from /fapi/v1/exchangeInfo.",
+        "No official per-country futures restriction list found."
       ],
       "eligibility_conditions": [],
-      "evidence": [],
+      "evidence": [
+        {
+          "claim": "USD-M base fapi.binance.com, testnet demo-fapi.binance.com and demo-fstream; rate limits from /fapi/v1/exchangeInfo (research_crypto_other.md 2.2).",
+          "source_url": "https://developers.binance.com/docs/derivatives/usds-margined-futures/general-info",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "COIN-M base dapi.binance.com; listed testnet testnet.binancefuture.com (research_crypto_other.md 2.2).",
+          "source_url": "https://developers.binance.com/docs/derivatives/coin-margined-futures/market-data/rest-api/Long-Short-Ratio",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "Futures withdrawn in Germany, Italy and the Netherlands in 2021 (official announcement); no Guinea mention (research_crypto_other.md 2.1).",
+          "source_url": "https://www.binance.com/en/support/announcement/detail/f72d0fff2bd24b488213fa30284dd4cd",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "USD-M Regular user fees 0.0200% maker / 0.0500% taker (research_crypto_other.md 2.3).",
+          "source_url": "https://www.binance.com/en/fee/futureFee",
+          "accessed_on": "2026-10-26"
+        }
+      ],
       "statuses": [
         {
           "status": "DISCOVERED",
@@ -170,12 +382,12 @@
         {
           "status": "UNVERIFIED",
           "since": "2026-10-26",
-          "note": "Official API documentation not yet verified by a research pass for this registry."
+          "note": "Futures API documentation was read on 2026-10-26 but the dossier did not propose it as verified (rate-limit values not captured)."
         },
         {
           "status": "ELIGIBILITY_UNKNOWN",
           "since": "2026-10-26",
-          "note": "Country and account eligibility for the user is unknown."
+          "note": "No official per-country futures list; only onboarding or written Binance confirmation can settle Guinea eligibility."
         },
         {
           "status": "BLOCKED",
@@ -185,32 +397,43 @@
       ],
       "tests_passed": [],
       "validations_missing": [
-        "OFFICIAL_API_VERIFIED: official API documentation, URL and access date",
-        "REGION_ELIGIBILITY_VERIFIED: legal entity, jurisdiction and user eligibility",
+        "derivatives risk review (leverage, funding, liquidation) before any unblocking",
+        "OFFICIAL_API_VERIFIED: capture numeric rate limits and confirm the COIN-M testnet from the official docs",
+        "REGION_ELIGIBILITY_VERIFIED: whether a Guinea resident can open a Futures account (country gate and appropriateness test)",
+        "Guinean law on crypto derivatives on a foreign platform",
         "READ_ONLY_CONNECTED: supervised read-only connection check"
       ]
     },
     {
       "venue_id": "mt5",
       "display_name": "MetaTrader 5 (MetaQuotes) via a broker's MT5 server",
-      "legal_entity": null,
+      "legal_entity": "MetaQuotes Ltd (package maintainer, not a broker)",
       "jurisdiction": null,
       "market_types": [
         "FOREX_CFD"
       ],
       "instruments": [],
-      "api_name": "MetaTrader 5 Python package",
-      "api_version": null,
-      "api_url": null,
+      "api_name": "MetaTrader5 Python package",
+      "api_version": "5.0.5735 (latest on PyPI, released 2026-04-04)",
+      "api_url": "https://www.mql5.com/en/docs/python_metatrader5",
       "environments": [],
-      "permissions_required": [],
-      "features": [],
+      "permissions_required": [
+        "broker MT5 account login and password held by the local terminal; no OAuth or scopes, a trading password grants full trading rights"
+      ],
+      "features": [
+        "initialize, account_info, terminal_info, symbols_*, symbol_info_tick, copy_rates_*, copy_ticks_*, positions_*, orders_*, history_*, order_check, order_send"
+      ],
       "size_rules": [],
-      "costs_known": [],
+      "costs_known": [
+        "Package free (MIT licence); trading costs depend on the broker"
+      ],
       "limitations": [
-        "Requires a Windows MetaTrader 5 terminal process.",
+        "Requires a Windows MetaTrader 5 terminal process (wheels for win_amd64 only).",
         "Demo detection field not confirmed from official documentation (BROKERS.md).",
-        "Placeholder record: research agents add evidence; the integrator merges it."
+        "Demo and live environments depend on the broker's MT5 servers.",
+        "No rate limits documented in the Python reference; broker-side limits UNVERIFIED.",
+        "Investor (read-only) password availability is per broker and UNVERIFIED.",
+        "ASTRA must not store a password in code as the official example does."
       ],
       "eligibility_conditions": [],
       "evidence": [
@@ -218,6 +441,21 @@
           "claim": "The MetaTrader 5 Python package exposes terminal functions to Python. Carried from the BROKERS.md documentation check of 2026-10-25; not re-verified for this registry.",
           "source_url": "https://www.mql5.com/en/book/advanced/python/python_funcs_overview",
           "accessed_on": "2026-10-25"
+        },
+        {
+          "claim": "Interprocess communication with a local MT5 terminal; function list (research_forex.md 2.1).",
+          "source_url": "https://www.mql5.com/en/docs/python_metatrader5",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "initialize() finds or launches terminal64.exe and can log in with login, password, server (research_forex.md 2.1).",
+          "source_url": "https://www.mql5.com/en/docs/python_metatrader5/mt5initialize_py",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "PyPI MetaTrader5 5.0.5735 released 2026-04-04, MIT, win_amd64 wheels only (research_forex.md 2.1).",
+          "source_url": "https://pypi.org/project/MetaTrader5/",
+          "accessed_on": "2026-10-26"
         }
       ],
       "statuses": [
@@ -227,149 +465,102 @@
           "note": "Listed in the BROKERS.md evaluation matrix of 2026-10-25."
         },
         {
-          "status": "UNVERIFIED",
+          "status": "OFFICIAL_API_VERIFIED",
           "since": "2026-10-26",
-          "note": "Official API documentation not yet verified by a research pass for this registry."
+          "note": "Official MetaTrader5 Python package documentation read in the research pass of 2026-10-26 (docs/venues/research_forex.md section 2.1)."
         },
         {
           "status": "ELIGIBILITY_UNKNOWN",
           "since": "2026-10-26",
-          "note": "Country and account eligibility for the user is unknown."
+          "note": "Eligibility depends on the MT5 broker; no checked MT5 broker positively lists Guinea."
         }
       ],
       "tests_passed": [],
       "validations_missing": [
-        "OFFICIAL_API_VERIFIED: official API documentation, URL and access date",
-        "REGION_ELIGIBILITY_VERIFIED: legal entity, jurisdiction and user eligibility",
-        "READ_ONLY_CONNECTED: supervised read-only connection check"
-      ]
-    },
-    {
-      "venue_id": "iq_option",
-      "display_name": "IQ Option",
-      "legal_entity": null,
-      "jurisdiction": null,
-      "market_types": [
-        "FIXED_EXPIRY_OPTIONS"
-      ],
-      "instruments": [],
-      "api_name": null,
-      "api_version": null,
-      "api_url": null,
-      "environments": [],
-      "permissions_required": [],
-      "features": [],
-      "size_rules": [],
-      "costs_known": [],
-      "limitations": [
-        "Market types other than fixed-expiry options not assessed.",
-        "Fixed-expiry options are disabled in ASTRA (astra.markets.fixed_expiry_options.ENABLED = False).",
-        "Placeholder record: research agents add evidence; the integrator merges it."
-      ],
-      "eligibility_conditions": [],
-      "evidence": [],
-      "statuses": [
-        {
-          "status": "DISCOVERED",
-          "since": "2026-10-26",
-          "note": "Named in the multi-venue brief of 2026-10-26."
-        },
-        {
-          "status": "UNVERIFIED",
-          "since": "2026-10-26",
-          "note": "Official API documentation not yet verified by a research pass for this registry."
-        },
-        {
-          "status": "ELIGIBILITY_UNKNOWN",
-          "since": "2026-10-26",
-          "note": "Country and account eligibility for the user is unknown."
-        }
-      ],
-      "tests_passed": [],
-      "validations_missing": [
-        "OFFICIAL_API_VERIFIED: official API documentation, URL and access date",
-        "REGION_ELIGIBILITY_VERIFIED: legal entity, jurisdiction and user eligibility",
-        "READ_ONLY_CONNECTED: supervised read-only connection check"
-      ]
-    },
-    {
-      "venue_id": "goforex",
-      "display_name": "GoForex",
-      "legal_entity": null,
-      "jurisdiction": null,
-      "market_types": [
-        "FOREX_CFD"
-      ],
-      "instruments": [],
-      "api_name": null,
-      "api_version": null,
-      "api_url": null,
-      "environments": [],
-      "permissions_required": [],
-      "features": [],
-      "size_rules": [],
-      "costs_known": [],
-      "limitations": [
-        "Identity, legal entity and market type assumed from the name only; nothing verified.",
-        "Placeholder record: research agents add evidence; the integrator merges it."
-      ],
-      "eligibility_conditions": [],
-      "evidence": [],
-      "statuses": [
-        {
-          "status": "DISCOVERED",
-          "since": "2026-10-26",
-          "note": "Named in the multi-venue brief of 2026-10-26."
-        },
-        {
-          "status": "UNVERIFIED",
-          "since": "2026-10-26",
-          "note": "Official API documentation not yet verified by a research pass for this registry."
-        },
-        {
-          "status": "ELIGIBILITY_UNKNOWN",
-          "since": "2026-10-26",
-          "note": "Country and account eligibility for the user is unknown."
-        }
-      ],
-      "tests_passed": [],
-      "validations_missing": [
-        "OFFICIAL_API_VERIFIED: official API documentation, URL and access date",
-        "REGION_ELIGIBILITY_VERIFIED: legal entity, jurisdiction and user eligibility",
+        "REGION_ELIGIBILITY_VERIFIED: an MT5 broker confirming in writing that Guinea residents are accepted with algorithmic access",
+        "demo versus live detection field from the official MQL5 documentation",
+        "investor (read-only) password availability at the chosen broker",
         "READ_ONLY_CONNECTED: supervised read-only connection check"
       ]
     },
     {
       "venue_id": "interactive_brokers",
-      "display_name": "Interactive Brokers (TWS API)",
-      "legal_entity": null,
-      "jurisdiction": null,
+      "display_name": "Interactive Brokers (TWS API and Web API)",
+      "legal_entity": "Expected Interactive Brokers LLC (CRD 36418); contracting entity for Guinea UNVERIFIED",
+      "jurisdiction": "United States (IB LLC, FINRA member)",
       "market_types": [
         "FOREX_CFD"
       ],
       "instruments": [],
-      "api_name": "TWS API",
+      "api_name": "TWS API (socket via TWS or IB Gateway); Web API (REST and WebSocket via Client Portal Gateway)",
       "api_version": null,
-      "api_url": null,
+      "api_url": "https://www.interactivebrokers.com/docs",
       "environments": [
         "PAPER",
         "LIVE"
       ],
-      "permissions_required": [],
-      "features": [],
-      "size_rules": [],
-      "costs_known": [],
-      "limitations": [
-        "FX at IBKR may be spot FX rather than CFD; market type to confirm.",
-        "Requires a local TWS or IB Gateway process.",
-        "Placeholder record: research agents add evidence; the integrator merges it."
+      "permissions_required": [
+        "fully open and funded IBKR Pro live account before paper trading or Web API use",
+        "local TWS or IB Gateway process with periodic re-authentication (TWS API)",
+        "local Client Portal Gateway with interactive username and password login (Web API, individuals)"
       ],
-      "eligibility_conditions": [],
+      "features": [
+        "spot FX (IDEALPRO)",
+        "account and market data through TWS API or Web API"
+      ],
+      "size_rules": [],
+      "costs_known": [
+        "Spot FX 0.20 basis point x trade value, minimum USD 2.00 per order, up to USD 1 billion monthly volume (read 2026-10-26)",
+        "Web API trading free of cost to IBKR clients"
+      ],
+      "limitations": [
+        "FX at IB LLC is spot FX, not a CFD; FOREX_CFD is the closest registry market type. CFD access for a Guinea resident UNVERIFIED.",
+        "No standalone demo: paper only after a funded live account.",
+        "Web API: 10 requests/s per username plus per-endpoint limits; 429 then 10-minute penalty box. TWS API pacing not read.",
+        "One brokerage session per username across all IB platforms.",
+        "Bank-statement proof of address requires an FATF member country; Guinea's FATF membership UNVERIFIED.",
+        "Region eligibility is documentary only (official country list); kept ELIGIBILITY_UNKNOWN until the open human checks pass."
+      ],
+      "eligibility_conditions": [
+        "Official 'Available Countries and Territories' page lists Guinea, separately from Guinea-Bissau and Equatorial Guinea; footnote excludes Hedge Fund accounts.",
+        "Contracting entity (expected IB LLC) must be confirmed from the application screen.",
+        "Proof of address: Guinean bank statements qualify only if Guinea is an FATF member; otherwise a utility bill, lease or government letter."
+      ],
       "evidence": [
         {
-          "claim": "A paper trading account is opened from Account Management after a funded live account is approved; paper execution is more simulated. Carried from the BROKERS.md documentation check of 2026-10-25; not re-verified for this registry.",
+          "claim": "A paper trading account is opened from Account Management after a funded live account is approved; paper execution is more simulated (research_forex.md 3).",
           "source_url": "https://www.interactivebrokers.com/docs/tws-api/doc/notes-limitations/limitations/paper-trading",
-          "accessed_on": "2026-10-25"
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "Available Countries and Territories lists Guinea (research_forex.md 3).",
+          "source_url": "https://www.interactivebrokers.com/en/accounts/open-account-country-list.php",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "INTERACTIVE BROKERS LLC, CRD 36418, SEC 8-47257, FINRA-regulated brokerage firm (research_forex.md 3).",
+          "source_url": "https://brokercheck.finra.org/firm/summary/36418",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "KYC fields and proof-of-address rules including the FATF-member condition for bank statements (research_forex.md 3).",
+          "source_url": "https://www.interactivebrokers.com/en/general/what-you-need-inv.php",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "Spot FX commission 0.20 bp, minimum USD 2.00 per order (research_forex.md 3).",
+          "source_url": "https://www.interactivebrokers.com/en/accounts/fees/fxcoms.php?path=3",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "Web API: free to IBKR clients; individuals authenticate through the Client Portal Gateway; 10 requests/s per username (research_forex.md 3).",
+          "source_url": "https://www.interactivebrokers.com/campus/ibkr-api-page/web-api-trading/",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "Official API documentation hub for TWS API and Web API (research_forex.md 3).",
+          "source_url": "https://www.interactivebrokers.com/docs",
+          "accessed_on": "2026-10-26"
         }
       ],
       "statuses": [
@@ -379,33 +570,110 @@
           "note": "Listed in the BROKERS.md evaluation matrix of 2026-10-25."
         },
         {
-          "status": "UNVERIFIED",
+          "status": "OFFICIAL_API_VERIFIED",
           "since": "2026-10-26",
-          "note": "Official API documentation not yet verified by a research pass for this registry."
+          "note": "TWS API and Web API documentation read in the research pass of 2026-10-26 (docs/venues/research_forex.md section 3)."
         },
         {
           "status": "ELIGIBILITY_UNKNOWN",
           "since": "2026-10-26",
-          "note": "Country and account eligibility for the user is unknown."
+          "note": "Guinea is on the official country list (documents only), but entity, account type, proof of address, funding and API/paper access are open human checks; not REGION_ELIGIBILITY_VERIFIED."
         }
       ],
       "tests_passed": [],
       "validations_missing": [
-        "OFFICIAL_API_VERIFIED: official API documentation, URL and access date",
-        "REGION_ELIGIBILITY_VERIFIED: legal entity, jurisdiction and user eligibility",
+        "REGION_ELIGIBILITY_VERIFIED: start (do not submit) the application with residence Guinea and record the IBKR entity shown",
+        "written IBKR confirmation that a Guinea resident can open an IBKR Pro individual account, trade spot FX via API, and open a paper account after funding",
+        "accepted proof-of-address documents and funding methods from Guinea",
+        "CFD availability for a Guinea-resident IB LLC client",
+        "TWS API pacing limits",
+        "NFA BASIC check for IB LLC",
+        "Guinea FATF/GIABA status (affects proof of address)",
         "READ_ONLY_CONNECTED: supervised read-only connection check"
       ]
     },
     {
-      "venue_id": "oanda",
-      "display_name": "OANDA (v20 REST)",
-      "legal_entity": null,
+      "venue_id": "ic_markets_global",
+      "display_name": "IC Markets Global (Raw Trading Ltd) - cTrader and MT5",
+      "legal_entity": "Raw Trading Ltd, trading as IC Markets Global / IC MARKETS (SC); company number 8419879-1 or 8419879-2 (discrepancy)",
+      "jurisdiction": "Seychelles (FSA Securities Dealer licence SD018 per the provider; entity present on the FSA register, number not read there)",
+      "market_types": [
+        "FOREX_CFD"
+      ],
+      "instruments": [],
+      "api_name": null,
+      "api_version": null,
+      "api_url": null,
+      "environments": [
+        "DEMO",
+        "LIVE"
+      ],
+      "permissions_required": [],
+      "features": [],
+      "size_rules": [],
+      "costs_known": [
+        "Raw Spread cTrader/TradingView USD 3 per USD 100,000 traded per side; Raw Spread MetaTrader USD 3.50 per lot per side; Standard no commission, spreads from 0.8 pips (read 2026-10-26)"
+      ],
+      "limitations": [
+        "Restricted-country clause is non-exhaustive (names only examples); Guinea not named.",
+        "Company number differs between the website footer and the T&C.",
+        "Deposits and withdrawals from Guinea not researched."
+      ],
+      "eligibility_conditions": [],
+      "evidence": [
+        {
+          "claim": "Raw Trading Ltd, FSA Seychelles Securities Dealer licence SD018; restricted countries given only as examples (research_forex.md 1.2).",
+          "source_url": "https://www.ic.com/en/company/regulation",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "FSA Capital Markets register lists Raw Trading Ltd with trade names IC Markets Global and IC MARKETS (SC) (research_forex.md 1.2).",
+          "source_url": "https://fsaseychelles.sc/regulated-entities/capital-markets",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "cTrader Raw account commission USD 3 per USD 100,000 per side (research_forex.md 1.2).",
+          "source_url": "https://www.icmarkets.com/global/en/trading-accounts/ctrader-raw",
+          "accessed_on": "2026-10-26"
+        }
+      ],
+      "statuses": [
+        {
+          "status": "DISCOVERED",
+          "since": "2026-10-26",
+          "note": "Covered by the Forex/CFD research dossier of 2026-10-26."
+        },
+        {
+          "status": "UNVERIFIED",
+          "since": "2026-10-26",
+          "note": "No proprietary trading API found; platform APIs are verified in the ctrader and mt5 records, but whether this broker's entity permits Open API or MT5 algorithmic access has not been confirmed."
+        },
+        {
+          "status": "ELIGIBILITY_UNKNOWN",
+          "since": "2026-10-26",
+          "note": "Guinea not named in a non-exhaustive restricted list; no full country list found."
+        }
+      ],
+      "tests_passed": [],
+      "validations_missing": [
+        "REGION_ELIGIBILITY_VERIFIED: written confirmation from compliance that residents of the Republic of Guinea are accepted, by which legal entity",
+        "confirmation that cTrader Open API or MT5 algorithmic access is permitted for that entity",
+        "full restricted-country list from the client agreement",
+        "licence number SD018 read directly on the FSA register",
+        "clarify company number 8419879-1 versus 8419879-2",
+        "READ_ONLY_CONNECTED: supervised read-only connection check"
+      ]
+    },
+    {
+      "venue_id": "pepperstone",
+      "display_name": "Pepperstone - cTrader and MT5",
+      "legal_entity": "UNVERIFIED: Pepperstone Markets Kenya Limited (CMA), Pepperstone Markets Limited (SCB SIA-F217) or Pepperstone International Markets Limited (FSA Seychelles)",
       "jurisdiction": null,
       "market_types": [
         "FOREX_CFD"
       ],
       "instruments": [],
-      "api_name": "OANDA v20 REST",
+      "api_name": null,
       "api_version": null,
       "api_url": null,
       "environments": [
@@ -417,8 +685,280 @@
       "size_rules": [],
       "costs_known": [],
       "limitations": [
-        "The regional entity determines products and eligibility; not assessed.",
-        "Placeholder record: research agents add evidence; the integrator merges it."
+        "Pepperstone's partner page (as of February 2025) excludes Guinea for affiliate partners: a negative signal, not a client ban.",
+        "No published client restricted-country list."
+      ],
+      "eligibility_conditions": [],
+      "evidence": [
+        {
+          "claim": "Guinea listed among countries from which affiliate partners are not accepted (research_forex.md 1.3).",
+          "source_url": "https://partnership.pepperstone.com/en/affiliates-program",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "Pepperstone Markets Kenya Limited licensed by the CMA Kenya, serving pepperstone.com/en-af (research_forex.md 1.3).",
+          "source_url": "https://pepperstone.com/en-af/help-and-support/opening-an-account/is-pepperstone-licensed-and-regulated",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "FSA Seychelles register lists Pepperstone International Markets Limited (research_forex.md 1.3).",
+          "source_url": "https://fsaseychelles.sc/regulated-entities/capital-markets",
+          "accessed_on": "2026-10-26"
+        }
+      ],
+      "statuses": [
+        {
+          "status": "DISCOVERED",
+          "since": "2026-10-26",
+          "note": "Covered by the Forex/CFD research dossier of 2026-10-26."
+        },
+        {
+          "status": "UNVERIFIED",
+          "since": "2026-10-26",
+          "note": "No proprietary trading API found; platform APIs are verified in the ctrader and mt5 records, but whether this broker's entity permits Open API or MT5 algorithmic access has not been confirmed."
+        },
+        {
+          "status": "ELIGIBILITY_UNKNOWN",
+          "since": "2026-10-26",
+          "note": "Negative signal (Guinea excluded for affiliates); client eligibility not published."
+        }
+      ],
+      "tests_passed": [],
+      "validations_missing": [
+        "REGION_ELIGIBILITY_VERIFIED: written confirmation from compliance that residents of the Republic of Guinea are accepted, by which legal entity",
+        "confirmation that cTrader Open API or MT5 algorithmic access is permitted for that entity",
+        "full restricted-country list from the client agreement",
+        "CMA Kenya and SCB SIA-F217 licences read on the registers",
+        "READ_ONLY_CONNECTED: supervised read-only connection check"
+      ]
+    },
+    {
+      "venue_id": "fxpro",
+      "display_name": "FxPro - cTrader and MT5",
+      "legal_entity": "UNVERIFIED: FxPro Global Markets Ltd (SCB SIA-F184) or Invemonde Trading Ltd (FSA Seychelles SD120)",
+      "jurisdiction": null,
+      "market_types": [
+        "FOREX_CFD"
+      ],
+      "instruments": [],
+      "api_name": null,
+      "api_version": null,
+      "api_url": null,
+      "environments": [
+        "DEMO",
+        "LIVE"
+      ],
+      "permissions_required": [],
+      "features": [],
+      "size_rules": [],
+      "costs_known": [],
+      "limitations": [
+        "Restriction wording is non-exhaustive (US, Iran, Canada named); Guinea not named."
+      ],
+      "eligibility_conditions": [],
+      "evidence": [
+        {
+          "claim": "FxPro entities and licences; CFDs not offered to residents of certain jurisdictions including the US, Iran and Canada (research_forex.md 1.4).",
+          "source_url": "https://www.fxpro.com/about/licences",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "FSA Seychelles register lists Invemonde Trading Ltd, trade name FxPro (research_forex.md 1.4).",
+          "source_url": "https://fsaseychelles.sc/regulated-entities/capital-markets",
+          "accessed_on": "2026-10-26"
+        }
+      ],
+      "statuses": [
+        {
+          "status": "DISCOVERED",
+          "since": "2026-10-26",
+          "note": "Covered by the Forex/CFD research dossier of 2026-10-26."
+        },
+        {
+          "status": "UNVERIFIED",
+          "since": "2026-10-26",
+          "note": "No proprietary trading API found; platform APIs are verified in the ctrader and mt5 records, but whether this broker's entity permits Open API or MT5 algorithmic access has not been confirmed."
+        },
+        {
+          "status": "ELIGIBILITY_UNKNOWN",
+          "since": "2026-10-26",
+          "note": "Guinea not named in a non-exhaustive restricted list."
+        }
+      ],
+      "tests_passed": [],
+      "validations_missing": [
+        "REGION_ELIGIBILITY_VERIFIED: written confirmation from compliance that residents of the Republic of Guinea are accepted, by which legal entity",
+        "confirmation that cTrader Open API or MT5 algorithmic access is permitted for that entity",
+        "full restricted-country list from the client agreement",
+        "SCB SIA-F184 and FCA 509956 read on the registers",
+        "READ_ONLY_CONNECTED: supervised read-only connection check"
+      ]
+    },
+    {
+      "venue_id": "deriv",
+      "display_name": "Deriv - cTrader, MT5 and Deriv API",
+      "legal_entity": "UNVERIFIED: Deriv (BVI) Ltd, Deriv (SVG) LLC, Deriv (V) Ltd, Deriv (FX) Ltd or Deriv (Mauritius) Ltd, by country and product",
+      "jurisdiction": null,
+      "market_types": [
+        "FOREX_CFD",
+        "FIXED_EXPIRY_OPTIONS"
+      ],
+      "instruments": [],
+      "api_name": "Deriv API (options product); cTrader and MT5 for FX CFDs",
+      "api_version": null,
+      "api_url": "https://developers.deriv.com/docs/intro/api-overview",
+      "environments": [
+        "DEMO",
+        "LIVE"
+      ],
+      "permissions_required": [],
+      "features": [],
+      "size_rules": [],
+      "costs_known": [],
+      "limitations": [
+        "The Deriv API covers the options product; FX CFDs are reached through MT5 or cTrader.",
+        "Synthetic derived indices are not real-market instruments and are not suitable as ASTRA FX data.",
+        "Deriv API rate limits not found.",
+        "Options are disabled in ASTRA (astra.markets.fixed_expiry_options.ENABLED = False)."
+      ],
+      "eligibility_conditions": [],
+      "evidence": [
+        {
+          "claim": "Services offered only to residents of certain countries; list may change; no official country list found (research_forex.md 1.5).",
+          "source_url": "https://deriv.com/terms-and-conditions/general-terms-of-use",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "Deriv (BVI) Ltd licence certificate SIBA/L/18/1114 published by Deriv; BVI FSC register not read (research_forex.md 1.5).",
+          "source_url": "https://docs.deriv.com/regulatory/Deriv_(BVI)_Ltd.pdf",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "Deriv API: REST base api.derivws.com plus public, demo and real WebSocket endpoints; OAuth 2.0 or Personal Access Token (research_forex.md 1.5).",
+          "source_url": "https://developers.deriv.com/docs/intro/api-overview",
+          "accessed_on": "2026-10-26"
+        }
+      ],
+      "statuses": [
+        {
+          "status": "DISCOVERED",
+          "since": "2026-10-26",
+          "note": "Covered by the Forex/CFD research dossier of 2026-10-26."
+        },
+        {
+          "status": "UNVERIFIED",
+          "since": "2026-10-26",
+          "note": "Deriv API documented but options-oriented (DISCOVERED in the dossier, not proposed as verified); FX CFD access through cTrader or MT5 not confirmed for the entity."
+        },
+        {
+          "status": "ELIGIBILITY_UNKNOWN",
+          "since": "2026-10-26",
+          "note": "No official country list found."
+        }
+      ],
+      "tests_passed": [],
+      "validations_missing": [
+        "REGION_ELIGIBILITY_VERIFIED: written confirmation from compliance that residents of the Republic of Guinea are accepted, by which legal entity",
+        "confirmation that cTrader Open API or MT5 algorithmic access is permitted for that entity",
+        "full restricted-country list from the client agreement",
+        "BVI FSC register check for Deriv (BVI) Ltd",
+        "READ_ONLY_CONNECTED: supervised read-only connection check"
+      ]
+    },
+    {
+      "venue_id": "exness",
+      "display_name": "Exness - MT5",
+      "legal_entity": "UNVERIFIED: Exness (SC) Ltd (FSA SD025), Exness B.V. (Curacao), Exness (VG) Ltd (BVI), Exness (MU) Ltd (Mauritius) and others",
+      "jurisdiction": null,
+      "market_types": [
+        "FOREX_CFD"
+      ],
+      "instruments": [],
+      "api_name": null,
+      "api_version": null,
+      "api_url": null,
+      "environments": [
+        "DEMO",
+        "LIVE"
+      ],
+      "permissions_required": [],
+      "features": [],
+      "size_rules": [],
+      "costs_known": [],
+      "limitations": [
+        "Restriction wording is non-exhaustive; Guinea not named.",
+        "FSA register address of Exness (SC) Ltd differs from the website address.",
+        "No public Exness trading API; MT4/MT5 only. Client agreement clause on programmatic access not read in full.",
+        "Proof of address must be issued in the country of account registration."
+      ],
+      "eligibility_conditions": [],
+      "evidence": [
+        {
+          "claim": "Exness entities and licences; services not offered to residents of certain jurisdictions including the USA, Iran, North Korea, EU, UK and others (research_forex.md 2.2).",
+          "source_url": "https://www.exness.com/regulation",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "FSA Seychelles register lists Exness (SC) Ltd at an Eden Island address (research_forex.md 2.2).",
+          "source_url": "https://fsaseychelles.sc/regulated-entities/capital-markets",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "Proof of address must be from the same country as the account registration (research_forex.md 2.2).",
+          "source_url": "https://get.exness.help/hc/en-us/articles/5714316735378-Can-I-verify-an-Exness-account-from-a-foreign-country",
+          "accessed_on": "2026-10-26"
+        }
+      ],
+      "statuses": [
+        {
+          "status": "DISCOVERED",
+          "since": "2026-10-26",
+          "note": "Covered by the Forex/CFD research dossier of 2026-10-26."
+        },
+        {
+          "status": "UNVERIFIED",
+          "since": "2026-10-26",
+          "note": "No public Exness trading API; MT5 package verified in the mt5 record, but MT5 algorithmic access for the entity serving Guinea is not confirmed."
+        },
+        {
+          "status": "ELIGIBILITY_UNKNOWN",
+          "since": "2026-10-26",
+          "note": "Guinea not named in a non-exhaustive restricted list."
+        }
+      ],
+      "tests_passed": [],
+      "validations_missing": [
+        "REGION_ELIGIBILITY_VERIFIED: written confirmation from compliance that residents of the Republic of Guinea are accepted, by which legal entity",
+        "confirmation that cTrader Open API or MT5 algorithmic access is permitted for that entity",
+        "full restricted-country list from the client agreement",
+        "Exness register address mismatch",
+        "client agreement clause on programmatic or automated access",
+        "READ_ONLY_CONNECTED: supervised read-only connection check"
+      ]
+    },
+    {
+      "venue_id": "oanda",
+      "display_name": "OANDA (v20 REST)",
+      "legal_entity": "OANDA Global Markets Ltd (BVI company no. 2026433, BVI FSC SIBA/L/20/1130) would be the only candidate division",
+      "jurisdiction": "British Virgin Islands",
+      "market_types": [
+        "FOREX_CFD"
+      ],
+      "instruments": [],
+      "api_name": "OANDA v20 REST",
+      "api_version": null,
+      "api_url": "https://developer.oanda.com/rest-live-v20/introduction",
+      "environments": [
+        "DEMO",
+        "LIVE"
+      ],
+      "permissions_required": [],
+      "features": [],
+      "size_rules": [],
+      "costs_known": [],
+      "limitations": [
+        "v20 REST is not available to OANDA Global Markets, the only plausible division for Guinea.",
+        "Guinea is not listed by any OANDA division found."
       ],
       "eligibility_conditions": [],
       "evidence": [
@@ -426,6 +966,26 @@
           "claim": "A practice environment is served from api-fxpractice.oanda.com (streaming stream-fxpractice.oanda.com) with a token from a practice account. Carried from the BROKERS.md documentation check of 2026-10-25; not re-verified for this registry.",
           "source_url": "https://developer.oanda.com/rest-live-v20/development-guide",
           "accessed_on": "2026-10-25"
+        },
+        {
+          "claim": "v20 is available to all divisions except OANDA Global Markets and OANDA TMS Brokers (research_forex.md 4).",
+          "source_url": "https://developer.oanda.com/rest-live-v20/introduction",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "API comparison page: v20 not yet available in Global Markets (research_forex.md 4).",
+          "source_url": "https://developer.oanda.com/mt4-live/api-comparison",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "Region selector lists several West African countries but not Guinea (research_forex.md 4).",
+          "source_url": "https://www.oanda.com/region-selector",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "OGM eligible-countries help page does not list Guinea (research_forex.md 4).",
+          "source_url": "https://help.oanda.com/bvi/en/faqs/eligible-ogm-countries-bvi.htm",
+          "accessed_on": "2026-10-26"
         }
       ],
       "statuses": [
@@ -437,24 +997,97 @@
         {
           "status": "UNVERIFIED",
           "since": "2026-10-26",
-          "note": "Official API documentation not yet verified by a research pass for this registry."
+          "note": "v20 documentation was read on 2026-10-26, but it states v20 is not offered to OANDA Global Markets; API verification is not granted for this user."
         },
         {
           "status": "ELIGIBILITY_UNKNOWN",
           "since": "2026-10-26",
-          "note": "Country and account eligibility for the user is unknown."
+          "note": "No OANDA division positively lists Guinea; the evidence points to exclusion, recorded as BLOCKED."
+        },
+        {
+          "status": "BLOCKED",
+          "since": "2026-10-26",
+          "note": "Blocked: Guinea not listed by any OANDA division, and v20 is not offered to the OANDA Global Markets entity."
         }
       ],
       "tests_passed": [],
       "validations_missing": [
-        "OFFICIAL_API_VERIFIED: official API documentation, URL and access date",
-        "REGION_ELIGIBILITY_VERIFIED: legal entity, jurisdiction and user eligibility",
-        "READ_ONLY_CONNECTED: supervised read-only connection check"
+        "only if desired: ask OANDA whether any division accepts Guinea residents with v20 API access"
       ]
     },
     {
       "venue_id": "fxcm",
-      "display_name": "FXCM",
+      "display_name": "FXCM (Stratos Global LLC for international clients)",
+      "legal_entity": "Stratos Global LLC, company No. 1776 LLC 2022 (states it is not required to hold a financial services licence)",
+      "jurisdiction": "St Vincent and the Grenadines",
+      "market_types": [
+        "FOREX_CFD"
+      ],
+      "instruments": [],
+      "api_name": "ForexConnect, Java API, FIX (REST/socket.io API deprecated)",
+      "api_version": null,
+      "api_url": "https://www.fxcm.com/markets/algorithmic-trading/api-trading",
+      "environments": [
+        "DEMO",
+        "LIVE"
+      ],
+      "permissions_required": [
+        "account username and password (ForexConnect); FIX requires a USD 5,000 minimum balance, live only"
+      ],
+      "features": [],
+      "size_rules": [],
+      "costs_known": [],
+      "limitations": [
+        "Contracting entity for international clients is unregulated by its own statement.",
+        "REST/socket.io API deprecated per FXCM's GitHub notice; a third-party claim that ForexConnect is also deprecated is UNVERIFIED.",
+        "Rate limits not documented in the pages read; costs not read."
+      ],
+      "eligibility_conditions": [],
+      "evidence": [
+        {
+          "claim": "Stratos Global LLC (SVG) is not required to hold a financial services licence and is not overseen by the FCA, ASIC or FSCA; not intended for residents of the US, Canada, EU, Japan, Hong Kong, Australia (research_forex.md 5).",
+          "source_url": "https://www.fxcm.com/markets/help/new-accounts-is-fxcm-markets-regulated",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "Official API page lists FIX (USD 5,000 minimum), Java API and ForexConnect (research_forex.md 5).",
+          "source_url": "https://www.fxcm.com/markets/algorithmic-trading/api-trading",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "FXCM GitHub notice on REST API deprecation (research_forex.md 5).",
+          "source_url": "https://github.com/fxcm/fxcmrest-php",
+          "accessed_on": "2026-10-26"
+        }
+      ],
+      "statuses": [
+        {
+          "status": "DISCOVERED",
+          "since": "2026-10-26",
+          "note": "Named in the multi-venue brief of 2026-10-26."
+        },
+        {
+          "status": "UNVERIFIED",
+          "since": "2026-10-26",
+          "note": "API continuity in doubt (REST deprecated, ForexConnect status unconfirmed); not proposed as verified."
+        },
+        {
+          "status": "ELIGIBILITY_UNKNOWN",
+          "since": "2026-10-26",
+          "note": "Guinea not excluded by name, but no positive acceptance statement; contracting entity unregulated."
+        }
+      ],
+      "tests_passed": [],
+      "validations_missing": [
+        "written answer from api@fxcm.com on whether ForexConnect remains supported for Stratos Global LLC clients",
+        "REGION_ELIGIBILITY_VERIFIED: whether Guinea residents are accepted",
+        "decision on whether an unregulated contracting entity is acceptable at all",
+        "READ_ONLY_CONNECTED: supervised read-only connection check"
+      ]
+    },
+    {
+      "venue_id": "goforexfx_com",
+      "display_name": "GoForexFx (goforexfx.com)",
       "legal_entity": null,
       "jurisdiction": null,
       "market_types": [
@@ -470,32 +1103,110 @@
       "size_rules": [],
       "costs_known": [],
       "limitations": [
-        "Placeholder record: research agents add evidence; the integrator merges it."
+        "No legal entity, company number or registered office disclosed.",
+        "Footer claims FCA licence 487321; that FRN belongs to an unrelated former appointed representative.",
+        "Proprietary portal only; claimed 'API integrations' are undocumented.",
+        "Not proven to be the same operator as goforextrading.com."
       ],
       "eligibility_conditions": [],
-      "evidence": [],
+      "evidence": [
+        {
+          "claim": "Home page footer claims an FCA licence number 487321; no entity disclosed (research_crypto_other.md 4.1).",
+          "source_url": "https://goforexfx.com/",
+          "accessed_on": "2026-10-26"
+        },
+        {
+          "claim": "FCA register: FRN 487321 is The Stuart Strange Vasculitis Trust, no longer registered as an Appointed Representative (research_crypto_other.md 4.1).",
+          "source_url": "https://register.fca.org.uk/s/search?q=487321&type=Companies",
+          "accessed_on": "2026-10-26"
+        }
+      ],
       "statuses": [
         {
           "status": "DISCOVERED",
           "since": "2026-10-26",
-          "note": "Named in the multi-venue brief of 2026-10-26."
+          "note": "Named (as GoForex) in the multi-venue brief of 2026-10-26; domain identified in the research dossier."
         },
         {
           "status": "UNVERIFIED",
           "since": "2026-10-26",
-          "note": "Official API documentation not yet verified by a research pass for this registry."
+          "note": "No official API documentation exists."
         },
         {
           "status": "ELIGIBILITY_UNKNOWN",
           "since": "2026-10-26",
-          "note": "Country and account eligibility for the user is unknown."
+          "note": "No restricted-country list and no Guinea statement."
+        },
+        {
+          "status": "BLOCKED",
+          "since": "2026-10-26",
+          "note": "Blocked: claimed FCA number 487321 belongs to another firm per the FCA register; operator unidentifiable."
         }
       ],
       "tests_passed": [],
       "validations_missing": [
-        "OFFICIAL_API_VERIFIED: official API documentation, URL and access date",
-        "REGION_ELIGIBILITY_VERIFIED: legal entity, jurisdiction and user eligibility",
-        "READ_ONLY_CONNECTED: supervised read-only connection check"
+        "query the FCA Warning List, IOSCO I-SCAN, CySEC, ASIC and AMF warning lists by domain",
+        "WHOIS or domain-age check",
+        "consider reporting the false FCA FRN claim to the FCA (human decision)"
+      ]
+    },
+    {
+      "venue_id": "goforextrading_com",
+      "display_name": "GoForex (goforextrading.com)",
+      "legal_entity": null,
+      "jurisdiction": null,
+      "market_types": [
+        "FOREX_CFD"
+      ],
+      "instruments": [],
+      "api_name": null,
+      "api_version": null,
+      "api_url": null,
+      "environments": [],
+      "permissions_required": [],
+      "features": [],
+      "size_rules": [],
+      "costs_known": [],
+      "limitations": [
+        "Website-builder template with placeholder text; no operator or address stated.",
+        "Generic 'regulated' claim with no regulator, number or entity.",
+        "No platform or API named.",
+        "Name collisions (goforex.com on the AMF Quebec list, a Texas action against a GoForex) are not proven to be this operator."
+      ],
+      "eligibility_conditions": [],
+      "evidence": [
+        {
+          "claim": "Home page names no operator, regulator or licence number (research_crypto_other.md 4.2).",
+          "source_url": "https://www.goforextrading.com/",
+          "accessed_on": "2026-10-26"
+        }
+      ],
+      "statuses": [
+        {
+          "status": "DISCOVERED",
+          "since": "2026-10-26",
+          "note": "Named (as GoForex) in the multi-venue brief of 2026-10-26; domain identified in the research dossier."
+        },
+        {
+          "status": "UNVERIFIED",
+          "since": "2026-10-26",
+          "note": "No official API documentation exists."
+        },
+        {
+          "status": "ELIGIBILITY_UNKNOWN",
+          "since": "2026-10-26",
+          "note": "No restricted-country list and no Guinea statement."
+        },
+        {
+          "status": "BLOCKED",
+          "since": "2026-10-26",
+          "note": "Blocked: no regulator named and no identifiable operator."
+        }
+      ],
+      "tests_passed": [],
+      "validations_missing": [
+        "query the FCA Warning List, IOSCO I-SCAN, CySEC, ASIC and AMF warning lists by domain",
+        "WHOIS or domain-age check"
       ]
     }
   ]

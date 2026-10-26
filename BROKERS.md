@@ -82,6 +82,78 @@ Checked on 2026-10-25 by web search of official documentation. "Documented" mean
 | Interactive Brokers TWS API | https://www.interactivebrokers.com/docs/tws-api/doc/notes-limitations/limitations/paper-trading | Paper trading account, opened from Account Management after a funded live account is approved; docs warn paper execution is more simulated | Paper login on the local TWS/Gateway socket (commonly port 7497 per IBKR campus docs) plus account id | Requires a funded live account first; local TWS/Gateway process; FX contract details |
 | MetaTrader 5 Python package (MetaQuotes) | https://www.mql5.com/en/book/advanced/python/python_funcs_overview and https://metaquotes.net/en/metatrader5/news/5208 | Depends on the broker's MT5 server; not confirmed from official pages in this check | Not confirmed: the search did not reach the official `ACCOUNT_TRADE_MODE` documentation | Windows terminal process required; demo detection field must be verified in MQL5 docs before relying on it |
 
+## Multi-venue comparison (as of 2026-10-26, subject to human verification)
+
+Sources: the research dossiers [docs/venues/research_forex.md](docs/venues/research_forex.md) and [docs/venues/research_crypto_other.md](docs/venues/research_crypto_other.md), public pages only, all accessed 2026-10-26, for a user resident in the Republic of Guinea (Conakry). Registry status per venue, with evidence URLs, is in [VENUE_REGISTRY.md](VENUE_REGISTRY.md) (registry 0.2.0). No account was opened and no live connection was made: **no venue below is integrated**, and the cTrader adapter is the only adapter in this repository (tested offline only). Every point below is subject to human verification.
+
+"Not named" means the provider's restricted list is non-exhaustive and omits Guinea, which does not prove eligibility.
+
+### Forex / CFD
+
+| Venue | Contracting entity (for Guinea) | Regulator checked in register | Guinea eligibility | Official API | Demo / paper | Auth | Rate limits | Published costs | Registry status |
+|---|---|---|---|---|---|---|---|---|---|
+| cTrader Open API (Spotware) | Vendor; broker-dependent | n/a | Broker-dependent | Open API, Protobuf/TCP or JSON/WebSocket | Demo accounts | OAuth 2.0, scopes `accounts` / `trading` | 50 req/s, 5 req/s historical, per connection | API free | OFFICIAL_API_VERIFIED, ELIGIBILITY_UNKNOWN |
+| MetaTrader 5 Python package | MetaQuotes; broker-dependent | n/a | Broker-dependent | IPC to a local Windows MT5 terminal | Broker-dependent | Broker login and password | None documented | Package free | OFFICIAL_API_VERIFIED, ELIGIBILITY_UNKNOWN |
+| Interactive Brokers | Expected IB LLC (unconfirmed) | FINRA BrokerCheck CRD 36418: yes; NFA not read | **Listed** on the official country page | TWS API (socket), Web API (REST/WS) | Paper after a funded IBKR Pro account | Gateway login (individuals) | Web API 10 req/s + per endpoint | Spot FX 0.20 bp, min USD 2/order | OFFICIAL_API_VERIFIED, ELIGIBILITY_UNKNOWN (documents only) |
+| IC Markets Global | Raw Trading Ltd (Seychelles) | Entity on FSA list; SD018 number not read | Not named | via cTrader / MT5 | Demo, free | via platform | via platform | cTrader USD 3 per 100k per side; MT Raw USD 3.50/lot/side | UNVERIFIED, ELIGIBILITY_UNKNOWN |
+| Pepperstone | Unconfirmed (Kenya / Bahamas / Seychelles) | Seychelles entity on FSA list | Negative signal (Guinea excluded for affiliates) | via cTrader / MT5 | Demo | via platform | via platform | not read | UNVERIFIED, ELIGIBILITY_UNKNOWN |
+| FxPro | Unconfirmed (SCB / Invemonde SC) | Invemonde on FSA list | Not named | via cTrader / MT5 | Demo | via platform | via platform | not read | UNVERIFIED, ELIGIBILITY_UNKNOWN |
+| Deriv | Unconfirmed (BVI / SVG / V / FX / Mauritius) | No (licence PDF only) | No official list | Deriv API (options), cTrader, MT5 | Default demo | OAuth 2.0 or PAT | not found | not read | UNVERIFIED, ELIGIBILITY_UNKNOWN |
+| Exness | Unconfirmed (SC / B.V. / VG / MU) | Exness (SC) on FSA list (address mismatch) | Not named | MT5 only | Demo | MT5 login | n/a | not read | UNVERIFIED, ELIGIBILITY_UNKNOWN |
+| FXCM | Stratos Global LLC (SVG, unregulated) | Entity unregulated | Not excluded by name, no positive listing | ForexConnect / Java / FIX; REST deprecated | Trading Station demo | Username and password | not documented | FIX needs USD 5,000 balance | UNVERIFIED, ELIGIBILITY_UNKNOWN |
+| OANDA | OANDA Global Markets (BVI), only candidate | No | Not listed by any division | v20 not offered to that entity | Practice (other divisions) | Bearer token | 120 req/s/IP | not read | **BLOCKED** |
+
+### Crypto spot
+
+| Venue | Contracting entity | Regulator checked in register | Guinea eligibility | Official API | Test environment | Permissions | Rate limits | Fees | Registry status |
+|---|---|---|---|---|---|---|---|---|---|
+| Binance Spot | ADGM entities (Nest Exchange / Clearing and Custody / Trading), unconfirmed for Guinea | No (FSRA register not checked) | Not on the prohibited list; absent from the iOS app-region page; no positive confirmation | REST, WebSocket API, streams, FIX; keyless `data-api.binance.vision` | Spot Testnet (GitHub login); Demo Mode (needs an account) | Read-only Ed25519 key, IP-restricted; withdrawals never | REQUEST_WEIGHT 6,000/min/IP; 429 then 418 ban | 0.100% / 0.100% regular | OFFICIAL_API_VERIFIED, ELIGIBILITY_UNKNOWN |
+
+Binance hosts timed out from the research machine on 2026-10-26; the cause is unknown and must be retested from the production network.
+
+### Futures
+
+| Venue | Guinea eligibility | Official API | Test environment | Fees | Registry status |
+|---|---|---|---|---|---|
+| Binance Futures USD-M / COIN-M | Unknown; no official country list | `fapi.binance.com`, `dapi.binance.com` | `demo-fapi.binance.com`; COIN-M testnet listed | USD-M 0.0200% / 0.0500% regular | **BLOCKED** pending derivatives risk review; ELIGIBILITY_UNKNOWN |
+
+### Options and other
+
+| Venue | Entity | Guinea eligibility | Official API | Registry status |
+|---|---|---|---|---|
+| IQ Option | SKY LADDER LLC (Antigua), no licence named | Not named; catch-all exclusion | **None** (only unofficial APIs, forbidden) | **BLOCKED** |
+| Deriv options (Deriv API) | See Deriv above | No official list | Deriv API documented | UNVERIFIED (options disabled in ASTRA) |
+| GoForexFx (goforexfx.com) | Not disclosed | Not stated | None documented | **BLOCKED** |
+| GoForex (goforextrading.com) | Not disclosed | Not stated | None | **BLOCKED** |
+
+### Second Forex broker: recommendation
+
+Recommendation from the Forex dossier: **Interactive Brokers** (expected entity Interactive Brokers LLC), via the TWS API through IB Gateway, with the Web API as an alternative. Criteria were access from Guinea, costs, API quality, demo or paper, and ease of validation; minimum deposit and leverage were not used.
+
+Reasoning:
+1. It is the only venue where an official provider page names Guinea as an accepted country of residence. Every cTrader/MT5 broker checked uses non-exhaustive exclusion lists.
+2. IB LLC can be checked in a primary register (FINRA BrokerCheck CRD 36418), unlike the offshore licence numbers that could not be read in registers.
+3. Two official, maintained APIs with published rate limits; a different integration family from cTrader, which tests the multi-venue contract on a genuinely different adapter.
+4. Published spot FX commission (0.20 bp, minimum USD 2) and free API use.
+
+Caveats: no free demo, paper only after a funded IBKR Pro account; a Guinean bank statement may not qualify as proof of address (FATF rule); TWS or Gateway must run locally with periodic re-authentication; FX at IB LLC is spot, not a CFD. The registry keeps it at ELIGIBILITY_UNKNOWN until a human confirms the entity, account type and API/paper access in writing.
+
+Fallback, only after written confirmation of Guinea acceptance: a cTrader or MT5 broker with an African-facing entity, IC Markets Global first, Deriv second. Pepperstone is deprioritised (it excludes Guinea for partners). OANDA should not be pursued.
+
+### Blocked venues
+
+| Venue | Reason |
+|---|---|
+| OANDA | Guinea not listed by any OANDA division; v20 is not offered to OANDA Global Markets, the only candidate entity. |
+| Binance Futures | Pending a derivatives risk review (leverage, funding, liquidation); Guinea eligibility unknown. |
+| IQ Option | No official API (decisive); no licence named for the non-EEA entity; binary or digital options. |
+| goforexfx.com | Claimed FCA number 487321 belongs to another firm per the FCA register; operator unidentifiable. |
+| goforextrading.com | No regulator named and no identifiable operator. |
+
+### Still to verify by a human
+
+See section 9 of the Forex dossier and section 6 of the crypto dossier. In short: written Guinea acceptance (entity, account type, API access) from any candidate; licence numbers read directly in the registers; Guinean foreign-exchange and crypto law (BCRG), with local legal advice; Guinea's FATF/GIABA status; Binance connectivity from the production network.
+
 ## Required before enabling DEMO orders
 
 The cTrader adapter exists (steps 3 and 4 are done offline for cTrader); the remaining steps apply to it and to any later provider.
