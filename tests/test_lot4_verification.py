@@ -1342,7 +1342,8 @@ class Round4InformationTests(unittest.TestCase):
             "min_dsr_returns": 30, "min_dsr_trades": 30, "min_pbo_nonzero_row_fraction": 0.5, "min_pbo_slices": 4,
             "min_pbo_trades_per_slice": 1,
             # Added by the DSR serial-dependence change (policy 0.3.0/0.4.0, merged after this test was written).
-            "dsr_autocorrelation_lags": 5, "min_dsr_effective_returns": 30, "max_dsr_abs_autocorrelation": 0.3})
+            "dsr_autocorrelation_lags": 5, "min_dsr_effective_returns": 30, "max_dsr_abs_autocorrelation": 0.3,
+            "min_dsr_ljung_box_p_value": 0.01})
 
 
 class DataProvenanceTests(AnchoredStoreMixin):
@@ -1492,12 +1493,11 @@ class SerialDependenceGateTests(unittest.TestCase):
                                       trial_sharpe_variance=result.trial_sharpe_variance)
         self.assertLess(result.deflated_sharpe_probability, naive.probability)
 
-    # PHASE5 FAIL R-1 (Medium; statistics): the correction is truncated at 5 lags and the only dependence gate is
+    # FIXED IN LOT 4 PHASE 5 (was PHASE5 FAIL R-1; Ljung-Box gate, policy 0.5.0). Original finding (Medium; statistics): the correction is truncated at 5 lags and the only dependence gate is
     # max |rho_k| <= 0.3 over those lags. A long-memory sample (i.i.d. noise plus a slowly varying mean,
     # |rho_k| about 0.15 at every lag) has a Ljung-Box p-value of about 2e-9, yet the DSR is published as
     # COMPLETED with T_eff 158 (about 76 with 100 lags) and probability 0.97 instead of 0.82 here. The
     # Ljung-Box result is recorded but not used as a gate.
-    @unittest.expectedFailure
     def test_long_memory_sample_is_not_published_with_a_truncated_correction(self):
         returns = _long_memory(5)
         result = _assess_dsr(returns)

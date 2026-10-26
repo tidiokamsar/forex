@@ -658,6 +658,7 @@ class DsrSerialDependenceGuardTests(unittest.TestCase):
         self.assertIsNotNone(self.assess(shuffled).deflated_sharpe_probability)
 
     @patch("astra.strategy_validation.MAX_DSR_ABS_AUTOCORRELATION", 0.95)
+    @patch("astra.strategy_validation.MIN_DSR_LJUNG_BOX_P_VALUE", 1e-12)  # isolate the effective-size floor
     def test_effective_size_below_the_floor_is_low_information(self):
         # The dependence threshold is relaxed here only to reach the effective-size floor: rho = 0.6 over
         # 60 returns gives T_eff of about 60 / (1 + 2 * sum_{k<=5} 0.6^k) = 60 / 3.77, far below 30.
@@ -674,7 +675,7 @@ class DsrSerialDependenceGuardTests(unittest.TestCase):
     def test_policy_check_directions(self):
         from astra.research_policy import RESEARCH_POLICY_VERSION, statistical_policy_below_floor
 
-        self.assertEqual(RESEARCH_POLICY_VERSION, "astra-research-policy-0.4.0-provisional")
+        self.assertEqual(RESEARCH_POLICY_VERSION, "astra-research-policy-0.5.0-provisional")
         applied = strategy_validation.applied_statistical_policy()["applied"]
         self.assertEqual(statistical_policy_below_floor(applied), ())
         for name, value in (("max_dsr_abs_autocorrelation", 0.31), ("min_dsr_effective_returns", 29),

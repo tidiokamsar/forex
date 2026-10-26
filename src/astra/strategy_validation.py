@@ -90,6 +90,7 @@ MIN_PBO_TRADES_PER_SLICE = STATISTICAL_POLICY.min_pbo_trades_per_slice
 DSR_AUTOCORRELATION_LAGS = STATISTICAL_POLICY.dsr_autocorrelation_lags
 MIN_DSR_EFFECTIVE_RETURNS = STATISTICAL_POLICY.min_dsr_effective_returns
 MAX_DSR_ABS_AUTOCORRELATION = STATISTICAL_POLICY.max_dsr_abs_autocorrelation
+MIN_DSR_LJUNG_BOX_P_VALUE = STATISTICAL_POLICY.min_dsr_ljung_box_p_value
 MIN_PBO_NONZERO_ROW_FRACTION = STATISTICAL_POLICY.min_pbo_nonzero_row_fraction
 # C(2, 1) = 2 combinations can only give PBO 0, 0.5 or 1; at least 4 slices (6 combinations) are required.
 MIN_PBO_SLICES = STATISTICAL_POLICY.min_pbo_slices
@@ -1240,6 +1241,7 @@ def applied_statistical_policy() -> dict[str, Any]:
             "dsr_autocorrelation_lags": DSR_AUTOCORRELATION_LAGS,
             "min_dsr_effective_returns": MIN_DSR_EFFECTIVE_RETURNS,
             "max_dsr_abs_autocorrelation": MAX_DSR_ABS_AUTOCORRELATION,
+            "min_dsr_ljung_box_p_value": MIN_DSR_LJUNG_BOX_P_VALUE,
         },
     }
 
@@ -1407,6 +1409,13 @@ def assess_overfitting(
         low_information.append(
             f"deflated_sharpe: max |autocorrelation| {dependence.max_abs_autocorrelation:.3f} over lags "
             f"1..{DSR_AUTOCORRELATION_LAGS} (allowed at most {MAX_DSR_ABS_AUTOCORRELATION})"
+        )
+    elif dependence.ljung_box_p_value < MIN_DSR_LJUNG_BOX_P_VALUE:
+        # Dependence the truncated correction does not capture (e.g. long memory): withhold the DSR.
+        dependence_payload = _json_safe(dependence.to_dict())
+        low_information.append(
+            f"deflated_sharpe: Ljung-Box over lags 1..{DSR_AUTOCORRELATION_LAGS} rejects independence "
+            f"(p = {dependence.ljung_box_p_value:.2e}, need at least {MIN_DSR_LJUNG_BOX_P_VALUE})"
         )
     elif dependence.effective_observations < MIN_DSR_EFFECTIVE_RETURNS:
         dependence_payload = _json_safe(dependence.to_dict())

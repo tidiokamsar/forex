@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, fields
 
-RESEARCH_POLICY_VERSION = "astra-research-policy-0.4.0-provisional"
+RESEARCH_POLICY_VERSION = "astra-research-policy-0.5.0-provisional"
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,12 +90,17 @@ class StatisticalPolicy:
     dsr_autocorrelation_lags: int = 5
     min_dsr_effective_returns: int = 30
     max_dsr_abs_autocorrelation: float = 0.3
+    # The 5-lag correction misses long memory (many small autocorrelations): when the Ljung-Box test
+    # over those lags rejects independence at this level, no DSR is published (Lot 4 phase 5, R-1).
+    min_dsr_ljung_box_p_value: float = 0.01
 
     def __post_init__(self) -> None:
         if not 1 <= self.dsr_autocorrelation_lags < self.min_dsr_returns:
             raise ValueError("require 1 <= dsr_autocorrelation_lags < min_dsr_returns")
         if not 0.0 < self.max_dsr_abs_autocorrelation < 1.0:
             raise ValueError("require 0 < max_dsr_abs_autocorrelation < 1")
+        if not 0.0 < self.min_dsr_ljung_box_p_value < 1.0:
+            raise ValueError("require 0 < min_dsr_ljung_box_p_value < 1")
 
     def payload(self) -> dict:
         return {"version": RESEARCH_POLICY_VERSION, **asdict(self)}
@@ -112,6 +117,7 @@ _STATISTICAL_STRICTER_WHEN = {
     "dsr_autocorrelation_lags": "equal",
     "min_dsr_effective_returns": "higher",
     "max_dsr_abs_autocorrelation": "lower",
+    "min_dsr_ljung_box_p_value": "higher",
 }
 
 
