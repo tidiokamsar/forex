@@ -1507,6 +1507,33 @@ class SerialDependenceGateTests(unittest.TestCase):
                                           trial_sharpe_variance=result.trial_sharpe_variance, autocorrelation_lags=100)
         self.assertLessEqual(result.deflated_sharpe_probability, long_lags.probability + 0.02)
 
+    def test_ljung_box_gate_fires_for_the_right_reason_and_cannot_be_lowered(self):
+        # Phase 5b: the R-1 test above passes on any withholding; this one pins the Ljung-Box reason.
+        from astra import strategy_validation
+        from astra.research_policy import statistical_policy_below_floor
+
+        result = _assess_dsr(_long_memory(5))
+        self.assertEqual(result.status, "LOW_INFORMATION")
+        self.assertTrue(any("Ljung-Box" in error for error in result.errors), result.errors)
+        self.assertLess(result.dsr_serial_dependence["ljung_box_p_value"], 0.01)
+        self.assertLessEqual(result.dsr_serial_dependence["max_abs_autocorrelation"], 0.3)  # only Ljung-Box catches it
+        applied = strategy_validation.applied_statistical_policy()["applied"]
+        self.assertEqual(applied["min_dsr_ljung_box_p_value"], 0.01)
+        for value in (0.001, 0.0, None, True):
+            with self.subTest(value=value):
+                self.assertIn("min_dsr_ljung_box_p_value",
+                              statistical_policy_below_floor({**applied, "min_dsr_ljung_box_p_value": value}))
+        self.assertEqual(statistical_policy_below_floor({**applied, "min_dsr_ljung_box_p_value": 0.05}), ())
+        with patch("astra.strategy_validation.MIN_DSR_LJUNG_BOX_P_VALUE", 1e-12):
+            lowered = _assess_dsr(_long_memory(5))
+        self.assertIsNotNone(lowered.deflated_sharpe_probability)
+        self.assertIn("min_dsr_ljung_box_p_value", statistical_policy_below_floor(lowered.statistical_policy["applied"]))
+
+    def test_iid_samples_are_withheld_at_about_the_nominal_rate(self):
+        # Fresh seeds: 600 i.i.d. samples of 400 returns; the Ljung-Box gate at 1% withholds about 6 of them.
+        withheld = sum(_assess_dsr(_iid(f"phase5b:{k}")).deflated_sharpe_probability is None for k in range(600))
+        self.assertLessEqual(withheld, 15)  # 1% of 600 is 6; 15 is beyond a 3-sigma binomial excursion
+
 
 class RederivedDependenceTests(AnchoredStoreMixin):
     def test_rederivation_recomputes_the_stored_overfitting_record(self):
