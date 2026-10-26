@@ -695,6 +695,76 @@ class SharedStopStateTests(ServerCase):
                 self.public(state_path=state)
 
 
+class QaFixTests(ServerCase):
+    def test_429_with_unusable_retry_after_stops_until_acknowledged(self):
+        # MV-D-1
+        for header in ("400000", "soon", "-5", "nan"):
+            with self.subTest(header=header):
+                bs.reset_host_states_for_tests()
+                self.server.requests.clear()
+                self.server.script("/api/v3/ping", Scripted(429, {}, {"Retry-After": header}))
+                connector = self.public()
+                with self.assertRaises(BrokerRequestError) as ctx:
+                    connector.ping()
+                self.assertIsNone(ctx.exception.retry_after_seconds)
+                self.clock.advance(4 * 86_400)
+                self.fake_time.now += 4 * 86_400
+                with self.assertRaises(BrokerRequestError):
+                    self.public().ping()
+                self.assertEqual(len(self.server.requests), 1)
+                connector.acknowledge_ban_cleared()
+                connector.ping()
+
+    def test_429_without_retry_after_blocks_sixty_seconds(self):
+        self.server.script("/api/v3/ping", Scripted(429, {}))
+        connector = self.public()
+        with self.assertRaises(BrokerRequestError) as ctx:
+            connector.ping()
+        self.assertEqual(ctx.exception.retry_after_seconds, 60.0)
+        self.clock.advance(61)
+        connector.ping()
+
+    def test_provider_weight_limit_never_raises_the_budget(self):
+        self.server.rate_limits[0]["limit"] = 12_000
+        connector = self.public()
+        connector.symbol_rules(("BTCUSDT",))
+        self.assertEqual(connector.weight_limit, 6000)
+
+    def test_duplicated_symbol_refused_in_every_copy(self):
+        # MV-D-2
+        entry = self.server.symbols[0]
+        self.server.symbols = [entry, entry, entry, self.server.symbols[1]]
+        connector = self.public()
+        rules = connector.symbol_rules()
+        self.assertEqual(set(rules), {"ETHBTC"})
+        self.assertIn("duplicate", connector.rejected_symbols["BTCUSDT"])
+
+    def test_absurd_filter_values_rejected(self):
+        # MV-D-3
+        from binance_fixture import symbol_entry
+
+        self.server.symbols = [
+            symbol_entry("AAAUSDT", "AAA", "USDT", tick="1E-99"),
+            symbol_entry("BBBUSDT", "BBB", "USDT", step="1E+12"),
+            symbol_entry("CCCUSDT", "CCC", "USDT", max_qty="1E+30"),
+            symbol_entry("BTCUSDT", "BTC", "USDT"),
+        ]
+        connector = self.public()
+        self.assertEqual(set(connector.symbol_rules()), {"BTCUSDT"})
+        self.assertIn("sanity range", connector.rejected_symbols["AAAUSDT"])
+
+    def test_spec_carries_and_enforces_price_and_notional_bounds(self):
+        # MV-D-5
+        rules = self.public().symbol_rules(("BTCUSDT",))["BTCUSDT"]
+        spec = rules.to_spec(Decimal("0.001"), Decimal("0.001"))
+        self.assertEqual((spec.min_price, spec.max_price, spec.max_notional),
+                         (Decimal("0.01"), Decimal("1000000"), Decimal("9000000")))
+        self.assertIn("price_above_maximum", spec.order_violations("0.001", "2000000.00"))
+        self.assertIn("price_below_minimum", spec.order_violations("1000", "0.001"))
+        self.assertIn("notional_above_maximum", spec.order_violations("9000", "1000.01"))
+        self.assertEqual(spec.order_violations("0.001", "65000.00"), ())
+
+
 class ReviewFixTests(ServerCase):
     def test_in_memory_record_refused_for_real_host(self):
         # MV-A-1: no socket is opened; the gate refuses before _send.

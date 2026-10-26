@@ -319,6 +319,9 @@ def _parse_base_url(base_url: str, allowed_roles: frozenset[str], loopback_role:
     return _BaseUrl(f"{parts.scheme}://{parts.hostname}{port}", host, role, loopback)
 
 
+# Marker for a 429 stop that only a human can lift (unusable Retry-After).
+OPEN_ENDED = datetime.max.replace(tzinfo=UTC)
+DEFAULT_429_BLOCK_SECONDS = 60.0  # 429 without any Retry-After header
 STATE_SCHEMA = "astra.binance_host_state"
 STATE_SCHEMA_VERSION = 1
 
@@ -495,11 +498,12 @@ class _BinanceHttp:
         return self._state.used_weight
 
     def acknowledge_ban_cleared(self) -> None:
-        """Human action: lift an open-ended 418 stop after checking the ban has ended."""
+        """Human action: lift an open-ended 418 ban or 429 stop after checking it has ended."""
 
         with self._lock:
             self._state.banned = False
             self._state.banned_until = None
+            self._state.blocked_until = None
             self._state.save()
         log_event(_LOG, "binance.ban_acknowledged", level=logging.WARNING)
 
@@ -514,6 +518,11 @@ class _BinanceHttp:
                 until = state.banned_until.isoformat() if state.banned_until else "unknown (a human must acknowledge)"
                 raise BinanceIpBanned(f"{path}: IP banned by the provider (HTTP 418) until {until}; no request sent",
                                       state.banned_until)
+        if state.blocked_until == OPEN_ENDED:
+            raise BrokerRequestError(
+                "HTTP_429",
+                f"{path}: rate limited with an unusable Retry-After; stopped until a human calls acknowledge_ban_cleared()",
+            )
         if state.blocked_until is not None:
             remaining = (state.blocked_until - self._clock()).total_seconds()
             if remaining > 0:
@@ -571,7 +580,8 @@ class _BinanceHttp:
                 and entry["limit"] > 0
             ):
                 with self._lock:
-                    self._state.weight_limit = entry["limit"]
+                    # A provider value may lower the local budget, never raise it above the documented limit.
+                    self._state.weight_limit = min(entry["limit"], DOCUMENTED_REQUEST_WEIGHT_PER_MINUTE)
 
     # -- request -------------------------------------------------------------
 
@@ -609,21 +619,29 @@ class _BinanceHttp:
                     self._record_headers(response_headers)
                 if 200 <= status < 300:
                     return self._decode(endpoint.path, body)
-                retry_after = _retry_after_seconds(response_headers)
+                retry_after, retry_after_invalid = _retry_after_seconds(response_headers)
                 if status == 418:
-                    self._ban(endpoint.path, retry_after)
+                    self._ban(endpoint.path, retry_after)  # None (absent or invalid): open-ended, a human must acknowledge
                 if status == 429:
                     if retry_after is not None and retry_after <= self._max_retry_after and attempt < self._max_attempts:
                         log_event(_LOG, "binance.rate_limited", level=logging.WARNING, path=endpoint.path,
                                   retry_after=retry_after, attempt=attempt)
                         self._sleep(retry_after)
                         continue
-                    wait = retry_after if retry_after is not None else 60.0
+                    if retry_after_invalid:
+                        # Fail closed: an unparseable or out-of-range Retry-After never resumes on its own.
+                        until, wait = OPEN_ENDED, None
+                    else:
+                        wait = retry_after if retry_after is not None else DEFAULT_429_BLOCK_SECONDS
+                        until = self._clock() + timedelta(seconds=wait)
                     with self._lock:
-                        self._state.blocked_until = self._clock() + timedelta(seconds=wait)
+                        self._state.blocked_until = until
                         self._state.save()
-                    log_event(_LOG, "binance.rate_limited_stop", level=logging.WARNING, path=endpoint.path, retry_after=wait)
-                    raise BrokerRequestError("HTTP_429", f"{endpoint.path}: rate limit exceeded", wait, transient=True)
+                    log_event(_LOG, "binance.rate_limited_stop", level=logging.WARNING, path=endpoint.path,
+                              retry_after=wait, open_ended=wait is None)
+                    raise BrokerRequestError(
+                        "HTTP_429", f"{endpoint.path}: rate limit exceeded", wait, transient=wait is not None
+                    )
                 if status >= 500:
                     last_error = BrokerUnavailable(f"{endpoint.path}: HTTP {status} from provider (status unknown)")
                 elif status == 403:
@@ -698,19 +716,24 @@ def _read_capped(response: Any) -> bytes:
     return body
 
 
-def _retry_after_seconds(headers: Any) -> float | None:
+MAX_DOCUMENTED_BAN_SECONDS = 3 * 86_400  # bans "scale from 2 minutes to 3 days"
+
+
+def _retry_after_seconds(headers: Any) -> tuple[float | None, bool]:
+    """Return ``(seconds, invalid)``. ``(None, False)``: header absent; ``(None, True)``: unparseable or out of range."""
+
     if headers is None:
-        return None
+        return None, False
     value = headers.get("Retry-After")
     if value is None:
-        return None
+        return None, False
     try:
         seconds = float(str(value).strip())
     except ValueError:
-        return None
-    if seconds != seconds or seconds < 0 or seconds > 3 * 86_400 + 60:
-        return None
-    return seconds
+        return None, True
+    if not math.isfinite(seconds) or seconds < 0 or seconds > MAX_DOCUMENTED_BAN_SECONDS + 60:
+        return None, True
+    return seconds, False
 
 
 # -- shared clock handling ----------------------------------------------------
@@ -952,7 +975,18 @@ class BinanceSymbolRules:
             taker_fee=taker_fee,
             source=self.source,
             as_of=self.as_of,
+            min_price=self.min_price,
+            max_price=self.max_price,
+            max_notional=self.max_notional,
         )
+
+
+# Sanity bounds for exchangeInfo values (ASTRA choice, not a Binance rule). Real Spot ticks and steps
+# are within 1E-8 .. 1E+3 in the documented examples; anything outside 1E-18 .. 1E+9 is treated as a
+# data error rather than a rule, and no filter value may exceed 1E+18.
+MIN_STEP = Decimal("1E-18")
+MAX_STEP = Decimal("1E+9")
+MAX_FILTER_VALUE = Decimal("1E+18")
 
 
 def _decimals(step: Decimal) -> int:
@@ -963,7 +997,10 @@ def _decimals(step: Decimal) -> int:
 def _filter_decimal(entry: Mapping[str, Any], key: str, symbol: str) -> Decimal:
     if key not in entry:
         raise ValueError(f"{symbol}: filter {entry.get('filterType')} lacks {key}")
-    return to_decimal(entry[key], f"{symbol}.{key}")
+    value = to_decimal(entry[key], f"{symbol}.{key}")
+    if value < 0 or value > MAX_FILTER_VALUE:
+        raise ValueError(f"{symbol}: {key} {value} is outside the sanity range [0, {MAX_FILTER_VALUE}]")
+    return value
 
 
 def parse_symbol_rules(raw: object, as_of: datetime) -> BinanceSymbolRules:
@@ -1026,6 +1063,9 @@ def parse_symbol_rules(raw: object, as_of: datetime) -> BinanceSymbolRules:
         as_of=as_of,
     )
     # Validate through the spec model with neutral fees so bad rules fail here, not later.
+    for label, increment in (("tickSize", tick), ("stepSize", step)):
+        if not MIN_STEP <= increment <= MAX_STEP:
+            raise ValueError(f"{symbol}: {label} {increment} is outside the sanity range [{MIN_STEP}, {MAX_STEP}]")
     rules.to_spec(Decimal(0), Decimal(0))
     return rules
 
@@ -1155,16 +1195,17 @@ class BinanceSpotPublicData(_BinanceClient, MarketDataConnector):
         as_of = _ms_to_datetime(data["serverTime"], "serverTime") if "serverTime" in data else self._server_now()
         rules: dict[str, BinanceSymbolRules] = {}
         rejected: dict[str, str] = {}
-        for raw in data["symbols"]:
-            name = raw.get("symbol") if isinstance(raw, dict) else None
+        names = [raw.get("symbol") if isinstance(raw, dict) else None for raw in data["symbols"]]
+        # A symbol listed more than once is ambiguous: every copy is refused.
+        duplicated = {name for name in names if isinstance(name, str) and names.count(name) > 1}
+        for name, raw in zip(names, data["symbols"], strict=True):
+            if name in duplicated:
+                rejected[name] = "duplicate symbol entry; every copy refused"
+                continue
             try:
                 parsed = parse_symbol_rules(raw, as_of)
             except (TypeError, ValueError) as exc:
                 rejected[str(name)] = str(exc)
-                continue
-            if parsed.symbol in rules:
-                rejected[parsed.symbol] = "duplicate symbol entry"
-                rules.pop(parsed.symbol)
                 continue
             rules[parsed.symbol] = parsed
         self.rejected_symbols = rejected
