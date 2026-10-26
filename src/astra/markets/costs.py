@@ -26,7 +26,17 @@ from .common import require_aware, require_symbol, require_text, to_decimal
 from .crypto_spot import CryptoSpotSpec
 from .forex_cfd import ForexCfdSpec
 
-UNCALIBRATED = "UNCALIBRATED"
+
+class Calibration(StrEnum):
+    """Evidence label of an assumption. Only UNCALIBRATED exists: no value here is fitted to fill data yet.
+
+    A CALIBRATED member needs a reviewed calibration procedure and recorded evidence; free text is refused.
+    """
+
+    UNCALIBRATED = "UNCALIBRATED"
+
+
+UNCALIBRATED = Calibration.UNCALIBRATED
 FUNDING_COST_ENABLED = False
 _PRECISION = 60
 
@@ -114,10 +124,10 @@ class BookTicker:
             object.__setattr__(self, name, to_decimal(getattr(self, name), name))
         if self.bid_price <= 0 or self.ask_price <= 0:
             raise ValueError("bid and ask prices must be positive")
-        if self.bid_qty < 0 or self.ask_qty < 0:
-            raise ValueError("book quantities must not be negative")
-        if self.ask_price < self.bid_price:
-            raise ValueError("crossed book: ask below bid")
+        if self.bid_qty <= 0 or self.ask_qty <= 0:
+            raise ValueError("book quantities must be positive: an empty side is not a usable quote")
+        if self.ask_price <= self.bid_price:
+            raise ValueError("crossed or locked book: ask must be above bid")
         require_aware(self.as_of, "as_of")
         require_text(self.source, "source")
 
@@ -164,7 +174,7 @@ class SlippageAssumption:
     """Adverse slippage per side as a fraction of price. Not measured: ``UNCALIBRATED``."""
 
     fraction_per_side: Decimal = Decimal("0.0005")
-    calibration: str = UNCALIBRATED
+    calibration: Calibration = UNCALIBRATED
     note: str = "engineering placeholder; no fill data has been used to estimate it"
 
     def __post_init__(self) -> None:
@@ -172,7 +182,7 @@ class SlippageAssumption:
         if not Decimal(0) <= value < Decimal(1):
             raise ValueError("fraction_per_side must be in [0, 1)")
         object.__setattr__(self, "fraction_per_side", value)
-        require_text(self.calibration, "calibration")
+        object.__setattr__(self, "calibration", Calibration(self.calibration))
         require_text(self.note, "note")
 
 
@@ -319,7 +329,7 @@ class FundingCostAssumption:
     next_funding_time: datetime
     source: str
     as_of: datetime
-    calibration: str = UNCALIBRATED
+    calibration: Calibration = UNCALIBRATED
 
     def __post_init__(self) -> None:
         require_symbol(self.symbol)
@@ -329,13 +339,14 @@ class FundingCostAssumption:
         require_aware(self.next_funding_time, "next_funding_time")
         require_text(self.source, "source")
         require_aware(self.as_of, "as_of")
-        require_text(self.calibration, "calibration")
+        object.__setattr__(self, "calibration", Calibration(self.calibration))
 
 
 __all__ = [
     "FUNDING_COST_ENABLED",
     "UNCALIBRATED",
     "BookTicker",
+    "Calibration",
     "CommissionBasis",
     "CryptoSpotCostModel",
     "CryptoSpotFeeSchedule",

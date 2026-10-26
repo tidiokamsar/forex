@@ -272,11 +272,9 @@ from test_market_risk import buy, context  # noqa: E402
 
 
 class MarketRiskDecisionTests(unittest.TestCase):
-    # CONFIRMED DEFECT MV-A-6 (low): a decision is plain data that anyone can construct. MarketRiskDecision
-    # accepts verdict ALLOW with mode LIVE (or for a derivatives market type), carrying the real policy name
-    # and version, so a downstream consumer cannot tell it from a policy output. Harmless today (no consumer
-    # and no crypto order path), but it is the object a future gate would trust.
-    @unittest.expectedFailure
+    # FIXED (was CONFIRMED DEFECT MV-A-6, low): MarketRiskDecision refuses ALLOW outside the modes allowed per
+    # market type (crypto spot: SIMULATION only; derivatives: never; the Forex pre-check ALLOW stays advisory)
+    # and an ALLOW without matching parameters and fingerprint. A decision is still data, not an authority token.
     def test_allow_decision_outside_simulation_cannot_be_constructed(self):
         for market_type, mode in ((MarketType.CRYPTO_SPOT, "LIVE"), (MarketType.CRYPTO_SPOT, "DEMO"),
                                   (MarketType.CRYPTO_FUTURES, "SIMULATION")):
@@ -293,24 +291,24 @@ class MarketRiskDecisionTests(unittest.TestCase):
 
 
 class LooserPolicyTests(unittest.TestCase):
-    # CONFIRMED DEFECT MV-A-7 (low): a looser spot policy reports the reviewed name and version. (a) A subclass
-    # overriding _mode_reasons returns ALLOW in LIVE as "crypto_spot"/"crypto-spot-1"; (b) the ceilings are
-    # read from module constants at construction, so patching MAX_ORDER_NOTIONAL_FRACTION admits a 100% cap
-    # under the same version; (c) SlippageAssumption(0) is accepted (no floor), also under the same version.
-    # Decisions record name and version but not the parameter values they ran with.
-    @unittest.expectedFailure
+    # FIXED (was CONFIRMED DEFECT MV-A-7, low): (a) CryptoSpotRiskPolicy is final (__init_subclass__ raises
+    # TypeError, so the subclass below cannot be defined); (b) ceilings are literals in
+    # CryptoSpotRiskParameters, not patchable module globals; (c) slippage is floored at the reviewed 0.0005.
+    # Every decision records the parameters and their sha256 fingerprint.
     def test_subclass_cannot_allow_live_under_the_reviewed_version(self):
-        class Loose(CryptoSpotRiskPolicy):
-            __slots__ = ()
+        try:
+            class Loose(CryptoSpotRiskPolicy):
+                __slots__ = ()
 
-            @staticmethod
-            def _mode_reasons(mode):
-                return []
+                @staticmethod
+                def _mode_reasons(mode):
+                    return []
+        except TypeError:
+            return  # the policy is final
 
         decision = Loose().evaluate(buy(), context(mode=RunMode.LIVE))
         self.assertFalse(decision.allowed and decision.policy_version == "crypto-spot-1")
 
-    @unittest.expectedFailure
     def test_patched_ceiling_cannot_build_a_looser_policy_under_the_same_version(self):
         with patch.object(policies_module, "MAX_ORDER_NOTIONAL_FRACTION", Decimal("1")), \
                 patch.object(policies_module, "MAX_DAILY_NOTIONAL_FRACTION", Decimal("1")):
@@ -321,7 +319,6 @@ class LooserPolicyTests(unittest.TestCase):
                 return
         self.assertNotEqual(loose.version, CryptoSpotRiskPolicy().version)
 
-    @unittest.expectedFailure
     def test_zero_slippage_is_not_accepted_under_the_reviewed_version(self):
         with self.assertRaises(ValueError):
             CryptoSpotRiskPolicy(slippage=SlippageAssumption(Decimal(0)))
@@ -335,20 +332,18 @@ class LooserPolicyTests(unittest.TestCase):
 
 
 class BuyCapTests(unittest.TestCase):
-    # CONFIRMED DEFECT MV-A-8 (low-medium): the anti-martingale rule fails open. After a realised loss the
-    # "size never grows" check runs only when last_buy_notional is given; with None (unknown) a BUY four times
-    # the last size is ALLOWED, against the module's rule that None means unknown and is refused.
-    @unittest.expectedFailure
+    # FIXED (was CONFIRMED DEFECT MV-A-8, low-medium): after a negative day P&L an unknown last_buy_notional
+    # refuses (last_buy_notional_unknown); the ledger's last booked BUY also bounds the caller's value.
     def test_unknown_last_buy_after_a_loss_is_refused(self):
         decision = CryptoSpotRiskPolicy().evaluate(
             buy(quantity=Decimal("0.03")), context(day_realized_pnl=Decimal("-50"), last_buy_notional=None)
         )
         self.assertFalse(decision.allowed)
 
-    # CONFIRMED DEFECT MV-A-9 (low, design): the daily cap trusts the caller's day_buy_notional; the policy keeps
-    # no ledger and defines no day boundary. Splitting a 19%-of-balance buy into ten 1.9% orders, each evaluated
-    # with day_buy_notional=0, is allowed ten times over a 10% daily cap.
-    @unittest.expectedFailure
+    # FIXED (was CONFIRMED DEFECT MV-A-9, low, design): the policy books every ALLOWED BUY in an append-only
+    # SpotBuyLedger (UTC day, per venue and quote asset) and checks the cap atomically against it; the caller's
+    # day_buy_notional is only an extra floor. Residual: position, last_buy_notional and expected_edge_fraction
+    # remain caller-supplied, and the ledger is in memory (shared per policy instance).
     def test_order_splitting_cannot_exceed_the_daily_cap(self):
         policy = CryptoSpotRiskPolicy()
         allowed = [policy.evaluate(buy(intent_id=f"split-{i}", quantity=Decimal("0.038")), context()).allowed

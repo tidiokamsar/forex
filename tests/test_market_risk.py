@@ -16,6 +16,7 @@ from astra.markets.costs import (
     FUNDING_COST_ENABLED,
     UNCALIBRATED,
     BookTicker,
+    Calibration,
     CommissionBasis,
     CryptoSpotCostModel,
     CryptoSpotFeeSchedule,
@@ -30,12 +31,15 @@ from astra.markets.risk_policies import (
     CryptoFuturesRiskPolicy,
     CryptoSpotOrderIntent,
     CryptoSpotRiskContext,
+    CryptoSpotRiskParameters,
     CryptoSpotRiskPolicy,
     FixedExpiryOptionsRiskPolicy,
     ForexCfdPreCheck,
     MarketRiskDecision,
+    SpotBuyLedger,
     SpotPosition,
     Verdict,
+    canonical_parameters,
     policy_for,
 )
 from astra.models import CostModel, RunMode
@@ -93,7 +97,7 @@ def fees(**overrides):
     return CryptoSpotFeeSchedule(**fields)
 
 
-def balances(quote="100000", base="0.5", extra=()):
+def balances(quote="100000", base="0", extra=()):
     as_of = NOW - timedelta(seconds=5)
     return (
         Balance("USDT", Decimal(quote), Decimal(0), as_of),
@@ -102,10 +106,18 @@ def balances(quote="100000", base="0.5", extra=()):
     )
 
 
+def balances_at(as_of, base="0"):
+    return (Balance("USDT", Decimal("100000"), Decimal(0), as_of), Balance("BTC", Decimal(base), Decimal(0), as_of))
+
+
+HOLDING = {"balances": balances(base="0.5")}
+
+
 def context(**overrides):
     fields = {
         "mode": RunMode.SIMULATION,
         "now": NOW,
+        "venue_id": "binance_spot",
         "spec": spot_spec(),
         "book": book(),
         "balances": balances(),
@@ -152,7 +164,7 @@ POLICY = CryptoSpotRiskPolicy()
 
 class CryptoSpotAllowTests(unittest.TestCase):
     def test_simulation_buy_is_allowed_with_rounded_values_and_version(self):
-        decision = POLICY.evaluate(buy(quantity=Decimal("0.0200009"), limit_price=Decimal("50000.009")), context())
+        decision = CryptoSpotRiskPolicy().evaluate(buy(quantity=Decimal("0.0200009"), limit_price=Decimal("50000.009")), context())
         self.assertEqual(decision.verdict, Verdict.ALLOW, decision.reasons)
         self.assertTrue(decision.allowed)
         self.assertEqual(decision.quantity, Decimal("0.02000"))
@@ -165,12 +177,12 @@ class CryptoSpotAllowTests(unittest.TestCase):
         self.assertTrue(any(UNCALIBRATED in note for note in decision.notes))
 
     def test_simulation_sell_within_free_base_is_allowed(self):
-        decision = POLICY.evaluate(sell(), context())
+        decision = CryptoSpotRiskPolicy().evaluate(sell(), context(**HOLDING))
         self.assertEqual(decision.verdict, Verdict.ALLOW, decision.reasons)
 
     def test_tightening_a_stop_is_allowed(self):
         position = SpotPosition(Decimal("0.1"), Decimal("50000"), Decimal("49000"))
-        self.assertTrue(POLICY.evaluate_stop_change(position, Decimal("49500")).allowed)
+        self.assertTrue(CryptoSpotRiskPolicy().evaluate_stop_change(position, Decimal("49500")).allowed)
 
 
 class CryptoSpotRefusalTests(unittest.TestCase):
@@ -180,152 +192,194 @@ class CryptoSpotRefusalTests(unittest.TestCase):
         self.assertEqual(decision.policy_version, POLICY.version)
 
     def test_only_simulation_can_allow(self):
-        demo = POLICY.evaluate(buy(), context(mode=RunMode.DEMO))
+        demo = CryptoSpotRiskPolicy().evaluate(buy(), context(mode=RunMode.DEMO))
         self.assert_refused(demo, "crypto_spot_allowed_only_in_simulation_in_this_lot")
         self.assertIn("venue_trading_not_enabled_in_this_lot", demo.reasons)
-        self.assert_refused(POLICY.evaluate(buy(), context(mode=RunMode.LIVE)), "live_mode_not_supported")
-        self.assert_refused(POLICY.evaluate(buy(), context(mode="SIMULATION")), "invalid_mode")
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(buy(), context(mode=RunMode.LIVE)), "live_mode_not_supported")
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(buy(), context(mode="SIMULATION")), "invalid_mode")
 
     def test_symbol_not_trading(self):
-        decision = POLICY.evaluate(buy(), context(spec=spot_spec(status="HALT")))
+        decision = CryptoSpotRiskPolicy().evaluate(buy(), context(spec=spot_spec(status="HALT")))
         self.assert_refused(decision, "symbol_not_trading")
         self.assertEqual(decision.reasons.count("symbol_not_trading"), 1)
 
     def test_stale_and_future_quote_and_spec(self):
-        self.assert_refused(POLICY.evaluate(buy(), context(book=book(as_of=NOW - timedelta(seconds=6)))), "quote_stale")
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(buy(), context(book=book(as_of=NOW - timedelta(seconds=6)))), "quote_stale")
         self.assert_refused(
-            POLICY.evaluate(buy(), context(book=book(as_of=NOW + timedelta(seconds=1)))), "quote_future_dated"
+            CryptoSpotRiskPolicy().evaluate(buy(), context(book=book(as_of=NOW + timedelta(seconds=1)))), "quote_future_dated"
         )
         self.assert_refused(
-            POLICY.evaluate(buy(), context(spec=spot_spec(as_of=NOW - timedelta(seconds=301)))), "spec_stale"
+            CryptoSpotRiskPolicy().evaluate(buy(), context(spec=spot_spec(as_of=NOW - timedelta(seconds=301)))), "spec_stale"
         )
         stale_balance = (Balance("USDT", Decimal("100000"), Decimal(0), NOW - timedelta(minutes=5)), balances()[1])
-        self.assert_refused(POLICY.evaluate(buy(), context(balances=stale_balance)), "balance_USDT_stale")
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(buy(), context(balances=stale_balance)), "balance_USDT_stale")
         self.assert_refused(
-            POLICY.evaluate(buy(), context(fees=fees(as_of=NOW - timedelta(days=2)))), "fees_stale"
+            CryptoSpotRiskPolicy().evaluate(buy(), context(fees=fees(as_of=NOW - timedelta(days=2)))), "fees_stale"
         )
 
     def test_unknown_market_data(self):
-        self.assert_refused(POLICY.evaluate(buy(), context(spec=None)), "spec_unknown")
-        self.assert_refused(POLICY.evaluate(buy(), context(book=None)), "quote_unknown")
-        self.assert_refused(POLICY.evaluate(buy(), context(book=book(symbol="ETHUSDT"))), "quote_symbol_mismatch")
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(buy(), context(spec=None)), "spec_unknown")
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(buy(), context(book=None)), "quote_unknown")
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(buy(), context(book=book(symbol="ETHUSDT"))), "quote_symbol_mismatch")
 
     def test_unknown_balances(self):
-        self.assert_refused(POLICY.evaluate(buy(), context(balances=None)), "balances_unknown")
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(buy(), context(balances=None)), "balances_unknown")
         only_btc = (balances()[1],)
-        self.assert_refused(POLICY.evaluate(buy(), context(balances=only_btc)), "balance_unknown:USDT")
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(buy(), context(balances=only_btc)), "balance_unknown:USDT")
         only_usdt = (balances()[0],)
-        self.assert_refused(POLICY.evaluate(sell(), context(balances=only_usdt)), "balance_unknown:BTC")
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(sell(), context(balances=only_usdt)), "balance_unknown:BTC")
 
     def test_unknown_fees_block_net_expectancy(self):
-        decision = POLICY.evaluate(buy(), context(fees=None))
+        decision = CryptoSpotRiskPolicy().evaluate(buy(), context(fees=None))
         self.assert_refused(decision, "fees_unknown")
         self.assertIsNone(decision.estimated_fee_quote)
-        self.assert_refused(POLICY.evaluate(buy(), context(fees=fees(symbol="ETHUSDT"))), "fees_symbol_mismatch")
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(buy(), context(fees=fees(symbol="ETHUSDT"))), "fees_symbol_mismatch")
 
     def test_third_asset_fee_needs_price_and_balance(self):
         bnb_fees = fees(fee_asset="BNB")
-        self.assert_refused(POLICY.evaluate(buy(), context(fees=bnb_fees)), "fee_asset_conversion_unknown")
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(buy(), context(fees=bnb_fees)), "fee_asset_conversion_unknown")
         self.assert_refused(
-            POLICY.evaluate(buy(), context(fees=bnb_fees, fee_asset_price_in_quote=Decimal("500"))), "balance_unknown:BNB"
+            CryptoSpotRiskPolicy().evaluate(buy(), context(fees=bnb_fees, fee_asset_price_in_quote=Decimal("500"), fee_asset_price_as_of=NOW)), "balance_unknown:BNB"
         )
         poor = balances(extra=(Balance("BNB", Decimal("0.001"), Decimal(0), NOW),))
         self.assert_refused(
-            POLICY.evaluate(buy(), context(fees=bnb_fees, balances=poor, fee_asset_price_in_quote=Decimal("500"))),
+            CryptoSpotRiskPolicy().evaluate(buy(), context(fees=bnb_fees, balances=poor, fee_asset_price_in_quote=Decimal("500"), fee_asset_price_as_of=NOW)),
             "insufficient_fee_asset_balance",
         )
         rich = balances(extra=(Balance("BNB", Decimal("1"), Decimal(0), NOW),))
-        allowed = POLICY.evaluate(buy(), context(fees=bnb_fees, balances=rich, fee_asset_price_in_quote=Decimal("500")))
+        allowed = CryptoSpotRiskPolicy().evaluate(buy(), context(fees=bnb_fees, balances=rich, fee_asset_price_in_quote=Decimal("500"), fee_asset_price_as_of=NOW))
         self.assertTrue(allowed.allowed, allowed.reasons)
+        no_age = CryptoSpotRiskPolicy().evaluate(buy(), context(fees=bnb_fees, balances=rich, fee_asset_price_in_quote=Decimal("500")))
+        self.assertIn("fee_asset_price_timestamp_invalid", no_age.reasons)
+        stale = CryptoSpotRiskPolicy().evaluate(buy(), context(fees=bnb_fees, balances=rich, fee_asset_price_in_quote=Decimal("500"),
+                                                               fee_asset_price_as_of=NOW - timedelta(seconds=6)))
+        self.assertIn("fee_asset_price_stale", stale.reasons)
 
     def test_expected_edge_required_and_net_expectancy_positive(self):
-        self.assert_refused(POLICY.evaluate(buy(expected_edge_fraction=None), context()), "expected_edge_unknown")
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(buy(expected_edge_fraction=None), context()), "expected_edge_unknown")
         # Round trip: 2 * 0.001 fee + ~0.00002 spread + 2 * 0.0005 slippage > 0.003.
         self.assert_refused(
-            POLICY.evaluate(buy(expected_edge_fraction=Decimal("0.003")), context()), "net_expectancy_not_positive"
+            CryptoSpotRiskPolicy().evaluate(buy(expected_edge_fraction=Decimal("0.003")), context()), "net_expectancy_not_positive"
         )
 
     def test_rounding_to_zero_and_minimum_notional(self):
-        self.assert_refused(POLICY.evaluate(buy(quantity=Decimal("0.000009")), context()), "invalid_quantity")
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(buy(quantity=Decimal("0.000009")), context()), "invalid_quantity")
         self.assert_refused(
-            POLICY.evaluate(buy(quantity=Decimal("0.00001")), context()), "notional_below_minimum"
+            CryptoSpotRiskPolicy().evaluate(buy(quantity=Decimal("0.00001")), context()), "notional_below_minimum"
         )
-        self.assert_refused(POLICY.evaluate(buy(quantity=0.02), context()), "invalid_quantity")
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(buy(quantity=0.02), context()), "invalid_quantity")
 
     def test_order_notional_cap(self):
         # 0.05 BTC = 2500 USDT > 2% of 100000.
-        self.assert_refused(POLICY.evaluate(buy(quantity=Decimal("0.05")), context()), "order_notional_exceeds_cap")
-        self.assertTrue(POLICY.evaluate(buy(quantity=Decimal("0.04")), context()).allowed)
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(buy(quantity=Decimal("0.05")), context()), "order_notional_exceeds_cap")
+        self.assertTrue(CryptoSpotRiskPolicy().evaluate(buy(quantity=Decimal("0.04")), context()).allowed)
 
     def test_daily_notional_cap(self):
         self.assert_refused(
-            POLICY.evaluate(buy(), context(day_buy_notional=Decimal("9500"))), "daily_notional_exceeds_cap"
+            CryptoSpotRiskPolicy().evaluate(buy(), context(day_buy_notional=Decimal("9500"))), "daily_notional_exceeds_cap"
         )
-        self.assertTrue(POLICY.evaluate(buy(), context(day_buy_notional=Decimal("9000"))).allowed)
-        self.assert_refused(POLICY.evaluate(buy(), context(day_buy_notional=None)), "daily_notional_unknown")
+        self.assertTrue(CryptoSpotRiskPolicy().evaluate(buy(), context(day_buy_notional=Decimal("9000"))).allowed)
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(buy(), context(day_buy_notional=None)), "daily_notional_unknown")
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(buy(), context(day_buy_notional=Decimal(-1))), "daily_notional_invalid")
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(buy(), context(venue_id="")), "venue_unknown")
 
     def test_no_leverage(self):
-        self.assert_refused(POLICY.evaluate(buy(), context(borrowing_enabled=True)), "borrowing_enabled_or_unknown")
-        self.assert_refused(POLICY.evaluate(buy(), context(borrowing_enabled=None)), "borrowing_enabled_or_unknown")
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(buy(), context(borrowing_enabled=True)), "borrowing_enabled_or_unknown")
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(buy(), context(borrowing_enabled=None)), "borrowing_enabled_or_unknown")
         # Notional above free quote: cannot be financed by borrowing.
         small = balances(quote="900")
-        self.assert_refused(POLICY.evaluate(buy(), context(balances=small)), "insufficient_free_quote_balance")
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(buy(), context(balances=small)), "insufficient_free_quote_balance")
         with self.assertRaises(ValueError):
             CryptoSpotRiskPolicy(leverage=2)
         with self.assertRaises(ValueError):
             CryptoSpotRiskPolicy(leverage=True)
 
     def test_no_shorting(self):
-        self.assert_refused(POLICY.evaluate(sell(quantity=Decimal("0.6")), context()), "sell_exceeds_free_base_balance")
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(sell(quantity=Decimal("0.6")), context(**HOLDING)), "sell_exceeds_free_base_balance")
         self.assert_refused(
-            POLICY.evaluate(sell(), context(balances=balances(base="0"))), "sell_exceeds_free_base_balance"
+            CryptoSpotRiskPolicy().evaluate(sell(), context(balances=balances(base="0"))), "sell_exceeds_free_base_balance"
         )
         locked = (balances()[0], Balance("BTC", Decimal("0.01"), Decimal("1"), NOW))
-        self.assert_refused(POLICY.evaluate(sell(), context(balances=locked)), "sell_exceeds_free_base_balance")
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(sell(), context(balances=locked)), "sell_exceeds_free_base_balance")
         with self.assertRaises(ValueError):
             CryptoSpotRiskPolicy(allow_short=True)
 
+    def test_holdings_without_position_state_are_refused(self):
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(buy(), context(**HOLDING)), "position_unknown")
+        locked_only = (balances()[0], Balance("BTC", Decimal(0), Decimal("0.1"), NOW))
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(buy(), context(balances=locked_only)), "position_unknown")
+        winner = SpotPosition(Decimal("0.5"), Decimal("48000"), Decimal("47000"))
+        self.assertTrue(CryptoSpotRiskPolicy().evaluate(buy(), context(position=winner, **HOLDING)).allowed)
+
+    def test_limit_price_band(self):
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(sell(limit_price=Decimal("500.00")), context(**HOLDING)), "limit_price_outside_band")
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(sell(limit_price=Decimal("49499.99")), context(**HOLDING)), "limit_price_outside_band")
+        self.assertTrue(CryptoSpotRiskPolicy().evaluate(sell(limit_price=Decimal("49500.00")), context(**HOLDING)).allowed)
+        self.assertTrue(CryptoSpotRiskPolicy().evaluate(sell(limit_price=Decimal("60000.00")), context(**HOLDING)).allowed)
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(buy(limit_price=Decimal("50501.02"), quantity=Decimal("0.01")), context()), "limit_price_outside_band")
+        self.assertTrue(CryptoSpotRiskPolicy().evaluate(buy(limit_price=Decimal("50501.01"), quantity=Decimal("0.01")), context()).allowed)
+        with self.assertRaises(ValueError):
+            CryptoSpotRiskPolicy(max_limit_deviation_fraction=Decimal("0.05"))
+
     def test_kill_switch(self):
-        self.assert_refused(POLICY.evaluate(buy(), context(kill_switch_active=True)), "kill_switch_active_or_unknown")
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(buy(), context(kill_switch_active=True)), "kill_switch_active_or_unknown")
 
     def test_malformed_inputs(self):
-        self.assert_refused(POLICY.evaluate(buy(), object()), "invalid_risk_context")
-        self.assert_refused(POLICY.evaluate(object(), context()), "invalid_order_intent")
-        self.assert_refused(POLICY.evaluate(buy(created_at=datetime(2026, 1, 1)), context()), "invalid_intent_timestamp")  # noqa: DTZ001
-        self.assert_refused(POLICY.evaluate(buy(), context(now=datetime(2026, 1, 1))), "invalid_reference_time")  # noqa: DTZ001
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(buy(), object()), "invalid_risk_context")
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(object(), context()), "invalid_order_intent")
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(buy(created_at=datetime(2026, 1, 1)), context()), "invalid_intent_timestamp")  # noqa: DTZ001
+        self.assert_refused(CryptoSpotRiskPolicy().evaluate(buy(), context(now=datetime(2026, 1, 1))), "invalid_reference_time")  # noqa: DTZ001
 
 
 class AntiMartingaleTests(unittest.TestCase):
     def test_martingale_doubling_after_loss_is_refused(self):
         ctx = context(day_realized_pnl=Decimal("-50"), last_buy_notional=Decimal("500"))
-        decision = POLICY.evaluate(buy(), ctx)  # 1000 after a 500 loser: doubling.
+        decision = CryptoSpotRiskPolicy().evaluate(buy(), ctx)  # 1000 after a 500 loser: doubling.
         self.assertIn("risk_increase_after_loss", decision.reasons)
 
     def test_same_or_smaller_size_after_loss_is_not_flagged(self):
         ctx = context(day_realized_pnl=Decimal("-50"), last_buy_notional=Decimal("1000"))
-        self.assertTrue(POLICY.evaluate(buy(), ctx).allowed)
+        self.assertTrue(CryptoSpotRiskPolicy().evaluate(buy(), ctx).allowed)
+
+    def test_unknown_last_buy_after_loss_is_refused(self):
+        decision = CryptoSpotRiskPolicy().evaluate(buy(), context(day_realized_pnl=Decimal("-50")))
+        self.assertIn("last_buy_notional_unknown", decision.reasons)
+        self.assertIn("last_buy_notional_invalid",
+                      CryptoSpotRiskPolicy().evaluate(buy(), context(day_realized_pnl=Decimal("-50"), last_buy_notional=Decimal(0))).reasons)
+
+    def test_ledger_bounds_the_callers_last_buy(self):
+        policy = CryptoSpotRiskPolicy()
+        self.assertTrue(policy.evaluate(buy(quantity=Decimal("0.01")), context()).allowed)  # books 500
+        omitted = policy.evaluate(buy(intent_id="b2", quantity=Decimal("0.01")), context(day_realized_pnl=Decimal("-50")))
+        self.assertIn("last_buy_notional_unknown", omitted.reasons)
+        # A caller cannot raise the reference above what the ledger booked.
+        lied = policy.evaluate(buy(intent_id="b3"), context(day_realized_pnl=Decimal("-50"), last_buy_notional=Decimal("5000")))
+        self.assertIn("risk_increase_after_loss", lied.reasons)
+        same = policy.evaluate(buy(intent_id="b4", quantity=Decimal("0.01")),
+                               context(day_realized_pnl=Decimal("-50"), last_buy_notional=Decimal("5000")))
+        self.assertTrue(same.allowed, same.reasons)
 
     def test_unknown_pnl_is_refused(self):
-        self.assertIn("day_realized_pnl_unknown", POLICY.evaluate(buy(), context(day_realized_pnl=None)).reasons)
+        self.assertIn("day_realized_pnl_unknown", CryptoSpotRiskPolicy().evaluate(buy(), context(day_realized_pnl=None)).reasons)
 
     def test_adding_to_loser_is_refused(self):
         position = SpotPosition(Decimal("0.1"), Decimal("52000"), Decimal("49000"))
-        decision = POLICY.evaluate(buy(), context(position=position))
+        decision = CryptoSpotRiskPolicy().evaluate(buy(), context(position=position))
         self.assertIn("adding_to_losing_position", decision.reasons)
         winner = SpotPosition(Decimal("0.1"), Decimal("48000"), Decimal("47000"))
-        self.assertTrue(POLICY.evaluate(buy(), context(position=winner)).allowed)
+        self.assertTrue(CryptoSpotRiskPolicy().evaluate(buy(), context(position=winner)).allowed)
 
     def test_buy_without_stop_is_refused(self):
-        self.assertIn("stop_required", POLICY.evaluate(buy(stop_price=None), context()).reasons)
-        self.assertIn("invalid_stop", POLICY.evaluate(buy(stop_price=Decimal("51000")), context()).reasons)
+        self.assertIn("stop_required", CryptoSpotRiskPolicy().evaluate(buy(stop_price=None), context()).reasons)
+        self.assertIn("invalid_stop", CryptoSpotRiskPolicy().evaluate(buy(stop_price=Decimal("51000")), context()).reasons)
         unprotected = SpotPosition(Decimal("0.1"), Decimal("48000"), None)
-        self.assertIn("open_position_without_stop", POLICY.evaluate(buy(), context(position=unprotected)).reasons)
+        self.assertIn("open_position_without_stop", CryptoSpotRiskPolicy().evaluate(buy(), context(position=unprotected)).reasons)
 
     def test_stop_removal_and_widening_are_refused(self):
         position = SpotPosition(Decimal("0.1"), Decimal("50000"), Decimal("49000"))
-        self.assertIn("stop_removal_refused", POLICY.evaluate_stop_change(position, None).reasons)
-        self.assertIn("stop_widening_refused", POLICY.evaluate_stop_change(position, Decimal("48000")).reasons)
-        self.assertIn("live_mode_not_supported", POLICY.evaluate_stop_change(position, Decimal("49500"), mode=RunMode.LIVE).reasons)
+        self.assertIn("stop_removal_refused", CryptoSpotRiskPolicy().evaluate_stop_change(position, None).reasons)
+        self.assertIn("stop_widening_refused", CryptoSpotRiskPolicy().evaluate_stop_change(position, Decimal("48000")).reasons)
+        self.assertIn("live_mode_not_supported", CryptoSpotRiskPolicy().evaluate_stop_change(position, Decimal("49500"), mode=RunMode.LIVE).reasons)
 
     def test_policy_has_no_loss_scaling_parameter(self):
         names = {f.name for f in dataclasses.fields(CryptoSpotRiskPolicy)}
@@ -333,7 +387,109 @@ class AntiMartingaleTests(unittest.TestCase):
             self.assertFalse(any(forbidden in name for name in names), forbidden)
 
 
+class SpotBuyLedgerTests(unittest.TestCase):
+    def test_allowed_buys_are_booked_and_split_orders_hit_the_daily_cap(self):
+        policy = CryptoSpotRiskPolicy()
+        results = [policy.evaluate(buy(intent_id=f"s{i}", quantity=Decimal("0.038")), context()) for i in range(8)]
+        self.assertEqual([r.allowed for r in results], [True] * 5 + [False] * 3)
+        self.assertIn("daily_notional_exceeds_cap", results[5].reasons)
+        records = policy.ledger.records
+        self.assertEqual(len(records), 5)
+        self.assertEqual({r.policy_fingerprint for r in records}, {policy.parameters_fingerprint})
+        self.assertEqual(policy.ledger.day_total("binance_spot", "USDT", NOW.date()), Decimal("9500.0000"))
+
+    def test_caller_floor_can_only_raise_the_day_total(self):
+        policy = CryptoSpotRiskPolicy()
+        for i in range(5):
+            policy.evaluate(buy(intent_id=f"f{i}", quantity=Decimal("0.038")), context())
+        # Claiming nothing was bought today does not reset the ledger total.
+        self.assertIn("daily_notional_exceeds_cap",
+                      policy.evaluate(buy(intent_id="f5", quantity=Decimal("0.038")), context(day_buy_notional=Decimal(0))).reasons)
+
+    def test_refused_decisions_are_not_booked(self):
+        policy = CryptoSpotRiskPolicy()
+        policy.evaluate(buy(), context(mode=RunMode.DEMO))
+        policy.evaluate(buy(quantity=Decimal("0.05")), context())
+        self.assertEqual(policy.ledger.records, ())
+
+    def test_day_boundary_is_utc_and_time_cannot_go_back(self):
+        policy = CryptoSpotRiskPolicy()
+
+        def at(moment):
+            return context(now=moment, book=book(as_of=moment), spec=spot_spec(as_of=moment), balances=balances_at(moment),
+                           fees=fees(as_of=moment))
+
+        late = NOW.replace(hour=23, minute=59, second=50)
+        for i in range(5):
+            self.assertTrue(policy.evaluate(buy(intent_id=f"d{i}", quantity=Decimal("0.038")), at(late)).allowed)
+        self.assertFalse(policy.evaluate(buy(intent_id="d5", quantity=Decimal("0.038")), at(late)).allowed)
+        nxt = late + timedelta(seconds=20)
+        self.assertTrue(policy.evaluate(buy(intent_id="d6", quantity=Decimal("0.038")), at(nxt)).allowed)
+        backdated = policy.evaluate(buy(intent_id="d7", quantity=Decimal("0.038")), at(late - timedelta(days=1)))
+        self.assertIn("ledger_time_regression", backdated.reasons)
+
+    def test_cap_is_shared_across_symbols_with_the_same_quote_asset(self):
+        policy = CryptoSpotRiskPolicy()
+        for i in range(5):
+            policy.evaluate(buy(intent_id=f"x{i}", quantity=Decimal("0.038")), context())
+        eth = spot_spec(symbol="ETHUSDT", base_asset="ETH")
+        eth_ctx = context(spec=eth, book=book(symbol="ETHUSDT"), fees=fees(symbol="ETHUSDT"),
+                          balances=(*balances(), Balance("ETH", Decimal(0), Decimal(0), NOW)))
+        decision = policy.evaluate(buy(intent_id="e1", symbol="ETHUSDT", quantity=Decimal("0.038")), eth_ctx)
+        self.assertIn("daily_notional_exceeds_cap", decision.reasons)
+        other_venue = policy.evaluate(buy(intent_id="o1", quantity=Decimal("0.038")), context(venue_id="other_venue"))
+        self.assertTrue(other_venue.allowed, other_venue.reasons)
+
+    def test_ledger_has_no_delete_or_update_api(self):
+        public = {n for n in dir(SpotBuyLedger) if not n.startswith("_")}
+        self.assertEqual(public, {"records", "day_total", "last_buy_notional"})
+        self.assertIsInstance(CryptoSpotRiskPolicy().ledger.records, tuple)
+
+    def test_replace_keeps_the_same_ledger(self):
+        policy = CryptoSpotRiskPolicy()
+        stricter = replace(policy, version="crypto-spot-1-strict", max_order_notional_fraction=Decimal("0.01"))
+        self.assertIs(stricter.ledger, policy.ledger)
+
+
 class CryptoSpotPolicyValidationTests(unittest.TestCase):
+    def test_policy_is_final(self):
+        with self.assertRaises(TypeError):
+            class Sub(CryptoSpotRiskPolicy):
+                pass
+
+    def test_ceilings_ignore_patched_module_constants(self):
+        from unittest.mock import patch
+
+        with patch.object(policies_module, "MAX_ORDER_NOTIONAL_FRACTION", Decimal("1")), \
+                patch.object(policies_module, "MAX_DAILY_NOTIONAL_FRACTION", Decimal("1")):
+            with self.assertRaises(ValueError):
+                CryptoSpotRiskPolicy(max_order_notional_fraction=Decimal("0.5"), max_daily_notional_fraction=Decimal("1"))
+        with self.assertRaises(ValueError):
+            CryptoSpotRiskParameters(max_daily_notional_fraction=Decimal("0.2"))
+
+    def test_slippage_floor_and_label(self):
+        for value in ("0", "0.0001", "0.0004999"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                CryptoSpotRiskPolicy(slippage=SlippageAssumption(Decimal(value)))
+        with self.assertRaises(ValueError):
+            SlippageAssumption(Decimal("0.001"), calibration="CALIBRATED")
+        self.assertIs(SlippageAssumption(calibration="UNCALIBRATED").calibration, Calibration.UNCALIBRATED)
+        self.assertTrue(CryptoSpotRiskPolicy(version="v-slip", slippage=SlippageAssumption(Decimal("0.001"))).evaluate(
+            buy(expected_edge_fraction=Decimal("0.02")), context()).allowed)
+
+    def test_every_decision_records_parameters_and_fingerprint(self):
+        policy = CryptoSpotRiskPolicy()
+        decisions = (policy.evaluate(buy(), context()), policy.evaluate(object(), object()),
+                     policy.evaluate_stop_change(None, None))
+        for decision in decisions:
+            self.assertEqual(decision.parameters_fingerprint, policy.parameters_fingerprint)
+            self.assertIn(("max_order_notional_fraction", "0.02"), decision.parameters)
+            self.assertIn(("slippage_calibration", "UNCALIBRATED"), decision.parameters)
+        self.assertEqual(len(policy.parameters_fingerprint), 64)
+        stricter = CryptoSpotRiskPolicy(max_order_notional_fraction=Decimal("0.01"))
+        self.assertNotEqual(stricter.parameters_fingerprint, policy.parameters_fingerprint)
+        self.assertEqual(CryptoSpotRiskPolicy().parameters_fingerprint, policy.parameters_fingerprint)
+
     def test_frozen_and_versioned(self):
         with self.assertRaises(dataclasses.FrozenInstanceError):
             POLICY.version = "x"
@@ -477,6 +633,24 @@ class DecisionAndRegistryTests(unittest.TestCase):
         self.assertEqual(len(set(kinds.values())), len(MarketType))
         self.assertIs(kinds[MarketType.CRYPTO_SPOT], CryptoSpotRiskPolicy)
 
+    def test_allow_is_impossible_outside_its_modes(self):
+        pairs, fp = canonical_parameters({"a": 1})
+        for market, mode in ((MarketType.CRYPTO_SPOT, "LIVE"), (MarketType.CRYPTO_SPOT, "DEMO"),
+                             (MarketType.CRYPTO_FUTURES, "SIMULATION"), (MarketType.FIXED_EXPIRY_OPTIONS, "SIMULATION"),
+                             (MarketType.FOREX_CFD, "LIVE")):
+            with self.subTest(market=market, mode=mode), self.assertRaises(ValueError):
+                MarketRiskDecision(market, Verdict.ALLOW, (), "p", "1", mode, parameters=pairs, parameters_fingerprint=fp)
+        # Forex pre-check ALLOW stays advisory in DEMO: the RiskEngine still refuses DEMO.
+        MarketRiskDecision(MarketType.FOREX_CFD, Verdict.ALLOW, (), "p", "1", "DEMO", parameters=pairs, parameters_fingerprint=fp)
+        MarketRiskDecision(MarketType.CRYPTO_SPOT, Verdict.ALLOW, (), "p", "1", "SIMULATION", parameters=pairs, parameters_fingerprint=fp)
+
+    def test_allow_needs_matching_parameters(self):
+        pairs, _fp = canonical_parameters({"a": 1})
+        with self.assertRaises(ValueError):
+            MarketRiskDecision(MarketType.CRYPTO_SPOT, Verdict.ALLOW, (), "p", "1", "SIMULATION")
+        with self.assertRaises(ValueError):
+            MarketRiskDecision(MarketType.CRYPTO_SPOT, Verdict.ALLOW, (), "p", "1", "SIMULATION", parameters=pairs, parameters_fingerprint="0" * 64)
+
     def test_decision_invariants(self):
         with self.assertRaises(ValueError):
             MarketRiskDecision(MarketType.CRYPTO_SPOT, Verdict.ALLOW, ("x",), "p", "1", "SIMULATION")
@@ -487,9 +661,9 @@ class DecisionAndRegistryTests(unittest.TestCase):
 
     def test_every_decision_records_a_version(self):
         decisions = [
-            POLICY.evaluate(buy(), context()),
-            POLICY.evaluate(buy(), context(mode=RunMode.LIVE)),
-            POLICY.evaluate(object(), object()),
+            CryptoSpotRiskPolicy().evaluate(buy(), context()),
+            CryptoSpotRiskPolicy().evaluate(buy(), context(mode=RunMode.LIVE)),
+            CryptoSpotRiskPolicy().evaluate(object(), object()),
             ForexCfdPreCheck().evaluate(None, mode=RunMode.DEMO, account_currency="USD"),
             CryptoFuturesRiskPolicy().evaluate(),
             FixedExpiryOptionsRiskPolicy().evaluate(),
@@ -497,6 +671,7 @@ class DecisionAndRegistryTests(unittest.TestCase):
         for decision in decisions:
             self.assertTrue(decision.policy_name)
             self.assertTrue(decision.policy_version)
+            self.assertEqual(len(decision.parameters_fingerprint), 64)
 
 
 class CostModelTests(unittest.TestCase):
@@ -512,6 +687,11 @@ class CostModelTests(unittest.TestCase):
             BookTicker.from_payload({"symbol": "BTCUSDT"}, as_of=NOW, source="TEST")
         with self.assertRaises(ValueError):
             book(bid_price=Decimal("50002"))
+        with self.assertRaises(ValueError):
+            book(ask_price=Decimal("50000.00"))  # locked
+        for side in ("bid_qty", "ask_qty"):
+            with self.assertRaises(ValueError):
+                book(**{side: Decimal(0)})
         with self.assertRaises(TypeError):
             book(bid_price=50000.0)
 
@@ -579,6 +759,16 @@ class NoOrderPathTests(unittest.TestCase):
         "astra.brokers.simulated",
         "astra.brokers.websocket",
     )
+
+    def test_only_the_abstract_broker_contract_is_loaded(self):
+        # astra.venues.contract imports astra.brokers.base (abstract, permit-guarded BrokerAdapter); nothing else.
+        code = ("import sys, astra.markets.risk_policies, astra.markets.costs\n"
+                "print(','.join(sorted(m for m in sys.modules if m.startswith('astra.brokers'))))\n")
+        result = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, check=True,
+            env={"PYTHONPATH": str(SRC), "SYSTEMROOT": __import__("os").environ.get("SYSTEMROOT", "")},
+        )
+        self.assertEqual(result.stdout.strip(), "astra.brokers,astra.brokers.base")
 
     def test_importing_the_modules_loads_no_order_sending_code(self):
         code = (
