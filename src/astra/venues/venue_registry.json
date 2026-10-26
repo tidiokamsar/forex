@@ -1,0 +1,502 @@
+{
+  "schema": "astra.venue_registry",
+  "schema_version": 1,
+  "registry_version": "0.1.0",
+  "updated_on": "2026-10-26",
+  "content_sha256": "5c59f2b342298959ef0319a94d9c85b7803bddfcbf2545db0730b5e47507242a",
+  "venues": [
+    {
+      "venue_id": "ctrader",
+      "display_name": "cTrader Open API (Spotware)",
+      "legal_entity": null,
+      "jurisdiction": null,
+      "market_types": [
+        "FOREX_CFD"
+      ],
+      "instruments": [
+        "EURUSD"
+      ],
+      "api_name": "cTrader Open API",
+      "api_version": null,
+      "api_url": "https://help.ctrader.com/open-api/",
+      "environments": [
+        "DEMO",
+        "LIVE"
+      ],
+      "permissions_required": [
+        "Open API application registered with Spotware",
+        "OAuth access token for a demo cTID trader account"
+      ],
+      "features": [
+        "account read (trader, assets, reconcile, unrealized P&L)",
+        "symbol specifications",
+        "spot quotes",
+        "execution events",
+        "market orders through the BrokerAdapter permit boundary only (DEMO execution disabled)"
+      ],
+      "size_rules": [
+        "ProtoOASymbol volumes are in 0.01 units (minVolume, stepVolume, maxVolume); values differ per broker"
+      ],
+      "costs_known": [],
+      "limitations": [
+        "Adapter tested offline only; not READ_ONLY_CONNECTED.",
+        "Demo host only; isLive=true accounts are refused by the adapter.",
+        "No documented lookup by clientOrderId: unresolved orders require human review.",
+        "Contract specs, commissions and swaps depend on the cTrader broker and are not recorded here.",
+        "Placeholder record: research agents add evidence; the integrator merges it."
+      ],
+      "eligibility_conditions": [],
+      "evidence": [
+        {
+          "claim": "Demo and live are separate hosts, demo.ctraderapi.com and live.ctraderapi.com (Protobuf port 5035, JSON port 5036). Carried from the BROKERS.md documentation check of 2026-10-25; not re-verified for this registry.",
+          "source_url": "https://help.ctrader.com/open-api/proxies-endpoints/",
+          "accessed_on": "2026-10-25"
+        },
+        {
+          "claim": "The account environment is reported by ProtoOACtidTraderAccount.isLive. Carried from the BROKERS.md documentation check of 2026-10-25; not re-verified for this registry.",
+          "source_url": "https://help.ctrader.com/open-api/",
+          "accessed_on": "2026-10-25"
+        },
+        {
+          "claim": "Account access uses an OAuth flow for a cTID account. Carried from the BROKERS.md documentation check of 2026-10-25; not re-verified for this registry.",
+          "source_url": "https://help.ctrader.com/open-api/account-authentication/",
+          "accessed_on": "2026-10-25"
+        }
+      ],
+      "statuses": [
+        {
+          "status": "DISCOVERED",
+          "since": "2026-10-25",
+          "note": "Selected as first connector on 2026-10-25 (BROKERS.md)."
+        },
+        {
+          "status": "UNVERIFIED",
+          "since": "2026-10-26",
+          "note": "Official API documentation not yet verified by a research pass for this registry."
+        },
+        {
+          "status": "ELIGIBILITY_UNKNOWN",
+          "since": "2026-10-26",
+          "note": "Country and account eligibility for the user is unknown."
+        }
+      ],
+      "tests_passed": [
+        "offline scripted fake server: tests/test_ctrader.py",
+        "offline resilience fixture: tests/test_ctrader_resilience.py"
+      ],
+      "validations_missing": [
+        "OFFICIAL_API_VERIFIED: re-verify the 2026-10-25 documentation check in a research pass",
+        "REGION_ELIGIBILITY_VERIFIED: which cTrader brokers serve the user's country, and the user's eligibility",
+        "READ_ONLY_CONNECTED: ctrader-check has not been run against the real demo service",
+        "comparison of the JSON client with the official Protobuf SDK",
+        "provider-sourced contract specs, commissions and swaps per broker"
+      ]
+    },
+    {
+      "venue_id": "binance_spot",
+      "display_name": "Binance Spot",
+      "legal_entity": null,
+      "jurisdiction": null,
+      "market_types": [
+        "CRYPTO_SPOT"
+      ],
+      "instruments": [],
+      "api_name": null,
+      "api_version": null,
+      "api_url": null,
+      "environments": [],
+      "permissions_required": [],
+      "features": [],
+      "size_rules": [],
+      "costs_known": [],
+      "limitations": [
+        "Placeholder record: research agents add evidence; the integrator merges it."
+      ],
+      "eligibility_conditions": [],
+      "evidence": [],
+      "statuses": [
+        {
+          "status": "DISCOVERED",
+          "since": "2026-10-26",
+          "note": "Named in the multi-venue brief of 2026-10-26."
+        },
+        {
+          "status": "UNVERIFIED",
+          "since": "2026-10-26",
+          "note": "Official API documentation not yet verified by a research pass for this registry."
+        },
+        {
+          "status": "ELIGIBILITY_UNKNOWN",
+          "since": "2026-10-26",
+          "note": "Country and account eligibility for the user is unknown."
+        }
+      ],
+      "tests_passed": [],
+      "validations_missing": [
+        "OFFICIAL_API_VERIFIED: official API documentation, URL and access date",
+        "REGION_ELIGIBILITY_VERIFIED: legal entity, jurisdiction and user eligibility",
+        "READ_ONLY_CONNECTED: supervised read-only connection check"
+      ]
+    },
+    {
+      "venue_id": "binance_futures",
+      "display_name": "Binance Futures",
+      "legal_entity": null,
+      "jurisdiction": null,
+      "market_types": [
+        "CRYPTO_FUTURES"
+      ],
+      "instruments": [],
+      "api_name": null,
+      "api_version": null,
+      "api_url": null,
+      "environments": [],
+      "permissions_required": [],
+      "features": [],
+      "size_rules": [],
+      "costs_known": [],
+      "limitations": [
+        "BLOCKED pending derivatives risk review.",
+        "Placeholder record: research agents add evidence; the integrator merges it."
+      ],
+      "eligibility_conditions": [],
+      "evidence": [],
+      "statuses": [
+        {
+          "status": "DISCOVERED",
+          "since": "2026-10-26",
+          "note": "Named in the multi-venue brief of 2026-10-26."
+        },
+        {
+          "status": "UNVERIFIED",
+          "since": "2026-10-26",
+          "note": "Official API documentation not yet verified by a research pass for this registry."
+        },
+        {
+          "status": "ELIGIBILITY_UNKNOWN",
+          "since": "2026-10-26",
+          "note": "Country and account eligibility for the user is unknown."
+        },
+        {
+          "status": "BLOCKED",
+          "since": "2026-10-26",
+          "note": "Blocked pending a derivatives risk review (leverage, funding, liquidation); crypto futures models are disabled."
+        }
+      ],
+      "tests_passed": [],
+      "validations_missing": [
+        "OFFICIAL_API_VERIFIED: official API documentation, URL and access date",
+        "REGION_ELIGIBILITY_VERIFIED: legal entity, jurisdiction and user eligibility",
+        "READ_ONLY_CONNECTED: supervised read-only connection check"
+      ]
+    },
+    {
+      "venue_id": "mt5",
+      "display_name": "MetaTrader 5 (MetaQuotes) via a broker's MT5 server",
+      "legal_entity": null,
+      "jurisdiction": null,
+      "market_types": [
+        "FOREX_CFD"
+      ],
+      "instruments": [],
+      "api_name": "MetaTrader 5 Python package",
+      "api_version": null,
+      "api_url": null,
+      "environments": [],
+      "permissions_required": [],
+      "features": [],
+      "size_rules": [],
+      "costs_known": [],
+      "limitations": [
+        "Requires a Windows MetaTrader 5 terminal process.",
+        "Demo detection field not confirmed from official documentation (BROKERS.md).",
+        "Placeholder record: research agents add evidence; the integrator merges it."
+      ],
+      "eligibility_conditions": [],
+      "evidence": [
+        {
+          "claim": "The MetaTrader 5 Python package exposes terminal functions to Python. Carried from the BROKERS.md documentation check of 2026-10-25; not re-verified for this registry.",
+          "source_url": "https://www.mql5.com/en/book/advanced/python/python_funcs_overview",
+          "accessed_on": "2026-10-25"
+        }
+      ],
+      "statuses": [
+        {
+          "status": "DISCOVERED",
+          "since": "2026-10-25",
+          "note": "Listed in the BROKERS.md evaluation matrix of 2026-10-25."
+        },
+        {
+          "status": "UNVERIFIED",
+          "since": "2026-10-26",
+          "note": "Official API documentation not yet verified by a research pass for this registry."
+        },
+        {
+          "status": "ELIGIBILITY_UNKNOWN",
+          "since": "2026-10-26",
+          "note": "Country and account eligibility for the user is unknown."
+        }
+      ],
+      "tests_passed": [],
+      "validations_missing": [
+        "OFFICIAL_API_VERIFIED: official API documentation, URL and access date",
+        "REGION_ELIGIBILITY_VERIFIED: legal entity, jurisdiction and user eligibility",
+        "READ_ONLY_CONNECTED: supervised read-only connection check"
+      ]
+    },
+    {
+      "venue_id": "iq_option",
+      "display_name": "IQ Option",
+      "legal_entity": null,
+      "jurisdiction": null,
+      "market_types": [
+        "FIXED_EXPIRY_OPTIONS"
+      ],
+      "instruments": [],
+      "api_name": null,
+      "api_version": null,
+      "api_url": null,
+      "environments": [],
+      "permissions_required": [],
+      "features": [],
+      "size_rules": [],
+      "costs_known": [],
+      "limitations": [
+        "Market types other than fixed-expiry options not assessed.",
+        "Fixed-expiry options are disabled in ASTRA (astra.markets.fixed_expiry_options.ENABLED = False).",
+        "Placeholder record: research agents add evidence; the integrator merges it."
+      ],
+      "eligibility_conditions": [],
+      "evidence": [],
+      "statuses": [
+        {
+          "status": "DISCOVERED",
+          "since": "2026-10-26",
+          "note": "Named in the multi-venue brief of 2026-10-26."
+        },
+        {
+          "status": "UNVERIFIED",
+          "since": "2026-10-26",
+          "note": "Official API documentation not yet verified by a research pass for this registry."
+        },
+        {
+          "status": "ELIGIBILITY_UNKNOWN",
+          "since": "2026-10-26",
+          "note": "Country and account eligibility for the user is unknown."
+        }
+      ],
+      "tests_passed": [],
+      "validations_missing": [
+        "OFFICIAL_API_VERIFIED: official API documentation, URL and access date",
+        "REGION_ELIGIBILITY_VERIFIED: legal entity, jurisdiction and user eligibility",
+        "READ_ONLY_CONNECTED: supervised read-only connection check"
+      ]
+    },
+    {
+      "venue_id": "goforex",
+      "display_name": "GoForex",
+      "legal_entity": null,
+      "jurisdiction": null,
+      "market_types": [
+        "FOREX_CFD"
+      ],
+      "instruments": [],
+      "api_name": null,
+      "api_version": null,
+      "api_url": null,
+      "environments": [],
+      "permissions_required": [],
+      "features": [],
+      "size_rules": [],
+      "costs_known": [],
+      "limitations": [
+        "Identity, legal entity and market type assumed from the name only; nothing verified.",
+        "Placeholder record: research agents add evidence; the integrator merges it."
+      ],
+      "eligibility_conditions": [],
+      "evidence": [],
+      "statuses": [
+        {
+          "status": "DISCOVERED",
+          "since": "2026-10-26",
+          "note": "Named in the multi-venue brief of 2026-10-26."
+        },
+        {
+          "status": "UNVERIFIED",
+          "since": "2026-10-26",
+          "note": "Official API documentation not yet verified by a research pass for this registry."
+        },
+        {
+          "status": "ELIGIBILITY_UNKNOWN",
+          "since": "2026-10-26",
+          "note": "Country and account eligibility for the user is unknown."
+        }
+      ],
+      "tests_passed": [],
+      "validations_missing": [
+        "OFFICIAL_API_VERIFIED: official API documentation, URL and access date",
+        "REGION_ELIGIBILITY_VERIFIED: legal entity, jurisdiction and user eligibility",
+        "READ_ONLY_CONNECTED: supervised read-only connection check"
+      ]
+    },
+    {
+      "venue_id": "interactive_brokers",
+      "display_name": "Interactive Brokers (TWS API)",
+      "legal_entity": null,
+      "jurisdiction": null,
+      "market_types": [
+        "FOREX_CFD"
+      ],
+      "instruments": [],
+      "api_name": "TWS API",
+      "api_version": null,
+      "api_url": null,
+      "environments": [
+        "PAPER",
+        "LIVE"
+      ],
+      "permissions_required": [],
+      "features": [],
+      "size_rules": [],
+      "costs_known": [],
+      "limitations": [
+        "FX at IBKR may be spot FX rather than CFD; market type to confirm.",
+        "Requires a local TWS or IB Gateway process.",
+        "Placeholder record: research agents add evidence; the integrator merges it."
+      ],
+      "eligibility_conditions": [],
+      "evidence": [
+        {
+          "claim": "A paper trading account is opened from Account Management after a funded live account is approved; paper execution is more simulated. Carried from the BROKERS.md documentation check of 2026-10-25; not re-verified for this registry.",
+          "source_url": "https://www.interactivebrokers.com/docs/tws-api/doc/notes-limitations/limitations/paper-trading",
+          "accessed_on": "2026-10-25"
+        }
+      ],
+      "statuses": [
+        {
+          "status": "DISCOVERED",
+          "since": "2026-10-25",
+          "note": "Listed in the BROKERS.md evaluation matrix of 2026-10-25."
+        },
+        {
+          "status": "UNVERIFIED",
+          "since": "2026-10-26",
+          "note": "Official API documentation not yet verified by a research pass for this registry."
+        },
+        {
+          "status": "ELIGIBILITY_UNKNOWN",
+          "since": "2026-10-26",
+          "note": "Country and account eligibility for the user is unknown."
+        }
+      ],
+      "tests_passed": [],
+      "validations_missing": [
+        "OFFICIAL_API_VERIFIED: official API documentation, URL and access date",
+        "REGION_ELIGIBILITY_VERIFIED: legal entity, jurisdiction and user eligibility",
+        "READ_ONLY_CONNECTED: supervised read-only connection check"
+      ]
+    },
+    {
+      "venue_id": "oanda",
+      "display_name": "OANDA (v20 REST)",
+      "legal_entity": null,
+      "jurisdiction": null,
+      "market_types": [
+        "FOREX_CFD"
+      ],
+      "instruments": [],
+      "api_name": "OANDA v20 REST",
+      "api_version": null,
+      "api_url": null,
+      "environments": [
+        "DEMO",
+        "LIVE"
+      ],
+      "permissions_required": [],
+      "features": [],
+      "size_rules": [],
+      "costs_known": [],
+      "limitations": [
+        "The regional entity determines products and eligibility; not assessed.",
+        "Placeholder record: research agents add evidence; the integrator merges it."
+      ],
+      "eligibility_conditions": [],
+      "evidence": [
+        {
+          "claim": "A practice environment is served from api-fxpractice.oanda.com (streaming stream-fxpractice.oanda.com) with a token from a practice account. Carried from the BROKERS.md documentation check of 2026-10-25; not re-verified for this registry.",
+          "source_url": "https://developer.oanda.com/rest-live-v20/development-guide",
+          "accessed_on": "2026-10-25"
+        }
+      ],
+      "statuses": [
+        {
+          "status": "DISCOVERED",
+          "since": "2026-10-25",
+          "note": "Listed in the BROKERS.md evaluation matrix of 2026-10-25."
+        },
+        {
+          "status": "UNVERIFIED",
+          "since": "2026-10-26",
+          "note": "Official API documentation not yet verified by a research pass for this registry."
+        },
+        {
+          "status": "ELIGIBILITY_UNKNOWN",
+          "since": "2026-10-26",
+          "note": "Country and account eligibility for the user is unknown."
+        }
+      ],
+      "tests_passed": [],
+      "validations_missing": [
+        "OFFICIAL_API_VERIFIED: official API documentation, URL and access date",
+        "REGION_ELIGIBILITY_VERIFIED: legal entity, jurisdiction and user eligibility",
+        "READ_ONLY_CONNECTED: supervised read-only connection check"
+      ]
+    },
+    {
+      "venue_id": "fxcm",
+      "display_name": "FXCM",
+      "legal_entity": null,
+      "jurisdiction": null,
+      "market_types": [
+        "FOREX_CFD"
+      ],
+      "instruments": [],
+      "api_name": null,
+      "api_version": null,
+      "api_url": null,
+      "environments": [],
+      "permissions_required": [],
+      "features": [],
+      "size_rules": [],
+      "costs_known": [],
+      "limitations": [
+        "Placeholder record: research agents add evidence; the integrator merges it."
+      ],
+      "eligibility_conditions": [],
+      "evidence": [],
+      "statuses": [
+        {
+          "status": "DISCOVERED",
+          "since": "2026-10-26",
+          "note": "Named in the multi-venue brief of 2026-10-26."
+        },
+        {
+          "status": "UNVERIFIED",
+          "since": "2026-10-26",
+          "note": "Official API documentation not yet verified by a research pass for this registry."
+        },
+        {
+          "status": "ELIGIBILITY_UNKNOWN",
+          "since": "2026-10-26",
+          "note": "Country and account eligibility for the user is unknown."
+        }
+      ],
+      "tests_passed": [],
+      "validations_missing": [
+        "OFFICIAL_API_VERIFIED: official API documentation, URL and access date",
+        "REGION_ELIGIBILITY_VERIFIED: legal entity, jurisdiction and user eligibility",
+        "READ_ONLY_CONNECTED: supervised read-only connection check"
+      ]
+    }
+  ]
+}
