@@ -86,6 +86,10 @@ def _aggregate(values):
     return [values[i] + values[i + 1] for i in range(0, len(values) - 1, 2)]
 
 
+def _rms_of(values):
+    return (sum(v * v for v in values) / len(values)) ** 0.5
+
+
 def _correlated(rng, base, rho):
     return [rho * v + (1 - rho * rho) ** 0.5 * rng.gauss(0.0, 1e-4) for v in base]
 
@@ -117,11 +121,42 @@ POSITIVE = {
     "sparse binary, inverted and reversed": (_sparse_binary, lambda rng, b: [-v for v in reversed(b)]),
     "tick walk, offset 1 bar": (_ticks, lambda rng, b: b[1:] + _ticks(rng, 1)),
     "AR(1) 0.7, offset 1 bar": (_ar1, lambda rng, b: b[1:] + _gauss(rng, 1)),
+    "AR(1) 0.95 (60 returns), noise 0.2x": (lambda rng: _ar1(rng, 60, 0.95),
+                                            lambda rng, b: [v + rng.gauss(0, 0.2 * _rms_of(b)) for v in b]),
+    "sparse binary (60 returns), moves x1.5": (lambda rng: _sparse_binary(rng, 60), lambda rng, b: [1.5 * v for v in b]),
+    "sparse gaussian (60 returns), 20% noise on moves": (lambda rng: _sparse_gauss(rng, 60),
+                                                         lambda rng, b: [v * (1 + rng.gauss(0, 0.2)) for v in b]),
 }
 # Copies of near-constant paths whose closes were moved by one tick (the closes are the sealed data).
+def _nudge_one(rng, closes):
+    return _nudged_close(closes, rng.randrange(1, len(closes) - 1))
+
+
+def _rescaled_requoted(rng, closes):
+    """The same prices doubled and quoted again to 1e-5 (another rounding of the same path)."""
+
+    return _returns([round(2 * value, 5) for value in closes])
+
+
+def _sub_tick_unrounded(rng, n=120):
+    price, closes = 1.1, [1.1]
+    for _ in range(n):
+        price += 2 * TICK + rng.gauss(0.0, 0.2 * TICK)
+        closes.append(price)
+    return closes
+
+
+# name: (sealed closes generator, transform giving the new holdout's returns); the sealed returns are
+# the closes quoted to 1e-5.
 POSITIVE_CLOSES = {
-    "sub-tick trend, one close nudged 1 tick": _sub_tick_closes,
+    "sub-tick trend, one close nudged 1 tick": (_sub_tick_closes, _nudge_one),
+    "tick walk, 16 returns, one close nudged 1 tick": (lambda rng: _tick_closes(rng, 16), _nudge_one),
+    "tick walk, 16 returns, inverted": (lambda rng: _tick_closes(rng, 16), lambda rng, c: [-v for v in _returns(c)]),
+    "tick walk, 20 returns, one close nudged 1 tick": (lambda rng: _tick_closes(rng, 20), _nudge_one),
+    "tick walk, 20 returns, inverted": (lambda rng: _tick_closes(rng, 20), lambda rng, c: [-v for v in _returns(c)]),
+    "sub-tick trend, 120 returns, prices x2 re-quoted": (_sub_tick_unrounded, _rescaled_requoted),
 }
+
 # name: (generator, length, number of independent pairs)
 NEGATIVE = {
     "independent gaussian": (_gauss, LENGTH, NEGATIVE_SAMPLES),
@@ -131,6 +166,9 @@ NEGATIVE = {
     "independent AR(1) 0.7": (_ar1, LENGTH, NEGATIVE_SAMPLES),
     "independent tick-quantized walks": (_ticks, LENGTH, NEGATIVE_SAMPLES),
     "independent sub-tick trends": (_sub_tick, LENGTH, NEGATIVE_SAMPLES),
+    "independent gaussian, 16 returns": (_gauss, 16, NEGATIVE_SAMPLES),
+    "independent tick-quantized walks, 16 returns": (_ticks, 16, NEGATIVE_SAMPLES),
+    "independent tick-quantized walks, 20 returns": (_ticks, 20, NEGATIVE_SAMPLES),
     "independent gaussian, 200 returns": (_gauss, 200, LONG_SAMPLES),
     "independent tick-quantized walks, 200 returns": (_ticks, 200, LONG_SAMPLES),
     "independent AR(1) 0.7, 400 returns": (_ar1, 400, AR_LONG_SAMPLES),
@@ -147,25 +185,36 @@ DOCUMENTED = {
     'time reversed': (200, 0, 0, 0),
     'resampled x2': (200, 0, 0, 0),
     'noise 0.1x': (200, 0, 0, 0),
-    'noise 0.2x': (152, 48, 0, 0),
-    'noise 0.3x': (25, 154, 0, 21),
-    'noise 0.5x': (0, 28, 0, 172),
-    'distinct, correlation 0.98': (141, 59, 0, 0),
-    'distinct, correlation 0.95': (14, 138, 0, 48),
-    'distinct, correlation 0.90': (0, 35, 0, 165),
-    'sparse gaussian, nudged 1e-9': (147, 13, 40, 0),
+    'noise 0.2x': (162, 38, 0, 0),
+    'noise 0.3x': (30, 153, 0, 17),
+    'noise 0.5x': (1, 30, 0, 169),
+    'distinct, correlation 0.98': (156, 44, 0, 0),
+    'distinct, correlation 0.95': (15, 135, 0, 50),
+    'distinct, correlation 0.90': (0, 37, 0, 163),
+    'sparse gaussian, nudged 1e-9': (148, 12, 40, 0),
     'sparse binary, nudged 1e-9': (89, 62, 49, 0),
     'sparse binary, inverted and reversed': (88, 68, 44, 0),
     'tick walk, offset 1 bar': (200, 0, 0, 0),
     'AR(1) 0.7, offset 1 bar': (200, 0, 0, 0),
-    'sub-tick trend, one close nudged 1 tick': (2, 45, 0, 153),
+    'AR(1) 0.95 (60 returns), noise 0.2x': (99, 68, 0, 33),
+    'sparse binary (60 returns), moves x1.5': (167, 24, 9, 0),
+    'sparse gaussian (60 returns), 20% noise on moves': (156, 30, 13, 1),
+    'sub-tick trend, one close nudged 1 tick': (13, 53, 0, 134),
+    'tick walk, 16 returns, one close nudged 1 tick': (98, 95, 6, 1),
+    'tick walk, 16 returns, inverted': (191, 9, 0, 0),
+    'tick walk, 20 returns, one close nudged 1 tick': (186, 14, 0, 0),
+    'tick walk, 20 returns, inverted': (200, 0, 0, 0),
+    'sub-tick trend, 120 returns, prices x2 re-quoted': (0, 0, 0, 200),
     'independent gaussian': (0, 0, 0, 600),
     'independent heavy-tailed': (0, 0, 0, 600),
-    'independent sparse gaussian (90% flat)': (0, 0, 130, 470),
+    'independent sparse gaussian (90% flat)': (0, 1, 129, 470),
     'independent sparse binary (90% flat)': (0, 2, 139, 459),
     'independent AR(1) 0.7': (0, 0, 0, 600),
     'independent tick-quantized walks': (0, 0, 0, 600),
-    'independent sub-tick trends': (0, 8, 47, 545),
+    'independent sub-tick trends': (0, 7, 47, 546),
+    'independent gaussian, 16 returns': (0, 0, 0, 600),
+    'independent tick-quantized walks, 16 returns': (0, 1, 6, 593),
+    'independent tick-quantized walks, 20 returns': (0, 0, 0, 600),
     'independent gaussian, 200 returns': (0, 0, 0, 150),
     'independent tick-quantized walks, 200 returns': (0, 0, 0, 150),
     'independent AR(1) 0.7, 400 returns': (0, 0, 0, 60),
@@ -181,12 +230,13 @@ def calibration_table():
             base = generate(rng)
             verdicts[assess_reuse(transform(rng, base), base).verdict] += 1
         table[name] = verdicts
-    for name, generate in POSITIVE_CLOSES.items():
+    for name, (generate, transform) in POSITIVE_CLOSES.items():
         rng = random.Random(f"positive:{name}")
         verdicts = Counter()
         for _ in range(POSITIVE_SAMPLES):
             closes = generate(rng)
-            verdicts[assess_reuse(_nudged_close(closes, rng.randrange(1, LENGTH)), _returns(closes)).verdict] += 1
+            sealed = _returns([round(value, 5) for value in closes])
+            verdicts[assess_reuse(transform(rng, closes), sealed).verdict] += 1
         table[name] = verdicts
     for name, (generate, length, samples) in NEGATIVE.items():
         rng = random.Random(f"negative:{name}")
@@ -227,7 +277,8 @@ class DetectorCalibrationTests(unittest.TestCase):
 
     def test_copies_and_simple_transforms_are_conflicts(self):
         for name in ("exact copy", "nudged 1e-9", "offset 1 bar", "offset 3 bars", "inverted quote", "time reversed",
-                     "resampled x2", "noise 0.1x", "tick walk, offset 1 bar", "AR(1) 0.7, offset 1 bar"):
+                     "resampled x2", "noise 0.1x", "tick walk, offset 1 bar", "AR(1) 0.7, offset 1 bar",
+                     "tick walk, 16 returns, inverted", "tick walk, 20 returns, inverted"):
             with self.subTest(name):
                 self.assertGreaterEqual(self.share(name, CONFLICT), 0.95, self.table[name])
 
@@ -240,7 +291,8 @@ class DetectorCalibrationTests(unittest.TestCase):
     def test_sparse_copies_are_never_cleared(self):
         # A sparse copy is CONFLICT when its moves are improbable by chance, SUSPECT otherwise (it then
         # cannot be scored), UNDETERMINED with fewer than three moves; it is never CLEAR.
-        for name in ("sparse gaussian, nudged 1e-9", "sparse binary, nudged 1e-9", "sparse binary, inverted and reversed"):
+        for name in ("sparse gaussian, nudged 1e-9", "sparse binary, nudged 1e-9", "sparse binary, inverted and reversed",
+                     "sparse binary (60 returns), moves x1.5"):
             with self.subTest(name):
                 self.assertEqual(self.table[name][CLEAR], 0, self.table[name])
 
@@ -264,6 +316,26 @@ class DetectorCalibrationTests(unittest.TestCase):
                      "independent sub-tick trends"):
             with self.subTest(name):
                 self.assertLessEqual(self.share(name, SUSPECT), 0.02, self.table[name])
+
+    def test_short_tick_copies_are_rarely_or_never_cleared(self):
+        # Round 5 (Q-1, Q-2): at the CLI default of 20 returns no tick copy is CLEAR; at the 16-return floor a
+        # copy nudged by one tick still is in 1 of 200 (documented), and an inverted copy never is.
+        for name in ("tick walk, 20 returns, one close nudged 1 tick", "tick walk, 20 returns, inverted",
+                     "tick walk, 16 returns, inverted"):
+            with self.subTest(name):
+                self.assertEqual(self.table[name][CLEAR], 0, self.table[name])
+        self.assertLessEqual(self.table["tick walk, 16 returns, one close nudged 1 tick"][CLEAR], 1)
+
+    def test_rescaled_and_noisy_persistent_copies_are_mostly_flagged(self):
+        # A4-D-4 / A4-D-5: noisy copies of a persistent path and perturbed sparse copies (documented residue).
+        for name, floor in (("AR(1) 0.95 (60 returns), noise 0.2x", 0.8),
+                            ("sparse gaussian (60 returns), 20% noise on moves", 0.9)):
+            with self.subTest(name):
+                self.assertGreaterEqual(self.share(name, CONFLICT, SUSPECT), floor, self.table[name])
+
+    def test_documented_limit_requoted_rescaled_sub_tick_trend_is_missed(self):
+        # Q-3, documented: re-quoting doubled prices to 1e-5 changes every rounding; not detected.
+        self.assertEqual(self.share("sub-tick trend, 120 returns, prices x2 re-quoted", CLEAR), 1.0)
 
     def test_documented_limit_moderate_noise_and_correlation_090_are_mostly_missed(self):
         # Not goals: they document that a copy with noise half the return scale, or a distinct path

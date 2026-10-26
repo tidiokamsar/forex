@@ -674,7 +674,7 @@ class DsrSerialDependenceGuardTests(unittest.TestCase):
     def test_policy_check_directions(self):
         from astra.research_policy import RESEARCH_POLICY_VERSION, statistical_policy_below_floor
 
-        self.assertEqual(RESEARCH_POLICY_VERSION, "astra-research-policy-0.3.0-provisional")
+        self.assertEqual(RESEARCH_POLICY_VERSION, "astra-research-policy-0.4.0-provisional")
         applied = strategy_validation.applied_statistical_policy()["applied"]
         self.assertEqual(statistical_policy_below_floor(applied), ())
         for name, value in (("max_dsr_abs_autocorrelation", 0.31), ("min_dsr_effective_returns", 29),

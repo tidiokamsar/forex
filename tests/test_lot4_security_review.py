@@ -887,29 +887,37 @@ class Phase4EvidenceTests(_Phase3Case):
 
 
 class Phase4DetectorTests(ReuseVerdictPolicyTests):
-    # CONFIRMED DEFECT A4-D-4 (medium): prewhitening creates false negatives on persistent paths. For an
-    # AR(1) holdout with phi = 0.95, a copy with noise at 0.2x the return scale is CLEAR (20/20 in a probe;
-    # at 0.1x 19/20 CLEAR), while the same noise on an i.i.d. path is CONFLICT (16/20). Removing the common
-    # lag-1 part leaves only the small innovations, which the added noise then swamps.
-    @unittest.expectedFailure
+    def assert_not_cleared(self, returns):
+        # Not CLEAR: refused at seal (CONFLICT) or sealed with a blocking verdict (SUSPECT, UNDETERMINED).
+        # Round 5: a refusal is the stronger outcome, so it counts as not cleared (the round 4 version of
+        # these tests treated the refusal's ValueError as a failure).
+        try:
+            protocol_id = self.seal_direct(returns, "NEW", 2130, "b" * 64)
+        except ValueError as error:
+            self.assertIn("price path matches", str(error))
+            return
+        self.assertNotEqual(self.store.reuse_check(protocol_id)["verdict"], "CLEAR")
+
+    # FIXED IN LOT 4 ROUND 5 (was CONFIRMED DEFECT A4-D-4, medium): prewhitening created false negatives on
+    # persistent paths. For an AR(1) holdout with phi = 0.95, a copy with noise at 0.2x the return scale was
+    # CLEAR (20/20 in a probe), while the same noise on an i.i.d. path is CONFLICT (16/20). Prewhitening no
+    # longer decides alone: a raw correlation is also confirmed when the fit residual is not serially
+    # correlated (a noisy copy leaves white noise), and the whole overlap of each offset is compared too.
     def test_noisy_copy_of_a_persistent_holdout_is_not_clear(self):
         old = _ar1(3, phi=0.95)
         scale = (sum(value * value for value in old) / len(old)) ** 0.5
         rng = random.Random(0)
         self.seal_direct(old, "OLD", 2030, "a" * 64)
-        new = self.seal_direct([value + rng.gauss(0.0, 0.2 * scale) for value in old], "NEW", 2130, "b" * 64)
-        self.assertNotEqual(self.store.reuse_check(new)["verdict"], "CLEAR")
+        self.assert_not_cleared([value + rng.gauss(0.0, 0.2 * scale) for value in old])
 
-    # CONFIRMED DEFECT A4-D-5 (medium): sparse paths are compared only by match share with an absolute
-    # tolerance, so a sparse holdout whose moves are all amplified 1.5x (same bars, same timing) is CLEAR,
-    # while a dense copy with every return doubled is CONFLICT (correlation is scale-free).
-    @unittest.expectedFailure
+    # FIXED IN LOT 4 ROUND 5 (was CONFIRMED DEFECT A4-D-5, medium): sparse paths were compared only by match
+    # share with an absolute tolerance, so a sparse holdout whose moves are all amplified 1.5x (same bars, same
+    # timing) was CLEAR. A sparse new holdout is now also compared on the timing and direction of its moves.
     def test_amplified_copy_of_a_sparse_holdout_is_not_clear(self):
         rng = random.Random(5)
         old = [0.0 if rng.random() < 0.9 else rng.choice((-1.0, 1.0)) * 1e-4 for _ in range(60)]
         self.seal_direct(old, "OLD", 2030, "a" * 64)
-        new = self.seal_direct([1.5 * value for value in old], "NEW", 2130, "b" * 64)
-        self.assertNotEqual(self.store.reuse_check(new)["verdict"], "CLEAR")
+        self.assert_not_cleared([1.5 * value for value in old])
 
     def test_regression_dense_copies_and_sparse_exact_copies_are_refused(self):
         old = _ar1(4)
