@@ -1,6 +1,8 @@
 # Changelog
 
-## Lot 4 independent review, quantitative integrity, attempt registry · branch `feat/lot4-integrite-quant` · 2026-10-25
+## Lot 4 independent review, quantitative integrity, attempt registry · branch `feat/lot4-integrite-quant` · 2026-10-25/26
+
+- Rounds 2 to 5 and directive V5 Gate A: re-derivation of performance, PBO, DSR and trial count at promotion; evidence anchor interface (`anchoring.py`, local adapter not production grade) with store binding; versioned research policy (`research_policy.py`, 0.5.0 provisional); reuse verdicts and calibration; DSR serial dependence (Lo 2002 effective sample size, Ljung-Box gate); data provenance gate; independent reviews A and D (five phases). Residuals: `reports/LOT_04_REPORT.md`.
 
 - `attempts.py`: append-only, hash-chained research attempt registry (every fold trial, run and holdout; selected, rejected, failed, interrupted, abandoned); store-wide trial count over every period of the instrument; CLI `attempts list|count|verify`.
 - `overfitting.py` 1.1.0 and `strategy_validation.py` 1.1.0: mark-to-market PBO matrix, CSCV selection with the ASTRA rule, conservative in-sample ties, abstention, `TrialUniverse`; holdout DSR uses the store-wide count; guards for indistinguishable variants, trades per PBO variant and trades in the DSR sample; `rederive_holdout_evidence`.
