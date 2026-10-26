@@ -447,11 +447,10 @@ class PersistedStateMigrationTests(unittest.TestCase):
                 return  # refusing an unmapped entry is the secure outcome
             self.assertTrue(connector.is_banned)
 
-    # CONFIRMED DEFECT MV-A-14 (low, fail-closed lock-out): save() rewrites only the scope key and leaves the legacy
+    # FIXED (was CONFIRMED DEFECT MV-A-14) (low, fail-closed lock-out): save() rewrites only the scope key and leaves the legacy
     # base-URL entry in the file. After a human acknowledge_ban_cleared(), the new key says "not banned" but the
     # legacy entry still says banned (open-ended); on the next restart attach() ORs them and the ban is back, so
     # an acknowledgement can never stick until someone edits the file by hand. No network.
-    @unittest.expectedFailure
     def test_acknowledged_ban_stays_cleared_after_restart_with_a_legacy_entry(self):
         import tempfile
 

@@ -377,6 +377,10 @@ class _HostState:
         if self.state_path is None:
             return
         document = _read_state_file(self.state_path)
+        # Legacy base-URL entries of this scope were merged on attach; drop them so a human acknowledgement
+        # sticks across restarts (MV-A-14).
+        for key in [key for key in document if key != self.key and _legacy_scope(key) == self.key]:
+            del document[key]
         document[self.key] = {
             "banned": self.banned,
             "banned_until": self.banned_until.isoformat() if self.banned_until else None,
@@ -450,13 +454,18 @@ def _state_key(base: _BaseUrl) -> str:
     return f"binance:{base.role}"
 
 
+_SCOPE_KEYS = frozenset({"binance:production", "binance:testnet", "binance:demo"})
+
+
 def _legacy_scope(key: str) -> str:
     """Scope key of a state-file entry: current scope keys as is, pre-MV-A-10 base-URL keys mapped to their scope."""
 
     if not isinstance(key, str):
         raise BinanceConfigurationError("state file has a non-string host key; inspect it by hand")
-    if key.startswith(("binance:", "loopback:")):
+    if key in _SCOPE_KEYS or key.startswith("loopback:"):
         return key
+    if key.startswith("binance:"):
+        raise BinanceConfigurationError(f"state file has an unknown scope key {key!r}; inspect it by hand")
     try:
         parts = urllib.parse.urlsplit(key)
         host = (parts.hostname or "").lower()
