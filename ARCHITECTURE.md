@@ -122,6 +122,23 @@ promote (human reviewer, Python API only) -> CHAMPION status in the registry
 
 Rules, failure codes and calibration tables: [RESEARCH_PROTOCOL.md](RESEARCH_PROTOCOL.md).
 
+## Multi-venue contract (feat/multi-venue)
+
+```text
+astra.venues.contract   VenueConnector (capabilities, server_time, require)
+                          +- MarketDataConnector   instrument_specs, quote, bars
+                          +- AccountReadConnector  balances, account_environment
+astra.markets           ForexCfdSpec (wraps InstrumentSpec) | CryptoSpotSpec
+                        | CryptoFuturesSpec, FixedExpiryOptionSpec (ENABLED = False)
+astra.venues.registry   venue_registry.json (version + SHA-256) -> VenueRecord statuses
+                          -> can_read_public_data / can_read_account / can_trade (False)
+```
+
+- Read-only by construction: the contract has no order or funds method, and `VenueCapabilities` refuses to declare `ORDER_PLACEMENT`, `ORDER_CANCEL` or `ORDER_MODIFY` as supported. Orders for any new venue go only through the existing `BrokerAdapter` permit boundary, in a later reviewed change. Nothing here changes `OrderGateway`, `RiskEngine`, permits or DEMO/LIVE gating.
+- Every `Capability` is either supported or carries an explicit reason; `require()` raises `CapabilityNotSupported` with that reason. An account environment is accepted only from `PROVIDER_API` evidence, otherwise it is reported `UNVERIFIED`. `ensure_fresh` raises `StaleDataError` on stale or future-dated data.
+- Market models are separate per market type. Crypto quantities and prices are `Decimal` (floats refused) and round down to the exchange step. Futures and fixed-expiry options are data models only; no backtest, risk or execution path uses them.
+- Registry statuses are cumulative evidence with dates. `BLOCKED`, `UNVERIFIED` or `ELIGIBILITY_UNKNOWN` closes every gate; reading public data needs `OFFICIAL_API_VERIFIED` and `REGION_ELIGIBILITY_VERIFIED`, reading an account also `READ_ONLY_CONNECTED`; `can_trade` is False for every venue in this lot. The loader validates the schema strictly and refuses a content-hash mismatch (`python -m astra.venues.registry rehash` reseals after an edit). Seeded records are placeholders with eligibility unknown; the cTrader adapter is recorded as tested offline only, not `READ_ONLY_CONNECTED`.
+
 ## Target architecture V5: component status
 
 Reference: ASTRA architectural directive V5, section 5. This table records what the code on this branch does; it is not a plan or a promise. **Implemented** = present and tested locally on synthetic data or offline fixtures; **Partial** = some responsibilities present, others missing; **Not implemented** = no code. No component has been exercised with real market data, a real broker connection or a real account, and nothing here is evidence of profitability.
