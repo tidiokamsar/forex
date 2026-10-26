@@ -1,9 +1,9 @@
 {
   "schema": "astra.venue_registry",
   "schema_version": 1,
-  "registry_version": "0.2.0",
+  "registry_version": "0.3.0",
   "updated_on": "2026-10-26",
-  "content_sha256": "4bdefaeac0e5eb5c6c81852dca4bb81f9d85f5501f8010e7aa63635b6a7eecad",
+  "content_sha256": "c22ec3194c642a10c2c602030a5af8da6353bde2c9713b3756b79701b9e64380",
   "venues": [
     {
       "venue_id": "ctrader",
@@ -309,7 +309,9 @@
           "note": "Guinea absent from the prohibited list but not positively confirmed; contracting entity, Guinean law and connectivity unresolved."
         }
       ],
-      "tests_passed": [],
+      "tests_passed": [
+        "tests/test_binance_spot.py (offline only, local fake server replaying documented response shapes; no live Binance host contacted)"
+      ],
       "validations_missing": [
         "REGION_ELIGIBILITY_VERIFIED: confirm through Binance support or onboarding which entity contracts with a Guinea resident and that Guinea is selectable at KYC",
         "check Nest Exchange Ltd, Nest Clearing and Custody Ltd and Nest Trading Ltd on the FSRA ADGM register",

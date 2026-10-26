@@ -107,7 +107,7 @@ Sources: the research dossiers [docs/venues/research_forex.md](docs/venues/resea
 
 | Venue | Contracting entity | Regulator checked in register | Guinea eligibility | Official API | Test environment | Permissions | Rate limits | Fees | Registry status |
 |---|---|---|---|---|---|---|---|---|---|
-| Binance Spot | ADGM entities (Nest Exchange / Clearing and Custody / Trading), unconfirmed for Guinea | No (FSRA register not checked) | Not on the prohibited list; absent from the iOS app-region page; no positive confirmation | REST, WebSocket API, streams, FIX; keyless `data-api.binance.vision` | Spot Testnet (GitHub login); Demo Mode (needs an account) | Read-only Ed25519 key, IP-restricted; withdrawals never | REQUEST_WEIGHT 6,000/min/IP; 429 then 418 ban | 0.100% / 0.100% regular | OFFICIAL_API_VERIFIED, ELIGIBILITY_UNKNOWN |
+| Binance Spot | ADGM entities (Nest Exchange / Clearing and Custody / Trading), unconfirmed for Guinea | No (FSRA register not checked) | Not on the prohibited list; absent from the iOS app-region page; no positive confirmation | REST, WebSocket API, streams, FIX; keyless `data-api.binance.vision` | Spot Testnet (GitHub login); Demo Mode (needs an account) | Read-only key, IP-restricted; withdrawals never (Binance recommends Ed25519; ASTRA's connector signs with HMAC-SHA256 only, stdlib constraint) | REQUEST_WEIGHT 6,000/min/IP; 429 then 418 ban | 0.100% / 0.100% regular | OFFICIAL_API_VERIFIED, ELIGIBILITY_UNKNOWN |
 
 Binance hosts timed out from the research machine on 2026-10-26; the cause is unknown and must be retested from the production network.
 

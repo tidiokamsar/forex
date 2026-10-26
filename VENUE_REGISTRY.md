@@ -62,7 +62,7 @@ Because every venue holds ELIGIBILITY_UNKNOWN today, **every gate is closed for 
 | goforexfx_com | FOREX_CFD | DISCOVERED, UNVERIFIED, ELIGIBILITY_UNKNOWN, **BLOCKED** | all closed |
 | goforextrading_com | FOREX_CFD | DISCOVERED, UNVERIFIED, ELIGIBILITY_UNKNOWN, **BLOCKED** | all closed |
 
-Changes from 0.1.0: the placeholder `goforex` record was replaced by two records, `goforexfx_com` and `goforextrading_com`, because the dossier found two unrelated-looking domains; `ic_markets_global`, `pepperstone`, `fxpro`, `deriv` and `exness` were added; `ctrader`, `mt5`, `interactive_brokers` and `binance_spot` moved from UNVERIFIED to OFFICIAL_API_VERIFIED; `iq_option`, `oanda` and both GoForex records became BLOCKED.
+Registry 0.3.0 (2026-10-26): binance_spot `tests_passed` records the offline connector tests. Changes from 0.1.0: the placeholder `goforex` record was replaced by two records, `goforexfx_com` and `goforextrading_com`, because the dossier found two unrelated-looking domains; `ic_markets_global`, `pepperstone`, `fxpro`, `deriv` and `exness` were added; `ctrader`, `mt5`, `interactive_brokers` and `binance_spot` moved from UNVERIFIED to OFFICIAL_API_VERIFIED; `iq_option`, `oanda` and both GoForex records became BLOCKED.
 
 Notes on choices made conservatively:
 - The broker records (IC Markets, Pepperstone, FxPro, Deriv, Exness) stay UNVERIFIED for API even though the cTrader and MT5 platform APIs are verified: whether each broker's entity permits algorithmic access is an open question.
@@ -124,7 +124,8 @@ All sources accessed on 2026-10-26 unless a different date is shown. Quotes are 
 - Evidence: https://developers.binance.com/docs/binance-spot-api-docs/rest-api/general-api-information ; https://developers.binance.com/docs/binance-spot-api-docs/faqs/market_data_only ; https://developers.binance.com/docs/binance-spot-api-docs/rest-api/account-endpoints ; https://developers.binance.com/en/docs/products/spot/faqs/api_key_types ; https://www.binance.com/en/support/faq/detail/360002502072 ; https://testnet.binance.vision/ ; https://www.binance.com/en/legal/list-of-prohibited-countries ; https://www.binance.com/en-GB/support-region-list ; https://www.binance.com/en/fee/trading ; https://www.binance.com/en-GB/legal/terms-binance-api.
 - Verified: Spot API documentation (endpoints, security types, key types, rate-limit model, testnet); Guinea absent from the prohibited-countries list.
 - Not verified: contracting entity (ADGM entities likely); FSRA register; Guinea at KYC; Guinean law; RAW_REQUESTS and ORDERS values; data redistribution terms; connectivity (all Binance hosts timed out from the research machine, cause unknown).
-- Tests passed: none recorded in the registry.
+- Connector: `astra.venues.binance_spot` (public data via `data-api.binance.vision`; account reader requiring a provider-verified read-only key; GET only; HMAC-SHA256). The gates are closed by `ELIGIBILITY_UNKNOWN` (not by a BLOCKED status).
+- Tests passed: `tests/test_binance_spot.py`, offline only against a local fake server; no live Binance host was contacted.
 - Validations missing: REGION_ELIGIBILITY_VERIFIED; FSRA register; Guinean law and BCRG controls; connectivity from production; live rate limits; redistribution terms; READ_ONLY_CONNECTED.
 - Human actions: repeat the ping/time GETs from the production network; confirm the entity and KYC country with Binance; check the FSRA register; obtain local legal advice.
 
