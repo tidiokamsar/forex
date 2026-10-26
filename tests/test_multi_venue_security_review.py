@@ -246,5 +246,133 @@ class WritePathTests(ServerCase):
                 )
 
 
+# =============================================================================================
+# Addendum (b98a759): markets/risk_policies.py and markets/costs.py, security angle only. MV-A-6+.
+# =============================================================================================
+
+from decimal import Decimal  # noqa: E402
+
+from astra.markets import crypto_futures, fixed_expiry_options  # noqa: E402
+from astra.markets import risk_policies as policies_module  # noqa: E402
+from astra.markets.costs import SlippageAssumption  # noqa: E402
+from astra.markets.risk_policies import (  # noqa: E402
+    CryptoFuturesRiskPolicy,
+    CryptoSpotRiskPolicy,
+    FixedExpiryOptionsRiskPolicy,
+    MarketRiskDecision,
+    Verdict,
+)
+from astra.models import RunMode  # noqa: E402
+from test_market_risk import buy, context  # noqa: E402
+
+
+class MarketRiskDecisionTests(unittest.TestCase):
+    # CONFIRMED DEFECT MV-A-6 (low): a decision is plain data that anyone can construct. MarketRiskDecision
+    # accepts verdict ALLOW with mode LIVE (or for a derivatives market type), carrying the real policy name
+    # and version, so a downstream consumer cannot tell it from a policy output. Harmless today (no consumer
+    # and no crypto order path), but it is the object a future gate would trust.
+    @unittest.expectedFailure
+    def test_allow_decision_outside_simulation_cannot_be_constructed(self):
+        for market_type, mode in ((MarketType.CRYPTO_SPOT, "LIVE"), (MarketType.CRYPTO_SPOT, "DEMO"),
+                                  (MarketType.CRYPTO_FUTURES, "SIMULATION")):
+            with self.subTest(market_type=market_type, mode=mode), self.assertRaises(ValueError):
+                MarketRiskDecision(market_type, Verdict.ALLOW, (), "crypto_spot", "crypto-spot-1", mode)
+
+    def test_regression_policy_never_allows_outside_simulation(self):
+        policy = CryptoSpotRiskPolicy()
+        self.assertTrue(policy.evaluate(buy(), context()).allowed)  # the same intent is allowed in SIMULATION
+        for mode in (RunMode.DEMO, RunMode.LIVE, "SIMULATION", None):
+            with self.subTest(mode=mode):
+                self.assertFalse(policy.evaluate(buy(), context(mode=mode)).allowed)
+                self.assertFalse(policy.evaluate_stop_change(None, Decimal(1), mode=mode).allowed)
+
+
+class LooserPolicyTests(unittest.TestCase):
+    # CONFIRMED DEFECT MV-A-7 (low): a looser spot policy reports the reviewed name and version. (a) A subclass
+    # overriding _mode_reasons returns ALLOW in LIVE as "crypto_spot"/"crypto-spot-1"; (b) the ceilings are
+    # read from module constants at construction, so patching MAX_ORDER_NOTIONAL_FRACTION admits a 100% cap
+    # under the same version; (c) SlippageAssumption(0) is accepted (no floor), also under the same version.
+    # Decisions record name and version but not the parameter values they ran with.
+    @unittest.expectedFailure
+    def test_subclass_cannot_allow_live_under_the_reviewed_version(self):
+        class Loose(CryptoSpotRiskPolicy):
+            __slots__ = ()
+
+            @staticmethod
+            def _mode_reasons(mode):
+                return []
+
+        decision = Loose().evaluate(buy(), context(mode=RunMode.LIVE))
+        self.assertFalse(decision.allowed and decision.policy_version == "crypto-spot-1")
+
+    @unittest.expectedFailure
+    def test_patched_ceiling_cannot_build_a_looser_policy_under_the_same_version(self):
+        with patch.object(policies_module, "MAX_ORDER_NOTIONAL_FRACTION", Decimal("1")), \
+                patch.object(policies_module, "MAX_DAILY_NOTIONAL_FRACTION", Decimal("1")):
+            try:
+                loose = CryptoSpotRiskPolicy(max_order_notional_fraction=Decimal("1"),
+                                             max_daily_notional_fraction=Decimal("1"))
+            except ValueError:
+                return
+        self.assertNotEqual(loose.version, CryptoSpotRiskPolicy().version)
+
+    @unittest.expectedFailure
+    def test_zero_slippage_is_not_accepted_under_the_reviewed_version(self):
+        with self.assertRaises(ValueError):
+            CryptoSpotRiskPolicy(slippage=SlippageAssumption(Decimal(0)))
+
+    def test_regression_replace_with_looser_values_is_refused(self):
+        policy = CryptoSpotRiskPolicy()
+        for changes in ({"max_order_notional_fraction": Decimal("0.5")}, {"max_quote_age_seconds": 60.0},
+                        {"leverage": 3}, {"allow_short": True}, {"max_daily_notional_fraction": Decimal("Infinity")}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                dataclasses.replace(policy, **changes)
+
+
+class BuyCapTests(unittest.TestCase):
+    # CONFIRMED DEFECT MV-A-8 (low-medium): the anti-martingale rule fails open. After a realised loss the
+    # "size never grows" check runs only when last_buy_notional is given; with None (unknown) a BUY four times
+    # the last size is ALLOWED, against the module's rule that None means unknown and is refused.
+    @unittest.expectedFailure
+    def test_unknown_last_buy_after_a_loss_is_refused(self):
+        decision = CryptoSpotRiskPolicy().evaluate(
+            buy(quantity=Decimal("0.03")), context(day_realized_pnl=Decimal("-50"), last_buy_notional=None)
+        )
+        self.assertFalse(decision.allowed)
+
+    # CONFIRMED DEFECT MV-A-9 (low, design): the daily cap trusts the caller's day_buy_notional; the policy keeps
+    # no ledger and defines no day boundary. Splitting a 19%-of-balance buy into ten 1.9% orders, each evaluated
+    # with day_buy_notional=0, is allowed ten times over a 10% daily cap.
+    @unittest.expectedFailure
+    def test_order_splitting_cannot_exceed_the_daily_cap(self):
+        policy = CryptoSpotRiskPolicy()
+        allowed = [policy.evaluate(buy(intent_id=f"split-{i}", quantity=Decimal("0.038")), context()).allowed
+                   for i in range(10)]
+        self.assertLess(sum(allowed) * Decimal("0.038") * Decimal("50000"), Decimal("100000") * Decimal("0.10"))
+
+
+class DerivativesAndImportsTests(unittest.TestCase):
+    def test_regression_flipping_enabled_does_not_enable_derivatives(self):
+        with patch.object(crypto_futures, "ENABLED", True), patch.object(fixed_expiry_options, "ENABLED", True):
+            for policy in (CryptoFuturesRiskPolicy(), FixedExpiryOptionsRiskPolicy()):
+                with self.subTest(policy=policy.name):
+                    decision = policy.evaluate(mode=RunMode.SIMULATION)
+                    self.assertFalse(decision.allowed)
+                    self.assertIn("enabled_flag_set_without_reviewed_policy", decision.reasons)
+
+    def test_regression_no_import_path_to_order_sending_code(self):
+        import subprocess
+
+        code = ("import sys, astra.markets.risk_policies, astra.markets.costs, astra.venues.binance_spot, "
+                "astra.venues.registry, astra.venues.contract; "
+                "print(','.join(sorted(m for m in sys.modules if m.startswith('astra'))))")
+        src = str(Path(__file__).resolve().parents[1] / "src")
+        loaded = subprocess.run([sys.executable, "-I", "-c", f"import sys; sys.path.insert(0, {src!r}); {code}"],
+                                capture_output=True, text=True, timeout=120, check=True).stdout.strip().split(",")
+        for module in loaded:
+            self.assertFalse(module.startswith(("astra.execution", "astra.permits", "astra.service")), module)
+            self.assertNotIn(module, {"astra.brokers.ctrader", "astra.brokers.simulated"})
+
+
 if __name__ == "__main__":
     unittest.main()
