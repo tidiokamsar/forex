@@ -481,11 +481,10 @@ class LedgerKeyTests(unittest.TestCase):
         reset_default_spot_ledger_for_tests()
         self.addCleanup(reset_default_spot_ledger_for_tests)
 
-    # CONFIRMED DEFECT MV-A-15 (low-medium): the shared daily ledger is keyed by the caller's context.venue_id,
+    # FIXED (was CONFIRMED DEFECT MV-A-15) (low-medium): the shared daily ledger is keyed by the caller's context.venue_id,
     # which is only checked to be a non-empty string after strip(). "binance_spot", "binance_spot ", "BINANCE_SPOT"
     # and "binance_spot\t" are four ledger keys for one venue and one free quote balance, so the 10% daily cap is
     # evaded by varying the label: ten 1.9% buys through policy_for() are all allowed (19% of the balance).
-    @unittest.expectedFailure
     def test_daily_cap_cannot_be_split_across_venue_id_spellings(self):
         spellings = ("binance_spot", "binance_spot ", "BINANCE_SPOT", "binance_spot\t", " binance_spot")
         allowed = [

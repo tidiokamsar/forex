@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal, localcontext
@@ -88,6 +89,9 @@ def _fingerprint(pairs: Parameters) -> str:
     payload = json.dumps([list(pair) for pair in pairs], separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(payload.encode("ascii")).hexdigest()
 
+
+# Canonical venue id, as in astra.venues.registry (lower-case, no whitespace).
+_VENUE_ID_PATTERN = re.compile(r"[a-z][a-z0-9_]*")
 
 @dataclass(frozen=True, slots=True)
 class MarketRiskDecision:
@@ -533,6 +537,10 @@ class CryptoSpotRiskPolicy:
         reasons.extend(self._intent_shape(intent))
         if not isinstance(context.venue_id, str) or not context.venue_id.strip():
             reasons.append("venue_unknown")
+        elif not _VENUE_ID_PATTERN.fullmatch(context.venue_id):
+            # The ledger is keyed by venue_id: only the registry's canonical form is accepted, so spelling
+            # variants ("BINANCE_SPOT", "binance_spot ") cannot split the daily cap (MV-A-15).
+            reasons.append("venue_id_not_canonical")
 
         spec, book = context.spec, context.book
         reasons.extend(self._market_data(intent, context))
@@ -749,7 +757,7 @@ class CryptoSpotRiskPolicy:
         elif not _is_decimal(stop) or stop <= 0 or stop >= price:
             reasons.append("invalid_stop")
 
-        venue_known = isinstance(context.venue_id, str) and bool(context.venue_id.strip())
+        venue_known = isinstance(context.venue_id, str) and bool(_VENUE_ID_PATTERN.fullmatch(context.venue_id))
         daily: tuple[Decimal, Decimal] | None = None
         quote_balance = None if balances is None else balances.get(spec.quote_asset)
         if quote_balance is not None:
