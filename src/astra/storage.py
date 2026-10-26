@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from . import holdout_reuse
-from .anchoring import BINDING_SCHEMA_SQL
+from .anchoring import BINDING_SCHEMA_SQL, BINDING_TABLE
 from .attempts import SCHEMA_SQL as ATTEMPT_SCHEMA_SQL
 from .attempts import logged_holdout_returns
 from .models import BacktestResult
@@ -462,10 +462,25 @@ class BacktestStore:
     def begin_holdout_evaluation(
         self, *, protocol_id: str, dataset_identity_sha256: str
     ) -> dict[str, Any]:
-        """Burn the dataset's sole holdout attempt before calculation begins."""
+        """Burn the dataset's sole holdout attempt before calculation begins.
+
+        A store bound to an evidence anchor is never scored without one (Lot 4 round 5, A4-D-2): a file
+        copy carries the binding row, so the holdout cannot be peeked at in an unanchored copy and then
+        scored "for the first time" in the anchored original.
+        """
 
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            if self.anchor is None:
+                try:
+                    bound = db.execute(f"SELECT anchor_id FROM {BINDING_TABLE} LIMIT 1").fetchone()
+                except sqlite3.OperationalError:
+                    bound = None  # created by initialize(); a store without the table was never anchored
+                if bound is not None:
+                    raise ValueError(
+                        f"this store is bound to evidence anchor {bound['anchor_id']}; "
+                        "a holdout can only be scored with that anchor configured"
+                    )
             protocol = db.execute(
                 "SELECT dataset_sha256 FROM research_protocols WHERE protocol_id = ?",
                 (protocol_id,),

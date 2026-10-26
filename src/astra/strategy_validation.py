@@ -378,6 +378,7 @@ def evaluate_strategy_walk_forward(
     store=None,
     experiment_id: str | None = None,
     trial_universe: Any = None,
+    source_type: str | None = None,
 ) -> StrategyWalkForwardReport:
     """Select on validation windows across families and score disjoint tests.
 
@@ -390,6 +391,10 @@ def evaluate_strategy_walk_forward(
     ``trial_universe`` (an ``astra.overfitting.TrialUniverse``) supplies the
     trials run outside this plan for the deflated Sharpe; it is not part of the
     sealed plan because it grows over time.
+
+    ``source_type`` (Lot 4 round 5) is the provenance label of the bars
+    (``DATA_SOURCE_TYPES``; ``None`` records ``UNKNOWN``). It is sealed in the
+    plan, so promotion reads it from the plan, never from a caller.
     """
 
     recorder = attempts.WalkForwardAttempts.for_store(store, experiment_id=experiment_id)
@@ -397,7 +402,7 @@ def evaluate_strategy_walk_forward(
         return _evaluate_strategy_walk_forward(
             bars, candidates, hypothesis=hypothesis, protocol=protocol, initial_equity=initial_equity,
             cost_model=cost_model, dataset_sha256=dataset_sha256, store=store, recorder=recorder,
-            trial_universe=trial_universe,
+            trial_universe=trial_universe, source_type=source_type,
         )
     except BaseException as exc:
         recorder.abort(exc)
@@ -406,8 +411,9 @@ def evaluate_strategy_walk_forward(
 
 def _evaluate_strategy_walk_forward(
     bars, candidates, *, hypothesis, protocol, initial_equity, cost_model, dataset_sha256, store, recorder,
-    trial_universe=None,
+    trial_universe=None, source_type=None,
 ) -> StrategyWalkForwardReport:
+    data_source = normalize_data_source_type(source_type)
     history, chosen, cost_model = _prepare(bars, candidates, protocol, initial_equity, cost_model)
     if not isinstance(hypothesis, str) or not hypothesis.strip():
         raise ValueError("a falsifiable, non-empty hypothesis is required")
@@ -479,6 +485,7 @@ def _evaluate_strategy_walk_forward(
             for ordinal, (vs, ve, ts, te) in enumerate(ranges, start=1)
         ],
         "instrument": history[0].instrument,
+        "data_source": {"source_type": data_source},
         "holdout": {
             "content_sha256": _holdout_content_sha256(history, development_end),
             "status": "RESERVED_NOT_EVALUATED",
@@ -710,6 +717,7 @@ def evaluate_strategy_holdout_once(
         cost_model=cost_model,
         dataset_sha256=dataset_sha256,
         trial_universe=trial_universe,
+        source_type=plan_data_source_type(report.plan_manifest),
     )
     if verified.plan_sha256 != report.plan_sha256:
         raise ValueError("recomputed plan does not match the sealed plan")
@@ -923,6 +931,58 @@ def _tuples(value: Any) -> Any:
     return tuple(_tuples(item) for item in value) if isinstance(value, list) else value
 
 
+# Provenance labels of market data (directive V5 names first, then the importer's labels).
+AUTHENTIC_DATA_SOURCE_TYPES = frozenset(
+    {"PUBLIC", "BROKER_HISTORICAL", "LIVE_FEED", "DEMO_EXECUTION", "HISTORICAL", "DELAYED", "LIVE"}
+)
+NON_AUTHENTIC_DATA_SOURCE_TYPES = frozenset({"SYNTHETIC", "SIMULATED"})
+DATA_SOURCE_TYPES = AUTHENTIC_DATA_SOURCE_TYPES | NON_AUTHENTIC_DATA_SOURCE_TYPES | {"UNKNOWN"}
+
+
+def normalize_data_source_type(source_type: str | None) -> str:
+    """Upper-case provenance label; ``None`` is ``UNKNOWN``; any other label is refused."""
+
+    if source_type is None:
+        return "UNKNOWN"
+    if not isinstance(source_type, str) or source_type.strip().upper() not in DATA_SOURCE_TYPES:
+        raise ValueError(f"unsupported data source type {source_type!r}; use one of {sorted(DATA_SOURCE_TYPES)}")
+    return source_type.strip().upper()
+
+
+def plan_data_source_type(plan: Mapping[str, Any]) -> str | None:
+    """The source type sealed in a plan (``None`` for plans sealed before Lot 4 round 5)."""
+
+    data_source = plan.get("data_source") if isinstance(plan, Mapping) else None
+    value = data_source.get("source_type") if isinstance(data_source, Mapping) else None
+    return value if isinstance(value, str) else None
+
+
+def _consumed_holdout_status(store: Any, protocol_id: str) -> str | None:
+    """Status of the plan's holdout read from the store's own database file (Lot 4 round 5, A4-D-1).
+
+    Only a ``BacktestStore`` itself is accepted (no subclass or stand-in object), and the
+    status is read with SQL from its file, never through a method the caller could replace.
+    """
+
+    import sqlite3
+
+    from .storage import BacktestStore
+
+    if type(store) is not BacktestStore:
+        raise ValueError("re-deriving a holdout needs the BacktestStore that consumed it")
+    path = Path(store.path)
+    if not path.is_file():
+        raise ValueError("re-deriving a holdout needs the BacktestStore that consumed it")
+    db = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=5.0)
+    try:
+        row = db.execute("SELECT status FROM holdout_evaluations WHERE protocol_id = ?", (protocol_id,)).fetchone()
+    except sqlite3.Error:
+        row = None
+    finally:
+        db.close()
+    return str(row[0]) if row else None
+
+
 def rederive_holdout_evidence(
     bars: Iterable[MarketBar],
     plan_manifest: Mapping[str, Any],
@@ -964,13 +1024,11 @@ def rederive_holdout_evidence(
         initial_equity=initial_equity,
         cost_model=cost_model,
         dataset_sha256=provided_hash,
+        source_type=plan_data_source_type(plan),
     )
     if verified.plan_sha256 != _sha256(_canonical_json(plan)):
         raise ValueError("these bars do not reproduce the sealed plan")
-    if store is None or not hasattr(store, "holdout_for_protocol"):
-        raise ValueError("re-deriving a holdout needs the store that consumed it")
-    consumed = store.holdout_for_protocol(verified.plan_sha256)
-    if consumed is None or consumed.get("status") not in ("COMPLETED", "FAILED"):
+    if _consumed_holdout_status(store, verified.plan_sha256) not in ("COMPLETED", "FAILED"):
         raise ValueError(
             "the holdout of this plan has not been consumed; score it once with evaluate_strategy_holdout_once"
         )

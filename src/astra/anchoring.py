@@ -37,7 +37,7 @@ append-only ``evidence_anchor_bindings`` table. A store is then verified only
 against an anchor with the same identity (``anchor_identity_mismatch``), an
 anchor with checkpoints never meets an unbound store
 (``store_not_bound_to_anchor``), and an empty anchor is refused for a store
-that is already bound or already holds sealed plans or holdout evaluations
+that already holds sealed plans, holdout evaluations or attempt history
 (``anchor_empty_for_used_store``): restoring a backup and pointing the store at
 a fresh anchor (another file, or ``ASTRA_EVIDENCE_ANCHOR`` repointed) no longer
 makes a spent holdout look unspent.
@@ -400,9 +400,10 @@ def _store_bindings(db: sqlite3.Connection) -> tuple[str, ...]:
 
 
 def _store_in_use(db: sqlite3.Connection) -> bool:
-    """A store with sealed plans or holdout evaluations holds evidence an empty anchor would forget."""
+    """A store with sealed plans, holdout evaluations or attempt history holds evidence an empty anchor
+    would forget (the attempt log counts too, Lot 4 round 5, Q-4: seal rows can be wiped, the chain stays)."""
 
-    for table in ("research_protocols", "holdout_evaluations"):
+    for table in ("research_protocols", "holdout_evaluations", TABLE):
         if _has_table(db, table) and db.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone() is not None:
             return True
     return False
@@ -433,8 +434,14 @@ def _record_binding(database_path: str | Path, anchor: EvidenceAnchor, anchor_id
         db.close()
 
 
-def build_checkpoint(database_path: str | Path, previous: EvidenceCheckpoint | None) -> EvidenceCheckpoint:
-    """The next checkpoint for the store, chained to ``previous`` (read-only access to the store)."""
+def build_checkpoint(
+    database_path: str | Path, previous: EvidenceCheckpoint | None, anchor_id: str | None = None
+) -> EvidenceCheckpoint:
+    """The next checkpoint for the store, chained to ``previous`` (read-only access to the store).
+
+    The first checkpoint takes ``anchor_id`` when given (the identity already recorded in the
+    store's binding), else a new random one; later checkpoints repeat ``previous.anchor_id``.
+    """
 
     with _read_only(database_path) as db:
         snapshot = _store_snapshot(db)
@@ -450,7 +457,7 @@ def build_checkpoint(database_path: str | Path, previous: EvidenceCheckpoint | N
         "previous_checkpoint_sha256": previous.checkpoint_sha256 if previous else GENESIS_HASH,
         "format_version": ANCHOR_FORMAT_VERSION if previous is None or previous.anchor_id else previous.format_version,
     }
-    anchor_id = previous.anchor_id if previous else uuid.uuid4().hex
+    anchor_id = previous.anchor_id if previous else (anchor_id or uuid.uuid4().hex)
     if anchor_id:
         content["anchor_id"] = anchor_id
     return EvidenceCheckpoint(**content, checkpoint_sha256=checkpoint_hash(content))
@@ -463,6 +470,12 @@ def anchor_store(database_path: str | Path, anchor: EvidenceAnchor) -> EvidenceC
     already anchored (``anchor_empty`` excepted), so a restored or rewritten
     store cannot be re-anchored silently. The first anchoring of a store binds
     it to the anchor's identity (``evidence_anchor_bindings``).
+
+    Lot 4 round 5 (A4-D-6): the binding is written before the first checkpoint
+    is appended, with the identity that checkpoint will carry. A crash in
+    between leaves a bound, still unused store and an empty anchor, which the
+    next anchoring completes with the same identity; a crash before the binding
+    leaves both untouched.
     """
 
     previous = anchor.latest()
@@ -470,10 +483,14 @@ def anchor_store(database_path: str | Path, anchor: EvidenceAnchor) -> EvidenceC
     blocking = [code for code in verification.errors if code != ANCHOR_EMPTY]
     if blocking:
         raise AnchorError(f"store does not match its anchor: {', '.join(blocking)}")
-    checkpoint = build_checkpoint(database_path, previous)
+    anchor_id = None
+    if previous is None:
+        with _read_only(database_path) as db:
+            bindings = _store_bindings(db)
+        anchor_id = bindings[0] if bindings else uuid.uuid4().hex
+        _record_binding(database_path, anchor, anchor_id)
+    checkpoint = build_checkpoint(database_path, previous, anchor_id)
     anchor.append(checkpoint)
-    if checkpoint.anchor_id:
-        _record_binding(database_path, anchor, checkpoint.anchor_id)
     return checkpoint
 
 
@@ -521,10 +538,11 @@ def verify_store_against_anchor(database_path: str | Path, anchor: EvidenceAncho
         in_use = _store_in_use(db)
 
     if not items:
-        if bindings or in_use:
+        # A bound but unused store is the state a crash leaves between binding and first checkpoint (A4-D-6).
+        if in_use:
             report(
                 ANCHOR_EMPTY_FOR_USED_STORE,
-                "the store is already bound to an anchor or holds sealed plans or holdout evaluations; "
+                "the store holds sealed plans, holdout evaluations or attempt history; "
                 "a fresh anchor would forget them",
             )
     else:

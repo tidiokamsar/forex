@@ -44,11 +44,16 @@ class AnchoringTestCase(unittest.TestCase):
 
         return anchor_store(self.database, self.anchor)
 
+    def scorer(self):
+        """The store to score holdouts with: a store bound to the anchor refuses unanchored scoring (A4-D-2)."""
+
+        return BacktestStore(self.database, anchor=self.anchor) if store_binding(self.database) else self.store
+
     def research(self, holdout=True):
         with overfitting_double():
             report = evaluate(store=self.store)
             if holdout:
-                evaluate_strategy_holdout_once(BARS, report=report, protocol=PROTOCOL, store=self.store)
+                evaluate_strategy_holdout_once(BARS, report=report, protocol=PROTOCOL, store=self.scorer())
         return report
 
 
@@ -169,7 +174,7 @@ class StoreVerificationTests(AnchoringTestCase):
             report = evaluate(store=self.store)
         before_holdout = create_backup(self.database, backups)
         with overfitting_double():
-            evaluate_strategy_holdout_once(BARS, report=report, protocol=PROTOCOL, store=self.store)
+            evaluate_strategy_holdout_once(BARS, report=report, protocol=PROTOCOL, store=self.scorer())
         anchor_store(self.database, self.anchor)
         fingerprints = consumed_holdout_fingerprints(self.anchor)
         self.assertEqual(len(fingerprints), 1)

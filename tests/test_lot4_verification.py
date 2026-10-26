@@ -52,7 +52,12 @@ from astra.research_policy import (
     reuse_policy_looser_than_floor,
 )
 from astra.storage import BacktestStore
-from astra.strategy_validation import DSR_SHARPE_UNIT, assess_overfitting, holdout_evidence
+from astra.strategy_validation import (
+    DSR_SHARPE_UNIT,
+    assess_overfitting,
+    evaluate_strategy_walk_forward,
+    holdout_evidence,
+)
 from astra.validation import evaluate_walk_forward
 from test_features import make_synthetic_bars
 from test_lot4_adversarial import (
@@ -847,6 +852,8 @@ class RederivationAndAnchorTests(AnchoredStoreMixin):
         self.assertEqual(integrity(self.failures()), {"evidence_anchor_not_production_grade"})
         waived = self.registry.check_promotion("wf", "1", holdout_bars=BARS, allow_non_production_anchor=True)
         self.assertEqual(integrity(set(waived)), set())
+        # Lot 4 round 5 (data provenance): the fixture's plan carries no source label, so it fails closed.
+        self.assertIn("dataset_provenance_unknown", waived)
         self.assertFalse(self.anchor.production_grade)
         self.assertFalse(verify_store_against_anchor(self.path, self.anchor).production_grade)
 
@@ -1300,7 +1307,7 @@ class Round4EvidenceAttackTests(AnchoredStoreMixin):
     # PHASE4 FAIL Q-4 (Low; DB write; mitigated by the attempt-log comparison above): a store whose seal and
     # binding rows were wiped is no longer "in use" for a fresh anchor, although its attempt log still records
     # sealed plans and a scored holdout. ``_store_in_use`` ignores research_attempt_events.
-    @unittest.expectedFailure
+    # FIXED IN LOT 4 ROUND 5 (was PHASE4 FAIL Q-4): attempt-log rows make a store "in use".
     def test_store_with_attempt_history_is_in_use_for_a_fresh_anchor(self):
         score_holdout(self.store, evaluate(store=self.store))
         drop_all_triggers(self.path)
@@ -1331,6 +1338,53 @@ class Round4InformationTests(unittest.TestCase):
         self.assertEqual(result.statistical_policy["applied"], {
             "min_dsr_returns": 30, "min_dsr_trades": 30, "min_pbo_nonzero_row_fraction": 0.5, "min_pbo_slices": 4,
             "min_pbo_trades_per_slice": 1})
+
+
+class DataProvenanceTests(AnchoredStoreMixin):
+    """Lot 4 round 5 (directive V5): the bars' source label is sealed in the plan and gates promotion."""
+
+    def record(self, source_type, manifest_source=None):
+        report = evaluate_strategy_walk_forward(BARS, None, hypothesis="provenance gate", protocol=PROTOCOL,
+                                                store=self.store, source_type=source_type)
+        manifest = bound_manifest(report)
+        if manifest_source is not None:
+            manifest["dataset_identity"] = {**manifest["dataset_identity"], "source_type": manifest_source}
+        self.registry.register_candidate(actor=AGENT, model_id="wf", version="1", manifest=manifest,
+                                         criteria=PromotionCriteria())
+        holdout = score_holdout(self.store, report)
+        evaluation_id = self.store.holdout_for_protocol(report.plan_sha256)["evaluation_id"]
+        self.registry.record_evaluation(actor=AGENT, model_id="wf", version="1", kind="holdout",
+                                        evidence=holdout_evidence(holdout), holdout_evaluation_id=evaluation_id)
+        return report
+
+    def dataset_failures(self):
+        failures = self.registry.check_promotion("wf", "1", holdout_bars=BARS, allow_non_production_anchor=True)
+        return {item for item in failures if item.startswith("dataset_")}
+
+    def test_synthetic_plan_is_not_authentic_whatever_the_manifest_claims(self):
+        report = self.record("synthetic", manifest_source="HISTORICAL")
+        self.assertEqual(report.plan_manifest["data_source"], {"source_type": "SYNTHETIC"})
+        self.assertEqual(self.dataset_failures(), {"dataset_not_authentic:SYNTHETIC"})
+
+    def test_missing_label_fails_closed(self):
+        report = self.record(None)
+        self.assertEqual(report.plan_manifest["data_source"], {"source_type": "UNKNOWN"})
+        self.assertEqual(self.dataset_failures(), {"dataset_provenance_unknown"})
+
+    def test_authentic_label_passes_this_gate_and_is_bound_to_the_plan_hash(self):
+        report = self.record("HISTORICAL")
+        self.assertEqual(self.dataset_failures(), set())
+        unlabeled = evaluate_strategy_walk_forward(BARS, None, hypothesis="provenance gate", protocol=PROTOCOL)
+        self.assertNotEqual(unlabeled.plan_sha256, report.plan_sha256)
+
+    def test_unknown_labels_and_legacy_plans(self):
+        from astra.strategy_validation import normalize_data_source_type, plan_data_source_type
+
+        with self.assertRaises(ValueError):
+            normalize_data_source_type("REAL_ENOUGH")
+        self.assertIsNone(plan_data_source_type({}))
+        self.assertNotIn("source_type", inspect.signature(ModelRegistry.check_promotion).parameters)
+        self.assertNotIn("source_type", inspect.signature(ModelRegistry.promote).parameters)
 
 
 if __name__ == "__main__":
