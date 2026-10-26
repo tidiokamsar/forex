@@ -1340,7 +1340,9 @@ class Round4InformationTests(unittest.TestCase):
         self.assertIsNotNone(result.deflated_sharpe_probability)
         self.assertEqual(result.statistical_policy["applied"], {
             "min_dsr_returns": 30, "min_dsr_trades": 30, "min_pbo_nonzero_row_fraction": 0.5, "min_pbo_slices": 4,
-            "min_pbo_trades_per_slice": 1})
+            "min_pbo_trades_per_slice": 1,
+            # Added by the DSR serial-dependence change (policy 0.3.0/0.4.0, merged after this test was written).
+            "dsr_autocorrelation_lags": 5, "min_dsr_effective_returns": 30, "max_dsr_abs_autocorrelation": 0.3})
 
 
 class DataProvenanceTests(AnchoredStoreMixin):
