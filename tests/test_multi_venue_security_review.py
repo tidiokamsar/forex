@@ -426,12 +426,12 @@ class PersistedStateMigrationTests(unittest.TestCase):
         bs.reset_host_states_for_tests()
         self.addCleanup(bs.reset_host_states_for_tests)
 
-    # CONFIRMED DEFECT MV-A-13 (low, fail-open on upgrade): the persisted stop-state file is now read under the new
+    # (was) CONFIRMED DEFECT MV-A-13 (low, fail-open on upgrade): the persisted stop-state file is now read under the new
     # scope key ("binance:production"). A file written before this change keys the ban by base URL
     # ("https://api.binance.com"); attach() looks up only the new key and silently ignores the old entry, so an
     # active, open-ended 418 ban recorded before the upgrade is forgotten. Entries it cannot map should refuse
     # (as an unreadable file already does) or be migrated. No network: the connector is only constructed.
-    @unittest.expectedFailure
+    # FIXED (was CONFIRMED DEFECT MV-A-13): legacy base-URL keys are mapped to their scope; unknown keys refuse.
     def test_ban_persisted_under_the_previous_key_format_is_still_honoured(self):
         import tempfile
 

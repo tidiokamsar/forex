@@ -350,17 +350,22 @@ class _HostState:
         if self.state_path is not None and self.state_path != state_path:
             raise BinanceConfigurationError(f"{self.key}: already persisted to another state file")
         self.state_path = state_path
-        record = _read_state_file(state_path).get(self.key)
-        if record is None:
-            return
+        hosts = _read_state_file(state_path)
+        # Entries written before MV-A-10 are keyed by base URL; they still bind the scope they belong to
+        # (MV-A-13). A key that is neither a scope key nor a recognisable Binance base URL is refused.
+        for key, record in hosts.items():
+            if _legacy_scope(key) == self.key:
+                self._merge(key, record)
+
+    def _merge(self, key: str, record: object) -> None:
         try:
             banned = record["banned"]
             banned_until = _parse_state_time(record["banned_until"])
             blocked_until = _parse_state_time(record["blocked_until"])
         except (KeyError, TypeError, ValueError) as exc:
-            raise BinanceConfigurationError(f"state file entry for {self.key} is invalid; inspect it by hand") from exc
+            raise BinanceConfigurationError(f"state file entry for {key} is invalid; inspect it by hand") from exc
         if not isinstance(banned, bool):
-            raise BinanceConfigurationError(f"state file entry for {self.key} is invalid; inspect it by hand")
+            raise BinanceConfigurationError(f"state file entry for {key} is invalid; inspect it by hand")
         if banned and not self.banned:
             self.banned, self.banned_until = True, banned_until
         elif banned and self.banned_until is not None:
@@ -443,6 +448,23 @@ def _state_key(base: _BaseUrl) -> str:
     if base.role in ("production", "public_data"):
         return "binance:production"
     return f"binance:{base.role}"
+
+
+def _legacy_scope(key: str) -> str:
+    """Scope key of a state-file entry: current scope keys as is, pre-MV-A-10 base-URL keys mapped to their scope."""
+
+    if not isinstance(key, str):
+        raise BinanceConfigurationError("state file has a non-string host key; inspect it by hand")
+    if key.startswith(("binance:", "loopback:")):
+        return key
+    try:
+        parts = urllib.parse.urlsplit(key)
+        host = (parts.hostname or "").lower()
+        role = "production" if _is_loopback(host) else None
+        base = _parse_base_url(key, _LOOPBACK_ROLES, role)
+    except (BinanceConfigurationError, ValueError) as exc:
+        raise BinanceConfigurationError(f"state file has an unrecognised host key {key!r}; inspect it by hand") from exc
+    return _state_key(base)
 
 
 def reset_host_states_for_tests() -> None:
