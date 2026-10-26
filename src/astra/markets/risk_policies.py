@@ -17,9 +17,8 @@ and raising risk after losses are refused by construction: no input can scale
 size up after a loss, and the checks below reject the patterns explicitly.
 
 The decisions are data. No connector, gateway, permit or concrete broker
-adapter is imported. ``astra.venues.contract`` (used for ``ensure_fresh`` and
-``Balance``) loads ``astra.brokers.base``, which defines the abstract,
-permit-guarded ``BrokerAdapter``; nothing here calls it. The only order path in
+adapter is imported, and no ``astra.brokers`` module is loaded: the shared value
+types come from ``astra.connector_types`` (MV-D-13). The only order path in
 ASTRA remains ``OrderGateway`` -> ``ExecutionPermit`` ->
 ``BrokerAdapter.submit_order``, and no crypto order can be sent in this lot.
 

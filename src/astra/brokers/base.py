@@ -13,6 +13,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 
+# Re-exported unchanged: these value types live outside astra.brokers so read-only code need not load it.
+from ..connector_types import CapabilityNotSupported as CapabilityNotSupported
+from ..connector_types import EnvironmentSource as EnvironmentSource
+from ..connector_types import Quote as Quote
 from ..instruments import InstrumentSpec
 from ..models import Direction
 
@@ -24,15 +28,6 @@ class BrokerEnvironment(StrEnum):
     DEMO = "DEMO"
     LIVE = "LIVE"
     UNKNOWN = "UNKNOWN"
-
-
-class EnvironmentSource(StrEnum):
-    """Where an account environment claim came from."""
-
-    PROVIDER_API = "PROVIDER_API"
-    SIMULATOR = "SIMULATOR"
-    CONFIGURATION_ONLY = "CONFIGURATION_ONLY"
-    UNVERIFIED = "UNVERIFIED"
 
 
 class ConnectionState(StrEnum):
@@ -76,10 +71,6 @@ class BrokerRequestError(Exception):
         self.transient = transient is True
 
 
-class CapabilityNotSupported(Exception):
-    """The adapter does not support the requested operation."""
-
-
 @dataclass(frozen=True, slots=True)
 class Capabilities:
     adapter_name: str
@@ -112,15 +103,6 @@ class AccountSnapshot:
     margin_used: float
     margin_free: float
     as_of: datetime
-
-
-@dataclass(frozen=True, slots=True)
-class Quote:
-    instrument: str
-    bid: float
-    ask: float
-    timestamp: datetime
-    source: str
 
 
 @dataclass(frozen=True, slots=True)

@@ -276,11 +276,9 @@ class LedgerRecheckTests(unittest.TestCase):
 
 
 class ImportAndDocHonestyTests(unittest.TestCase):
-    # MV-D-13 (Low; wording) - WORDING FIXED, BEHAVIOUR ACCEPTED: RISK_POLICY.md and the module docstring now
-    # say that astra.brokers.base (abstract, permit-guarded BrokerAdapter) is loaded through
-    # astra.venues.contract, and test_market_risk asserts it is the only astra.brokers module loaded. The module
-    # is still loaded, so this test keeps failing; removing the import belongs to venues.contract (not owned here).
-    @unittest.expectedFailure
+    # FIXED (was MV-D-13, Low): Quote, EnvironmentSource and CapabilityNotSupported moved to
+    # astra.connector_types (re-exported unchanged by astra.brokers.base); astra.venues.contract imports them from
+    # there, so importing the policy modules no longer loads astra.brokers.base.
     def test_policy_modules_do_not_load_the_broker_adapter_module(self):
         code = "import sys, astra.markets.risk_policies; print('astra.brokers.base' in sys.modules)"
         result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True,

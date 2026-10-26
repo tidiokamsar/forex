@@ -761,14 +761,14 @@ class NoOrderPathTests(unittest.TestCase):
     )
 
     def test_only_the_abstract_broker_contract_is_loaded(self):
-        # astra.venues.contract imports astra.brokers.base (abstract, permit-guarded BrokerAdapter); nothing else.
+        # MV-D-13: the shared value types live in astra.connector_types, so no astra.brokers module is loaded.
         code = ("import sys, astra.markets.risk_policies, astra.markets.costs\n"
                 "print(','.join(sorted(m for m in sys.modules if m.startswith('astra.brokers'))))\n")
         result = subprocess.run(
             [sys.executable, "-c", code], capture_output=True, text=True, check=True,
             env={"PYTHONPATH": str(SRC), "SYSTEMROOT": __import__("os").environ.get("SYSTEMROOT", "")},
         )
-        self.assertEqual(result.stdout.strip(), "astra.brokers,astra.brokers.base")
+        self.assertEqual(result.stdout.strip(), "")
 
     def test_importing_the_modules_loads_no_order_sending_code(self):
         code = (

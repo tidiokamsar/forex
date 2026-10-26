@@ -31,7 +31,7 @@ from decimal import Decimal
 from enum import StrEnum
 from types import MappingProxyType
 
-from ..brokers.base import CapabilityNotSupported, EnvironmentSource, Quote
+from ..connector_types import CapabilityNotSupported, EnvironmentSource, Quote
 from ..markets import MarketSpec
 from ..markets.common import require_aware, require_iso_date, require_symbol, require_text, to_decimal
 from ..models import MarketBar
