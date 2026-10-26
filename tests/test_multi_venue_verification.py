@@ -293,7 +293,7 @@ class ImportAndDocHonestyTests(unittest.TestCase):
     # recommends a read-only Ed25519 key although the connector signs with HMAC-SHA256 only; ARCHITECTURE.md
     # still calls the seeded records placeholders; the registry's binance_spot record lists no offline tests
     # (tests_passed is empty) while the ctrader record lists its offline tests.
-    @unittest.expectedFailure
+    # FIXED (was MV-D-7): docs and registry 0.3.0 updated in a09529e.
     def test_docs_describe_the_binance_connector_as_offline_only(self):
         combined = "\n".join((ROOT / name).read_text(encoding="utf-8")
                              for name in ("VENUE_REGISTRY.md", "BROKERS.md", "ARCHITECTURE.md"))
