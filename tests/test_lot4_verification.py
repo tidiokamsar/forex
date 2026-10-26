@@ -58,7 +58,7 @@ from astra.strategy_validation import (
     evaluate_strategy_walk_forward,
     holdout_evidence,
 )
-from astra.validation import evaluate_walk_forward
+from astra.validation import WalkForwardProtocol, evaluate_walk_forward
 from test_features import make_synthetic_bars
 from test_lot4_adversarial import (
     AGENT,
@@ -1390,6 +1390,229 @@ class DataProvenanceTests(AnchoredStoreMixin):
         self.assertIsNone(plan_data_source_type({}))
         self.assertNotIn("source_type", inspect.signature(ModelRegistry.check_promotion).parameters)
         self.assertNotIn("source_type", inspect.signature(ModelRegistry.promote).parameters)
+
+
+# =====================================================================================================
+# Phase 5 (QA agent D) against 91faef4: DSR serial dependence, round 5 detector, data provenance gate.
+# Expected failures are marked ``# PHASE5 FAIL R-n`` with a severity.
+# =====================================================================================================
+
+
+def _iid(seed, count=400, mean=0.0004, scale=0.002):
+    rng = random.Random(seed)
+    return [mean + scale * rng.gauss(0, 1) for _ in range(count)]
+
+
+def _ar1(phi, seed, count=400, mean=0.0004, scale=0.002):
+    rng = random.Random(seed)
+    value, out = 0.0, []
+    for _ in range(count + 300):
+        value = phi * value + rng.gauss(0, 1)
+        out.append(mean + scale * value)
+    return out[300:]
+
+
+def _long_memory(seed, count=400, weight=0.28, phi=0.98, mean=0.0006, scale=0.002):
+    """i.i.d. noise plus a slowly varying mean: |rho_k| about 0.15 at every lag up to ~50, below the 0.3 cap."""
+
+    rng = random.Random(seed)
+    level, slow = 0.0, []
+    for _ in range(count + 300):
+        level = phi * level + rng.gauss(0, math.sqrt(1 - phi * phi))
+        slow.append(level)
+    return [mean + scale * (math.sqrt(weight) * slow[index] + math.sqrt(1 - weight) * rng.gauss(0, 1))
+            for index in range(300, 300 + count)]
+
+
+DSR_MATRIX = tuple(tuple(float((r * r * 3 + r * 7 + c * 5 + c * r) % 11 - 5) for c in range(4)) for r in range(16))
+
+
+def _assess_dsr(returns):
+    return assess_overfitting(DSR_MATRIX, [f"p{r}" for r in range(16)], variants_tested=4, dsr_returns=returns,
+                              initial_equity=10_000.0, dsr_trade_count=100)
+
+
+class SerialDependenceMathTests(unittest.TestCase):
+    """Independent checks of B's serial-dependence statistics against closed forms and textbook values."""
+
+    def test_lo_eta_matches_the_ar1_closed_form(self):
+        from astra.overfitting import lo_scale_factor
+
+        # Lo (2002) eq. 21: eta(q) = q / sqrt(q + 2 phi / (1 - phi)^2 [(q - 1)(1 - phi) - phi (1 - phi^(q - 1))]).
+        for phi, q in ((0.5, 12), (0.2, 52), (-0.3, 12), (0.0, 250)):
+            closed = q / math.sqrt(q + 2 * phi / (1 - phi) ** 2 * ((q - 1) * (1 - phi) - phi * (1 - phi ** (q - 1))))
+            with self.subTest(phi=phi, q=q):
+                self.assertAlmostEqual(lo_scale_factor(q, [phi ** k for k in range(1, q)]), closed, places=12)
+        self.assertAlmostEqual(lo_scale_factor(250, []), math.sqrt(250), places=12)  # i.i.d.: sqrt(q)
+
+    def test_effective_size_and_ljung_box_by_hand(self):
+        from astra.overfitting import chi_square_survival, effective_sample_size, ljung_box
+
+        # T = 100, rho = (0.5, 0.25): inflation 1 + 2 (0.99 * 0.5 + 0.98 * 0.25) = 2.48, T_eff = 40.32.
+        teff, inflation = effective_sample_size(100, [0.5, 0.25])
+        self.assertAlmostEqual(inflation, 2.48, places=12)
+        self.assertAlmostEqual(teff, 100 / 2.48, places=12)
+        # Negative autocorrelation never raises the sample size.
+        self.assertEqual(effective_sample_size(100, [-0.4])[0], 100)
+        # Q = T (T + 2) sum rho_k^2 / (T - k) = 100 * 102 * (0.25 / 99 + 0.0625 / 98) = 32.26.
+        statistic, p_value = ljung_box([0.5, 0.25], 100)
+        self.assertAlmostEqual(statistic, 100 * 102 * (0.25 / 99 + 0.0625 / 98), places=9)
+        self.assertAlmostEqual(p_value, math.exp(-statistic / 2), places=12)  # chi-square(2) survival
+        for critical, dof in ((3.841458820694124, 1), (5.991464547107979, 2), (18.307038053275146, 10)):
+            with self.subTest(dof=dof):
+                self.assertAlmostEqual(chi_square_survival(critical, dof), 0.05, places=10)
+
+    def test_sample_autocorrelation_by_hand(self):
+        from astra.overfitting import sample_autocorrelations
+
+        # x = 1, 2, 3, 4, 5: centred -2..2, denominator 10; lag 1: (-2*-1 + -1*0 + 0*1 + 1*2) / 10 = 0.4.
+        self.assertAlmostEqual(sample_autocorrelations([1, 2, 3, 4, 5], 2)[0], 0.4, places=12)
+        self.assertAlmostEqual(sample_autocorrelations([1, 2, 3, 4, 5], 2)[1], (-2 * 0 + -1 * 1 + 0 * 2) / 10, places=12)
+
+
+class SerialDependenceGateTests(unittest.TestCase):
+    def test_iid_samples_are_published_and_ar1_samples_withheld(self):
+        for seed in (11, 12, 13):
+            with self.subTest(seed=seed):
+                iid = _assess_dsr(_iid(seed))
+                self.assertIsNotNone(iid.deflated_sharpe_probability, iid.errors)
+                self.assertLessEqual(iid.dsr_serial_dependence["effective_observations"], 400)
+                for phi in (0.5, 0.8):
+                    dependent = _assess_dsr(_ar1(phi, seed))
+                    self.assertIsNone(dependent.deflated_sharpe_probability)
+                    self.assertNotEqual(dependent.status, "COMPLETED")
+
+    def test_published_dsr_uses_the_effective_size(self):
+        returns = _ar1(0.2, 31)
+        result = _assess_dsr(returns)
+        self.assertIsNotNone(result.deflated_sharpe_probability, result.errors)
+        effective = result.dsr_serial_dependence["effective_observations"]
+        self.assertLess(effective, 400)
+        naive = deflated_sharpe_ratio(returns, n_trials=result.n_trials_used,
+                                      trial_sharpe_variance=result.trial_sharpe_variance)
+        self.assertLess(result.deflated_sharpe_probability, naive.probability)
+
+    # PHASE5 FAIL R-1 (Medium; statistics): the correction is truncated at 5 lags and the only dependence gate is
+    # max |rho_k| <= 0.3 over those lags. A long-memory sample (i.i.d. noise plus a slowly varying mean,
+    # |rho_k| about 0.15 at every lag) has a Ljung-Box p-value of about 2e-9, yet the DSR is published as
+    # COMPLETED with T_eff 158 (about 76 with 100 lags) and probability 0.97 instead of 0.82 here. The
+    # Ljung-Box result is recorded but not used as a gate.
+    @unittest.expectedFailure
+    def test_long_memory_sample_is_not_published_with_a_truncated_correction(self):
+        returns = _long_memory(5)
+        result = _assess_dsr(returns)
+        if result.deflated_sharpe_probability is None:
+            return
+        long_lags = deflated_sharpe_ratio(returns, n_trials=result.n_trials_used,
+                                          trial_sharpe_variance=result.trial_sharpe_variance, autocorrelation_lags=100)
+        self.assertLessEqual(result.deflated_sharpe_probability, long_lags.probability + 0.02)
+
+
+class RederivedDependenceTests(AnchoredStoreMixin):
+    def test_rederivation_recomputes_the_stored_overfitting_record(self):
+        from astra.strategy_validation import rederive_holdout_evidence
+
+        report, holdout, _ = self.register_score_record()
+        (record,) = [item for item in AttemptLog(self.path).attempts(protocol_id=report.plan_sha256)
+                     if item["kind"] == attempts.KIND_HOLDOUT]
+        derived = rederive_holdout_evidence(BARS, report.plan_manifest, store=self.store,
+                                            trial_universe=record["metrics"]["trial_universe"])
+        self.assertEqual(derived["variants_tested"], holdout.variants_tested)
+        stored = holdout.overfitting
+        self.assertEqual(derived["overfitting"]["pbo"], stored.pbo)
+        self.assertEqual(derived["overfitting"]["deflated_sharpe_probability"], stored.deflated_sharpe_probability)
+
+    def test_forged_dependence_record_alone_does_not_change_the_gate(self):
+        # Rewriting only the recorded dependence (the DSR number untouched) cannot publish a DSR.
+        _report, _holdout, evaluation_id = self.register_score_record()
+        before = self.failures()
+        drop_all_triggers(self.path)
+        rewrite_json(self.path, "holdout_evaluations", "report_json", "evaluation_id", evaluation_id,
+                     lambda report: {**report, "overfitting": {**report["overfitting"],
+                                                               "dsr_serial_dependence": {"effective_observations": 1e6}}})
+        reinitialize(self.path)
+        after = self.failures()
+        self.assertIn("holdout_report_hash_mismatch", after, (sorted(before), sorted(after)))
+        self.assertIn("overfitting_check_missing", after)
+
+
+class Round5DetectorTests(unittest.TestCase):
+    def test_short_tick_copies_with_fresh_seeds_are_never_clear(self):
+        for n in (16, 20):
+            clear = 0
+            for k in range(100):
+                rng = random.Random(f"p5:{n}:{k}")
+                closes = _cal_tick_closes(rng, n)
+                old = holdout_returns(closes)
+                for new in (old, [-v for v in old], _nudge_close(closes, rng.randrange(1, n))):
+                    clear += holdout_reuse.assess_reuse(new, old).verdict == holdout_reuse.CLEAR
+            with self.subTest(n=n):
+                self.assertLessEqual(clear, 1)  # the fixer documents 1/200 nudged copies CLEAR at 16 returns
+
+    def test_exact_and_inverted_copies_are_judged_alike(self):
+        for n in (16, 17, 20, 41):
+            for k in range(40):
+                rng = random.Random(f"p5-sym:{n}:{k}")
+                old = holdout_returns(_cal_tick_closes(rng, n))
+                with self.subTest(n=n, k=k):
+                    self.assertEqual(holdout_reuse.assess_reuse(old, old).verdict,
+                                     holdout_reuse.assess_reuse([-v for v in old], old).verdict)
+
+    def test_independent_tick_walks_with_fresh_seeds_are_not_flagged(self):
+        for n in (16, 20, 40):
+            flagged = 0
+            for k in range(150):
+                a = holdout_returns(_cal_tick_closes(random.Random(f"p5-neg:{n}:{k}:a"), n))
+                b = holdout_returns(_cal_tick_closes(random.Random(f"p5-neg:{n}:{k}:b"), n))
+                flagged += holdout_reuse.assess_reuse(a, b).verdict in (holdout_reuse.CONFLICT, holdout_reuse.SUSPECT)
+            with self.subTest(n=n):
+                self.assertLessEqual(flagged, 2)
+
+
+class ProvenanceLabelTests(AnchoredStoreMixin):
+    def record(self, bars, source_type):
+        report = evaluate_strategy_walk_forward(bars, None, hypothesis="provenance label", protocol=PROTOCOL,
+                                                store=self.store, source_type=source_type)
+        self.registry.register_candidate(actor=AGENT, model_id="wf", version="1", manifest=bound_manifest(report),
+                                         criteria=PromotionCriteria())
+        holdout = score_holdout(self.store, report, bars=bars)
+        self.registry.record_evaluation(actor=AGENT, model_id="wf", version="1", kind="holdout",
+                                        evidence=holdout_evidence(holdout),
+                                        holdout_evaluation_id=self.store.holdout_for_protocol(report.plan_sha256)[
+                                            "evaluation_id"])
+        return report
+
+    def test_label_cannot_be_changed_after_sealing(self):
+        report = self.record(BARS, "SYNTHETIC")
+        drop_all_triggers(self.path)
+        rewrite_json(self.path, "research_protocols", "plan_json", "protocol_id", report.plan_sha256,
+                     lambda plan: {**plan, "data_source": {"source_type": "HISTORICAL"}})
+        reinitialize(self.path)
+        failures = set(self.registry.check_promotion("wf", "1", holdout_bars=BARS, allow_non_production_anchor=True))
+        self.assertTrue({item for item in failures if item.startswith(("dataset_", "holdout_rederivation",
+                                                                       "holdout_report", "holdout_from"))}, failures)
+
+    # PHASE5 FAIL R-2 (Medium; trust on label, a design limit of the gate): the provenance label is whatever the
+    # caller declares at evaluation time (API ``source_type`` or CLI ``--source-type``). The bundled SYNTHETIC
+    # generator labelled HISTORICAL passes the data-provenance gate; nothing ties the label to an attested
+    # source (signed broker export, registered dataset hash).
+    # The A5-2 fingerprint list (3909430) covers the bundled fixture only: the same fixture with its first bar
+    # dropped has another source hash and bar identity and is accepted as HISTORICAL.
+    @unittest.expectedFailure
+    def test_bundled_fixture_minus_one_bar_cannot_be_labelled_historical(self):
+        from astra.data import load_bars_csv
+        from test_lot4_adversarial import PROJECT_ROOT
+
+        bars = load_bars_csv(PROJECT_ROOT / "data" / "synthetic_eurusd_m15.csv", source_type="SYNTHETIC").bars[1:]
+        protocol = WalkForwardProtocol(fold_count=2, minimum_training_bars=60, validation_bars=20, holdout_bars=20)
+        with self.assertRaisesRegex(ValueError, "synthetic"):
+            evaluate_strategy_walk_forward(bars, None, hypothesis="relabel", protocol=protocol, source_type="HISTORICAL")
+
+    @unittest.expectedFailure
+    def test_synthetic_bars_declared_historical_do_not_pass_the_gate(self):
+        self.record(BARS, "HISTORICAL")
+        failures = set(self.registry.check_promotion("wf", "1", holdout_bars=BARS, allow_non_production_anchor=True))
+        self.assertTrue({item for item in failures if item.startswith("dataset_")}, failures)
 
 
 if __name__ == "__main__":
