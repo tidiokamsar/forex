@@ -10,7 +10,7 @@ Mapped to the specification's phases (section 14). Gates are not skipped.
 - [~] Phase 5: first demo connector. cTrader Open API selected; adapter built and tested offline, read-only `ctrader-check` ready. **Waiting for the user to run the check on a demo account**; then confirm assumptions, enable DEMO by reviewed change, run a supervised minimum-size demo order.
 - [~] Phase 6: dashboard and observability. Dashboard shows orders, controls, reconciliations, registry. Structured JSON logs exist locally (F-01, branch `feat/fondations-exploitation`). Missing: metrics endpoint, log shipping, alert delivery, external service supervision.
 - [ ] Phase 7: controlled autonomous improvement (candidate generation in a sandbox, shadow comparison, drift-triggered rollback).
-- [ ] Phase 8: additional connectors.
+- [~] Phase 8: additional connectors. Multi-venue lot (branch `feat/multi-venue`): eligibility research, venue registry, read-only contract, per-market models and risk, Binance Spot read-only connector tested offline only. No venue is integrated or connected; Interactive Brokers recommended as second Forex broker pending written confirmation; IQ Option and GoForex blocked.
 - [ ] Phase 9: real-mode preparation dossier (no automatic activation).
 - [ ] Phase 10: supervised operation.
 

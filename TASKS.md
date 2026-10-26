@@ -78,3 +78,18 @@ Synthetic data only. Verified by independent agents (A security review, D advers
 | L4-E | Evidence anchoring interface outside SQLite, store-to-anchor binding, LocalFileAnchor (not production grade); versioned research policy 0.5.0; reuse verdicts CONFLICT/SUSPECT/UNDETERMINED/CLEAR and calibration; data provenance gate (SYNTHETIC/unknown not promotable) | DONE (local); external WORM adapter NOT implemented | `anchoring.py`, `research_policy.py`, `holdout_reuse.py`; `test_anchoring`, `test_holdout_reuse_calibration`, `test_lot4_integration` |
 | L4-D | Adversarial and verification suites (five review phases by agents A and D) | DONE | `test_lot4_adversarial`, `test_lot4_verification` |
 | L4-R | Residuals: A4-D-3 new store plus new anchor; R-2 declared (not attested) data labels; B-8 restore without anchor; C-4, A5-1, A-5, B-2, B-5, D-11, N-6, N-7, Q-3 | OPEN (documented, expected-failure tests) | `reports/LOT_04_REPORT.md` sections 4 and 11 |
+
+## Multi-venue lot (branch `feat/multi-venue`)
+
+Offline and research only; no venue contacted by code, no account, no key, no order. See `reports/MULTI_VENUE_REPORT.md`.
+
+| ID | Scope | Status | Evidence |
+|---|---|---|---|
+| MV-R | Guinea eligibility research on official sources (Forex/CFD, Binance, IQ Option, GoForex) | DONE (public sources, 2026-10-26); human confirmations open | `docs/venues/research_forex.md`, `docs/venues/research_crypto_other.md` |
+| MV-C | Read-only common contract with explicit capability gaps; per-market data models (futures and options disabled) | DONE (local) | `venues/contract.py`, `markets/*`; `test_venues_contract`, `test_markets` |
+| MV-REG | Versioned venue registry (0.3.0, 15 venues), cumulative statuses, strict loader, all gates closed | DONE (local) | `venues/registry.py`, `venue_registry.json`, VENUE_REGISTRY.md; `test_venue_registry` |
+| MV-BIN | Binance Spot public-data connector and read-only account reader (GET only, provider-verified read-only key) | DONE (offline only); NOT READ_ONLY_CONNECTED | `venues/binance_spot.py`; `test_binance_spot` |
+| MV-RISK | Per-market risk policies and cost models (spot simulation only, derivatives refused) | DONE (local) | `markets/risk_policies.py`, `markets/costs.py`; `test_market_risk` |
+| MV-QA | Independent security (A) and QA (D) reviews, fixes | DONE; re-check in progress | `test_multi_venue_security_review`, `test_multi_venue_verification` |
+| MV-OPEN | Live read-only checks (cTrader, Binance), written eligibility confirmations, IBKR adapter, derivatives risk review, Ed25519 signing | TODO (human actions first) | `reports/MULTI_VENUE_REPORT.md` section 8 |
+
