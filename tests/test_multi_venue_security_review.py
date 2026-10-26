@@ -369,5 +369,54 @@ class DerivativesAndImportsTests(unittest.TestCase):
             self.assertNotIn(module, {"astra.brokers.ctrader", "astra.brokers.simulated"})
 
 
+# =============================================================================================
+# Re-check of the fixes (8831d88). MV-A-10+.
+# =============================================================================================
+
+from astra.markets.risk_policies import policy_for  # noqa: E402
+
+
+class SharedBanKeyTests(unittest.TestCase):
+    def setUp(self):
+        bs.reset_host_states_for_tests()
+        self.addCleanup(bs.reset_host_states_for_tests)
+
+    # CONFIRMED DEFECT MV-A-10 (medium): the process-wide stop state (418 ban, 429 stop, weight budget) is
+    # keyed by the normalised base-URL string. "https://api.binance.com" and "https://api.binance.com:443" are
+    # the same endpoint but get two states, so a ban hit through one is ignored through the other. Binance bans
+    # and weighs per IP, so the documented alternates (api1..api4, api-gcp) should share it too. No network:
+    # the connectors are only constructed and the shared state inspected.
+    @unittest.expectedFailure
+    def test_equivalent_base_urls_share_one_ban_state(self):
+        first = bs.BinanceSpotPublicData("https://api.binance.com")
+        first._http._state.banned = True  # as after an HTTP 418 without Retry-After
+        for url in ("https://api.binance.com:443", "https://api1.binance.com"):
+            with self.subTest(url=url):
+                self.assertTrue(bs.BinanceSpotPublicData(url).is_banned)
+
+
+class SpotLedgerTests(unittest.TestCase):
+    # CONFIRMED DEFECT MV-A-11 (low, documented residual made the default): the daily-cap ledger belongs to one
+    # policy instance (default_factory), and policy_for(CRYPTO_SPOT) returns a new instance, hence a new empty
+    # ledger, on every call. On the default path the 10% daily cap holds only per call site: ten 1.9% buys
+    # through ten policy_for() instances are all allowed.
+    @unittest.expectedFailure
+    def test_daily_cap_holds_across_default_policy_instances(self):
+        allowed = [policy_for(MarketType.CRYPTO_SPOT).evaluate(buy(intent_id=f"p{i}", quantity=Decimal("0.038")),
+                                                               context()).allowed for i in range(10)]
+        self.assertLessEqual(sum(allowed) * Decimal("0.038") * Decimal("50000"), Decimal("100000") * Decimal("0.10"))
+
+    # CONFIRMED DEFECT MV-A-12 (low, fail-closed): the BUY is booked in the ledger before the price-band check
+    # runs, so a BUY refused for limit_price_outside_band still consumes the day's budget (and becomes the
+    # "last BUY" for the anti-martingale bound). Ledger state then disagrees with the decisions.
+    @unittest.expectedFailure
+    def test_refused_buy_is_not_booked(self):
+        policy = CryptoSpotRiskPolicy()
+        decision = policy.evaluate(buy(quantity=Decimal("0.019"), limit_price=Decimal("51000.00")), context())
+        self.assertFalse(decision.allowed)
+        self.assertIn("limit_price_outside_band", decision.reasons)
+        self.assertEqual(policy.ledger.records, ())
+
+
 if __name__ == "__main__":
     unittest.main()
