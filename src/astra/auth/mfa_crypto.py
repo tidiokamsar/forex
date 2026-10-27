@@ -175,7 +175,7 @@ def _locked(path: Path) -> Iterator[None]:
     import fcntl
 
     try:
-        fd = os.open(path.with_name(f".{path.name}.lock"), os.O_WRONLY | os.O_CREAT, 0o600)
+        fd = os.open(path.with_name(f".{path.name}.lock"), os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     except OSError as exc:
         raise MfaKeyError(f"cannot lock the MFA key ring next to {path}: {exc.strerror}") from exc
     try:

@@ -78,6 +78,15 @@ class BackupRestoreTests(ExecutionTestCase):
             with self.assertRaises(PermissionDenied):
                 restore_backup(record.path, self.store.path, actor=Actor("bot", role), reason="x")
 
+    @unittest.skipUnless(os.name == "posix", "file modes are POSIX only")
+    def test_backup_file_is_owner_only_whatever_the_umask(self):
+        previous = os.umask(0o022)
+        try:
+            record = create_backup(self.store.path, self.backups)
+        finally:
+            os.umask(previous)
+        self.assertEqual(Path(record.path).stat().st_mode & 0o777, 0o600)
+
     def test_retention_keeps_the_newest(self):
         for _ in range(4):
             create_backup(self.store.path, self.backups, keep=2)

@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import shutil
 import sqlite3
 from dataclasses import asdict, dataclass
@@ -87,6 +88,8 @@ def create_backup(database: str | Path, backup_dir: str | Path, *, keep: int = 1
     directory.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     target = directory / f"astra-{stamp}.sqlite3"
+    # Created empty and owner-only first, so the copy never follows the umask.
+    os.close(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600))
     src = sqlite3.connect(source)
     dst = sqlite3.connect(target)
     try:

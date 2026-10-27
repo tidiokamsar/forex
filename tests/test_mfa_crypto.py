@@ -418,6 +418,23 @@ class ReviewFixTests(MfaCase):
         mfa_crypto.add_active_key(key_file)
         self.assertEqual(key_file.stat().st_mode & 0o777, 0o640)
 
+    @unittest.skipUnless(os.name == "posix", "symlinks and modes are POSIX only")
+    def test_lock_file_symlink_is_refused(self):
+        key_file = Path(self.temp.name) / "mfa.key"
+        target = Path(self.temp.name) / "planted"
+        os.symlink(target, Path(self.temp.name) / ".mfa.key.lock")
+        before = key_file.read_bytes()
+        with self.assertRaises(MfaKeyError):
+            mfa_crypto.add_active_key(key_file)
+        self.assertFalse(target.exists())
+        self.assertEqual(key_file.read_bytes(), before)
+
+    def test_reload_fingerprint_includes_the_change_time(self):
+        key_file = Path(self.temp.name) / "mfa.key"
+        store = AuthStore(self.auth.path, clock=self.clock, mfa_key_path=key_file)
+        info = key_file.stat()
+        self.assertEqual(store._key_fingerprint(), (info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns))
+
 
 class PythonLockTests(unittest.TestCase):
     def test_production_entry_refuses_another_python(self):

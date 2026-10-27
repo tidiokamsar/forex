@@ -155,18 +155,18 @@ class AuthStore:
         # TOTP secrets are stored only encrypted with this key ring (astra.auth.mfa_crypto). Without it,
         # every operation that needs a TOTP secret fails closed with AuthUnavailable (HTTP 503).
         self.mfa_cipher = mfa_cipher
-        # With a key file, the ring is reloaded whenever the file changes (inode, size or mtime: the
+        # With a key file, the ring is reloaded whenever the file changes (inode, size, mtime or ctime: the
         # atomic replace of a rotation changes the inode), so running workers pick up a rotation at once.
         # The first use always loads it from the file, so a ring passed in can never be stale.
         self.mfa_key_path = Path(mfa_key_path) if mfa_key_path else None
-        self._mfa_key_fingerprint: tuple[int, int, int] | None = None
+        self._mfa_key_fingerprint: tuple[int, int, int, int] | None = None
 
-    def _key_fingerprint(self) -> tuple[int, int, int] | None:
+    def _key_fingerprint(self) -> tuple[int, int, int, int] | None:
         try:
             info = self.mfa_key_path.stat()
         except OSError:
             return None
-        return (info.st_ino, info.st_size, info.st_mtime_ns)
+        return (info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
     def _cipher(self) -> MfaCipher:
         if self.mfa_key_path is not None:
