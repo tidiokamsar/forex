@@ -378,15 +378,15 @@ def create_app(config: AppConfig, web: WebConfig, *, auth: AuthStore | None = No
             return redirect(_stage_location(g.session), code=303)
         if request.method == "GET":
             secret, uri = auth.begin_mfa_enrollment(session)
-            return page("mfa_setup.html", csrf_token=csrf_for_session(session), secret=secret, uri=uri)
+            return page("mfa_setup.html", csrf_token=csrf_for_session(session), secret=secret, qr=crypto.totp_qr_data_uri(uri))
         if not check_csrf():
             return _error(403, "csrf_refused")
         result, codes = auth.confirm_mfa_enrollment(session, request.form.get("code", ""), client_ip(),
                                                     request.headers.get("User-Agent"))
         if result.status != "ok":
             secret, uri = auth.begin_mfa_enrollment(session)
-            return page("mfa_setup.html", 401, csrf_token=csrf_for_session(session), secret=secret, uri=uri,
-                        message="Code incorrect. Vérifiez l'heure de l'appareil et réessayez.")
+            return page("mfa_setup.html", 401, csrf_token=csrf_for_session(session), secret=secret,
+                        qr=crypto.totp_qr_data_uri(uri), message="Code incorrect. Vérifiez l'heure de l'appareil et réessayez.")
         response = page("recovery_codes.html", codes=codes, next_url=_stage_location_for(result.stage))
         return set_session_cookie(response, result.token)
 

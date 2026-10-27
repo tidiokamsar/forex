@@ -69,6 +69,15 @@ def totp_uri(secret: str, username: str, issuer: str = "ASTRA") -> str:
     return pyotp.TOTP(secret).provisioning_uri(name=username, issuer_name=issuer)
 
 
+def totp_qr_data_uri(uri: str) -> str:
+    """The provisioning URI as an SVG QR code in a data: URI, built on the server (no script, no request
+    to a third party, allowed by the CSP ``img-src 'self' data:``). Black on white so phones read it."""
+
+    import segno
+
+    return segno.make(uri, error="m").svg_data_uri(scale=5, border=4, dark="#000", light="#fff")
+
+
 def totp_timestep(secret: str, code: str, at: float) -> int | None:
     """The 30-second step a valid code belongs to (current, previous or next), else None."""
 

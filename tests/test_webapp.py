@@ -300,6 +300,22 @@ class AuthenticationTests(WebAppCase):
         second = re.search(r'<code class="secret">([A-Z2-7]{16,})</code>', client.get("/mfa/setup").get_data(as_text=True))
         self.assertEqual(first.group(1), second.group(1))
 
+    def test_mfa_setup_page_shows_a_qr_code_of_the_pending_secret(self):
+        import html
+
+        from astra.auth import crypto
+
+        self.add_user("boss", WebRole.ADMIN)
+        client = self.client()
+        self.login(client, "boss")
+        body = client.get("/mfa/setup").get_data(as_text=True)
+        secret = re.search(r'<code class="secret">([A-Z2-7]{16,})</code>', body).group(1)
+        source = html.unescape(re.search(r'<img class="totp-qr" src="([^"]+)"', body).group(1))
+        self.assertTrue(source.startswith("data:image/svg+xml"))
+        # The QR code encodes exactly this account's provisioning URI (the generator is deterministic).
+        self.assertEqual(source, crypto.totp_qr_data_uri(crypto.totp_uri(secret, "boss")))
+        self.assertIn("img-src 'self' data:", client.get("/mfa/setup").headers["Content-Security-Policy"])
+
     def test_failures_from_one_address_throttle_every_username_from_it(self):
         for i in range(5):
             self.login(self.client("192.0.2.66"), f"guess{i}", "Wrong-Password-123")

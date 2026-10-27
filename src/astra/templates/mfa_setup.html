@@ -6,11 +6,13 @@
   <h2 id="enroll-title">Activer l'authentification à deux facteurs</h2>
   {% if message %}<p class="form-message" role="alert">{{ message }}</p>{% endif %}
   <ol class="steps">
-    <li>Dans une application d'authentification (TOTP), ajoutez un compte avec cette clé :
+    <li>Dans une application d'authentification (Google Authenticator, Microsoft Authenticator…), scannez ce QR code :
+      <img class="totp-qr" src="{{ qr }}" alt="QR code du compte ASTRA à scanner" width="200" height="200"></li>
+    <li>Sans appareil photo, ajoutez le compte avec cette clé :
       <code class="secret">{{ secret }}</code></li>
-    <li>Ou importez cette adresse : <code class="secret">{{ uri }}</code></li>
     <li>Saisissez le code à 6 chiffres affiché pour confirmer.</li>
   </ol>
+  <p class="footnote">Ne photographiez pas et ne partagez pas cette page : le QR code et la clé donnent accès au second facteur.</p>
   <form method="post" action="/mfa/setup" class="auth-form">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <label for="code">Code à 6 chiffres</label>

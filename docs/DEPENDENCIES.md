@@ -8,6 +8,7 @@ Until the authentication gate, ASTRA used the standard library only. The trading
 - **Password storage.** OWASP recommends Argon2id, which the standard library does not provide. `argon2-cffi` is the reference binding of the reference C implementation.
 - **TOTP secret encryption.** The TOTP secret must be recovered to verify a code, so it is encrypted, not hashed. `cryptography` (the Python Cryptographic Authority's library) provides AES-GCM; the standard library has no authenticated cipher.
 - **TOTP.** `pyotp` implements RFC 6238 and the provisioning URI that authenticator apps read. It avoids a hand-written implementation of the second factor.
+- **TOTP enrolment QR code.** `segno` draws the provisioning URI as an SVG QR code on the server, so the phone scans it instead of typing the key. It is pure Python with no dependency, needs no JavaScript and no third-party request, and the CSP already allows `img-src data:`.
 - **The production WSGI server.** gunicorn is a maintained server for Linux. Werkzeug's development server is used only by `astra serve` on loopback.
 - **Not used.** No identity provider, paid service, frontend toolchain or JavaScript library.
 
@@ -34,6 +35,7 @@ At pinning time:
 | cffi | 2.1.1 | 2026-08-03 | Required by the bindings |
 | pycparser | 3.0 | 2026-01-21 | Required by cffi (3.12, released 2026-10-22, was too recent) |
 | pyotp | 2.10.0 | 2026-06-14 | TOTP |
+| segno | 1.6.6 | 2025-03-12 | QR code of the TOTP enrolment (pinned 2026-10-27; BSD licence, no dependency on Python 3.10+) |
 | cryptography | 50.0.2 | 2026-09-30 | AES-256-GCM encryption of the TOTP secrets (AUTH-2) |
 | gunicorn | 26.2.0 | 2026-08-24 | Production server (Linux only) |
 
