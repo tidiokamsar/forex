@@ -61,7 +61,7 @@ Logs are JSON lines on stderr: `ASTRA_LOG_LEVEL` (default `WARNING`), `ASTRA_LOG
 | `overfitting` | CSCV probability of backtest overfitting and deflated Sharpe ratio (pure Python) |
 | `registry` | Experiment log, model versions, pre-registered criteria (including PBO and deflated Sharpe gates), promotion with holdout re-derivation from the bars, rollback (Python API; no CLI promote) |
 | `attempts` | Append-only, hash-chained attempt registry; store-wide trial count for the deflated Sharpe ratio |
-| `research_policy` | Versioned, provisional research-integrity floors (`astra-research-policy-0.2.0-provisional`) |
+| `research_policy` | Versioned, provisional research-integrity floors (`astra-research-policy-0.5.0-provisional`) |
 | `holdout_reuse` | Heuristic detection of a holdout that repeats a sealed price path |
 | `anchoring` | Evidence anchor interface; `LocalFileAnchor` only, not production grade |
 | `risk` | Independent RiskEngine with hard-capped policy |
