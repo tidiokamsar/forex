@@ -4,7 +4,7 @@ Ordered procedure for the production host. Execution stays SIMULATION only. No b
 
 **Target (decision of 2026-10-27):**
 - Host: `102.211.199.132`, **only after it has been rebuilt** from a trusted image. It is not used as it is today: see [HOST_QUALIFICATION.md](HOST_QUALIFICATION.md), section A. Its administrator validates the rebuild, then section B is passed.
-- Public URL: `https://astra.ageroute.gov.gn`. The DNS was checked on 2026-10-27: an A record to `102.211.199.132`, no AAAA and no CNAME, with the zone hosted on SiteGround. The bare IP is not the public URL.
+- Public URL: `https://astra.ageroute.gov.gn`. The DNS was checked on 2026-10-27: an A record to `102.211.199.132`, no AAAA and no CNAME, with the zone hosted on SiteGround. There are no CAA records on `astra.ageroute.gov.gn`, `ageroute.gov.gn` or `gov.gn`, so Let's Encrypt may issue. The bare IP is not the public URL.
 - The rebuilt host also serves GLPI. So ASTRA runs behind Apache, in its own virtual host (`deploy/apache/astra.conf.example`), and proxies to `http://127.0.0.1:8765`. GLPI's virtual hosts stay as they are.
 
 **Start condition:** a rebuilt and validated host, then the architect's approval of the SHA to install.
