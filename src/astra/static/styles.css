@@ -98,3 +98,31 @@ footer { display: flex; justify-content: space-between; padding: 20px clamp(20px
 .totp-qr { display: block; margin: 8px 0; width: 200px; height: 200px; border-radius: 6px; }
 .code-list { list-style: none; padding: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; font-family: var(--mono); font-size: 13px; }
 .data-label { grid-column: 1 / -1; margin: 0 0 4px; padding: 8px 12px; border: 1px dashed #594a2a; border-radius: 6px; color: var(--warning); font-size: 11px; }
+/* Lab: tabs, forms, charts (market data, backtests, simulation, logs) */
+.tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: -18px 0 26px; border-bottom: 1px solid var(--line); }
+.tab { padding: 10px 14px; color: var(--muted); text-decoration: none; font-size: 12px; border-bottom: 2px solid transparent; }
+.tab:hover { color: var(--text); }
+.tab.is-active { color: var(--accent); border-bottom-color: var(--accent); }
+.view[hidden], .operator-only[hidden] { display: none !important; }
+.lab-form { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; align-items: end; }
+.lab-form label { display: grid; gap: 5px; font-size: 11px; color: var(--muted); }
+.lab-form input, .lab-form select { padding: 8px 9px; border: 1px solid var(--line); border-radius: 6px; background: #121917; color: var(--text); font: inherit; font-size: 12px; min-width: 0; }
+.lab-form button, .small-button, .danger-button, #btn-ingest { cursor: pointer; padding: 8px 12px; border: 1px solid #3b5030; border-radius: 6px; background: var(--accent-dim); color: var(--accent); font: inherit; font-size: 11px; }
+.lab-form button:hover, .small-button:hover, #btn-ingest:hover { border-color: var(--accent); }
+.small-button { padding: 4px 8px; font-size: 10px; background: #1b2522; color: var(--text); border-color: var(--line); }
+.danger-button { background: #2b1a17; color: #f0a58f; border-color: #6b3b30; }
+.button-row { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.pair-checks { grid-column: 1 / -1; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; font-size: 11px; color: var(--muted); }
+.pair-checks div { display: flex; gap: 14px; flex-wrap: wrap; }
+.check-label { color: var(--text); font-size: 12px; }
+.form-status { min-height: 16px; margin: 12px 0 0; font-size: 12px; color: #a5d8b0; }
+.form-status.is-error { color: var(--warning); }
+.chart { width: 100%; overflow-x: auto; margin: 6px 0 14px; }
+.chart svg { width: 100%; min-width: 600px; height: auto; display: block; background: #0f1615; border: 1px solid var(--line); border-radius: 6px; }
+.chart-line { fill: none; stroke: var(--accent); stroke-width: 1.6; }
+.chart-axis { fill: var(--muted); font: 10px var(--mono); }
+.plain-list { margin: 0 0 14px; padding-left: 18px; font-size: 11px; color: var(--muted); line-height: 1.6; }
+.detail-list.compact { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 0 18px; margin-bottom: 12px; }
+.live-state { color: var(--warning); font: 11px var(--mono); }
+.panel h3 { margin: 18px 0 8px; font-size: 13px; color: var(--muted); font-weight: 600; }
+@media (max-width: 760px) { .tabs { margin-top: -10px; } .tab { padding: 8px 9px; } }

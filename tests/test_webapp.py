@@ -37,6 +37,12 @@ PASSWORD = "test-Horse-Battery-9"
 READ_ONLY_ROUTES = ["/api/session", "/api/status", "/api/summary", "/api/runs", "/api/models", "/api/experiments"]
 OPERATOR_ROUTES = ["/api/orders", "/api/controls", "/api/reconciliations", "/api/audit"]
 ADMIN_ROUTES = ["/api/admin/users", "/api/admin/auth-events"]
+# Market data, backtests and paper simulations (astra.labweb): reading is READ_ONLY, requests are OPERATOR.
+LAB_READ_ROUTES = ["/api/market/overview", "/api/market/quality", "/api/market/candles", "/api/lab/catalog",
+                   "/api/lab/backtests", "/api/lab/backtests/<int:backtest_id>", "/api/sim/sessions",
+                   "/api/sim/sessions/<int:session_id>", "/api/system/jobs"]
+LAB_REQUEST_ROUTES = ["/api/market/import", "/api/market/ingest", "/api/lab/backtests", "/api/sim/sessions",
+                      "/api/sim/sessions/<int:session_id>/<action>"]
 
 
 class HttpsClient(FlaskClient):
@@ -520,7 +526,7 @@ class PermissionTests(WebAppCase):
 
     def test_every_registered_route_is_covered_by_this_test_file(self):
         app_routes = {rule.rule for rule in self.app.url_map.iter_rules()}
-        known = set(READ_ONLY_ROUTES + OPERATOR_ROUTES + ADMIN_ROUTES) | {
+        known = set(READ_ONLY_ROUTES + OPERATOR_ROUTES + ADMIN_ROUTES + LAB_READ_ROUTES + LAB_REQUEST_ROUTES) | {
             "/", "/login", "/logout", "/login/mfa", "/mfa/setup", "/account/password", "/api/health",
             "/static/<name>", "/admin/users", "/admin/users/<username>/<action>"}
         self.assertEqual(app_routes, known, "a new route needs explicit permission tests")
@@ -632,18 +638,29 @@ class PermissionTests(WebAppCase):
 class TradingIsolationTests(WebAppCase):
     def test_no_route_can_change_trading_state(self):
         mutating = {rule.rule for rule in self.app.url_map.iter_rules() if rule.methods & {"POST", "PUT", "PATCH", "DELETE"}}
+        # Besides sign-in and administration, only research and paper-simulation requests (astra.labweb) mutate,
+        # and none reaches the execution gateway (see test_webapp_never_calls_execution_mutators).
         self.assertEqual(mutating, {"/login", "/logout", "/login/mfa", "/mfa/setup", "/account/password", "/admin/users",
-                                    "/admin/users/<username>/<action>"})
+                                    "/admin/users/<username>/<action>", *LAB_REQUEST_ROUTES})
         operator = self.session_client("ops", WebRole.OPERATOR)
         for route in OPERATOR_ROUTES:
             self.assertEqual(self.post(operator, route, {"csrf_token": self.page_csrf(operator)}).status_code, 405, route)
 
     def test_webapp_never_calls_execution_mutators(self):
         source = Path(__file__).resolve().parents[1] / "src" / "astra" / "webapp.py"
-        names = {node.attr for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))) if isinstance(node, ast.Attribute)}
-        for forbidden in ("submit", "submit_order", "release_kill_switch", "activate_kill_switch", "clear_freeze",
-                          "resolve_unknown_order", "approve_risk_policy_change", "promote", "rollback"):
-            self.assertNotIn(forbidden, names, forbidden)
+        for module in (source, source.with_name("labweb.py"), source.with_name("papertrade.py"),
+                       source.with_name("jobs.py"), source.with_name("marketdata.py")):
+            text = module.read_text(encoding="utf-8")
+            names = {node.attr for node in ast.walk(ast.parse(text)) if isinstance(node, ast.Attribute)}
+            forbidden_names = {"submit", "submit_order", "release_kill_switch", "activate_kill_switch", "clear_freeze",
+                               "resolve_unknown_order", "approve_risk_policy_change", "promote", "rollback"}
+            if module.name != "webapp.py":
+                forbidden_names.discard("rollback")  # sqlite3 Connection.rollback in the stores, not a model rollback
+            for forbidden in forbidden_names:
+                self.assertNotIn(forbidden, names, f"{module.name}: {forbidden}")
+            if module.name != "webapp.py":
+                for package in ("execution", "brokers", "governance", "venues"):
+                    self.assertNotRegex(text, rf"from \.{package}|import astra\.{package}", f"{module.name} imports {package}")
         auth_dir = source.parent / "auth"
         for path in auth_dir.glob("*.py"):
             text = path.read_text(encoding="utf-8")

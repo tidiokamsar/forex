@@ -76,10 +76,12 @@ The dashboard is the Flask application `astra.webapp` served by gunicorn on `127
    - Back the key ring up separately from the database backups.
    - In public mode the dashboard refuses to start without it, or with it in the database directory. Without the key ring, TOTP sign-in fails closed.
    - Public mode only: generate the proxy secret into `/etc/astra/proxy.secret` (root:astra 0640) and into the proxy's root-only include (`deploy/apache/astra-proxy-secret.conf.example`).
-   - Install the units: `astra-web`, `astra-nft`, `astra-alert@`, `astra-cert-check.{service,timer}`.
+   - Install the units: `astra-web`, `astra-nft`, `astra-worker`, `astra-alert@`, `astra-cert-check.{service,timer}`, `astra-backup.{service,timer}`.
+   - On a host whose reverse proxy is not `www-data` (Caddy runs as `caddy`), install `/etc/astra/astra-loopback.nft` with that user and a drop-in for `astra-nft` pointing to it.
 4. **First administrator.** Create it in the service's own context, so the state directory and permissions are right: `sudo systemd-run --pipe --wait -p User=astra -p EnvironmentFile=/etc/astra/web.env -p StateDirectory=astra -p StateDirectoryMode=0700 -p UMask=0077 -p Environment=PYTHONPATH=/opt/astra/app/src /opt/astra/venv/bin/python -m astra auth init-admin --username <name>`. The password is typed twice, or with `--generate` shown once.
 5. **Start and verify the unit.**
-   - Enable `astra-web`, which also starts `astra-nft`.
+   - Enable `astra-web` (it also starts `astra-nft`), `astra-worker`, `astra-cert-check.timer` and `astra-backup.timer`.
+   - The worker needs outbound HTTPS to `data-api.ecb.europa.eu`; the dashboard itself keeps `IPAddressDeny=any`.
    - Check `systemd-analyze security astra-web`, that the journal shows no SIGSYS, and that outbound traffic from the unit is refused.
    - Check that `sudo -u nobody curl -m 3 http://127.0.0.1:8765/api/health` is refused by the nftables rule.
 6. **Public mode only, with Apache already serving other sites:**

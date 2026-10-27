@@ -234,7 +234,72 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Consommer une seule fois le holdout final, après scellement SQLite du protocole",
     )
+    worker = commands.add_parser("worker", help="Worker continu : imports, taux BCE, backtests, simulations (SIMULATION)")
+    worker.add_argument("--once", action="store_true", help="Une seule itération puis arrêt")
+    worker.add_argument("--no-ecb", action="store_true", help="Ne pas planifier l'acquisition des taux BCE")
+    data_cmd = commands.add_parser("data", help="Données de marché : import CSV, taux BCE, couverture")
+    data_actions = data_cmd.add_subparsers(dest="data_action", required=True)
+    data_import = data_actions.add_parser("import", help="Importer un fichier CSV OHLC")
+    data_import.add_argument("--csv", required=True, type=Path)
+    data_import.add_argument("--symbol", required=True)
+    data_import.add_argument("--timeframe", required=True, help="M5, M15, H1, H4 ou D1")
+    data_import.add_argument("--source", required=True, help="Nom du fournisseur ou de l'export (sans chemin)")
+    data_import.add_argument("--timezone", default="UTC", help="Fuseau des horodatages sans décalage (ex. Europe/Paris)")
+    data_import.add_argument("--nature", choices=("HISTORICAL", "SYNTHETIC"), default="HISTORICAL")
+    ecb = data_actions.add_parser("ingest-ecb", help="Acquérir les taux de référence BCE (sans identifiant)")
+    ecb.add_argument("--force", action="store_true", help="Ignorer la pause après échec")
+    data_actions.add_parser("coverage", help="Paires, unités de temps et nombre de bougies stockées")
+    lab_cmd = commands.add_parser("lab", help="Backtest sur les bougies stockées (stratégie expérimentale)")
+    lab_actions = lab_cmd.add_subparsers(dest="lab_action", required=True)
+    lab_backtest = lab_actions.add_parser("backtest", help="Lancer un backtest et l'enregistrer")
+    lab_backtest.add_argument("--symbol", required=True)
+    lab_backtest.add_argument("--timeframe", required=True)
+    lab_backtest.add_argument("--source", required=True)
+    lab_backtest.add_argument("--start")
+    lab_backtest.add_argument("--end")
+    lab_backtest.add_argument("--capital", type=float)
+    lab_backtest.add_argument("--risk-pct", type=float)
+    lab_backtest.add_argument("--spread-pips", type=float)
     return parser
+
+
+def _lab_command(args: argparse.Namespace, config: AppConfig) -> int:
+    from .jobs import JobStore, Worker
+    from .marketdata import CandleStore, ingest_ecb
+    from .papertrade import LabStore, backtest_request, run_backtest
+
+    candles = CandleStore(config.database_path)
+    candles.initialize()
+    lab = LabStore(config.database_path)
+    lab.initialize()
+    JobStore(config.database_path).initialize()
+    if args.command == "worker":
+        import_dir = Path(os.environ.get("ASTRA_IMPORT_DIR") or (config.database_path.parent / "imports"))
+        worker = Worker(config.database_path, import_dir, ecb_enabled=not args.no_ecb)
+        worker.run(once=args.once)
+        return 0
+    if args.command == "data":
+        if args.data_action == "import":
+            _write_json(candles.import_csv(args.csv.read_bytes(), args.symbol, args.timeframe, args.source,
+                                           timezone=args.timezone, nature=args.nature, actor="cli"))
+        elif args.data_action == "ingest-ecb":
+            result = ingest_ecb(candles, actor="cli", force=args.force)
+            _write_json(result)
+            return 0 if result["status"] in ("OK", "SKIPPED") else 3
+        else:
+            _write_json({"coverage": candles.coverage(), "sources": candles.sources()})
+        return 0
+    risk = {"initial_capital": args.capital, "risk_per_trade_pct": args.risk_pct}
+    request = backtest_request({"symbol": args.symbol, "timeframe": args.timeframe, "source": args.source,
+                                "start": args.start, "end": args.end,
+                                "risk": {k: v for k, v in risk.items() if v is not None},
+                                "costs": {"spread_pips": args.spread_pips} if args.spread_pips is not None else {}})
+    backtest_id = lab.create_backtest(request, "cli")
+    result = run_backtest(candles, request)
+    lab.save_backtest_result(backtest_id, result)
+    _write_json({"backtest_id": backtest_id, "data": result["data"], "metrics": result["metrics"],
+                 "assumptions": result["assumptions"]})
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -286,6 +351,9 @@ def _run(args: argparse.Namespace) -> int:
 
         if args.command == "service":
             return _service_command(args, config)
+
+        if args.command in ("worker", "data", "lab"):
+            return _lab_command(args, config)
 
         if args.command == "backup":
             from dataclasses import asdict as _asdict

@@ -35,6 +35,7 @@ At pinning time:
 | cffi | 2.1.1 | 2026-08-03 | Required by the bindings |
 | pycparser | 3.0 | 2026-01-21 | Required by cffi (3.12, released 2026-10-22, was too recent) |
 | pyotp | 2.10.0 | 2026-06-14 | TOTP |
+| tzdata | 2026.5 | 2026-10-03 | IANA time zones for `zoneinfo` (Forex weekly closure in New York time, ECB fix time, CSV time zones); Windows has no system database, Linux uses its own first |
 | segno | 1.6.6 | 2025-03-12 | QR code of the TOTP enrolment (pinned 2026-10-27; BSD licence, no dependency on Python 3.10+) |
 | cryptography | 50.0.2 | 2026-09-30 | AES-256-GCM encryption of the TOTP secrets (AUTH-2) |
 | gunicorn | 26.2.0 | 2026-08-24 | Production server (Linux only) |

@@ -125,9 +125,9 @@ jobs:
         run: |
           set +e
           python -m unittest test_multi_venue_security_review test_multi_venue_verification test_market_risk \
-            test_binance_spot test_venue_registry test_venues_contract test_markets test_webapp test_mfa_crypto
+            test_binance_spot test_venue_registry test_venues_contract test_markets test_webapp test_mfa_crypto test_marketdata test_papertrade test_labweb
           rc=$?
-          echo "| targeted tests (7 multi-venue modules, test_webapp, test_mfa_crypto) | $rc |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| targeted tests (7 multi-venue modules, test_webapp, test_mfa_crypto, test_marketdata, test_papertrade, test_labweb) | $rc |" >> "$GITHUB_STEP_SUMMARY"
           exit $rc
 
   # Skip the long suite on a branch push when an open pull request to main already runs it.

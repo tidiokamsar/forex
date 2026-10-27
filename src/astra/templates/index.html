@@ -1,41 +1,44 @@
 {% extends "base.html" %}
 {% block title %}ASTRA Forex Intelligence{% endblock %}
-{% block head %}<meta name="astra-role" content="{{ role }}"><script src="/static/app.js" defer></script>{% endblock %}
+{% block head %}<meta name="astra-role" content="{{ role }}"><script src="/static/app.js" defer></script><script src="/static/lab.js" defer></script>{% endblock %}
 {% block content %}
+      <nav class="tabs" aria-label="Sections">
+        <a href="#apercu" class="tab" data-tab="apercu">Vue d’ensemble</a>
+        <a href="#donnees" class="tab" data-tab="donnees">Données</a>
+        <a href="#backtests" class="tab" data-tab="backtests">Backtests</a>
+        <a href="#simulation" class="tab" data-tab="simulation">Simulation</a>
+        <a href="#journaux" class="tab" data-tab="journaux">Journaux</a>
+      </nav>
+
+      <!-- ===================== VUE D'ENSEMBLE ===================== -->
+      <div class="view" id="view-apercu">
       <section class="intro" aria-labelledby="overview-title">
         <div>
           <p class="eyebrow">ESPACE DE RECHERCHE</p>
           <h2 id="overview-title">Vue d’ensemble</h2>
-          <p class="muted">Expériences locales, données identifiées et mesures après coûts simulés.</p>
+          <p class="muted">Données identifiées, backtests reproductibles et simulation persistante, coûts simulés inclus.</p>
         </div>
         <div id="service-state" class="service-state" role="status" aria-live="polite">Connexion…</div>
       </section>
 
-      <section class="metric-grid" aria-label="Indicateurs du dernier backtest">
-        <p class="data-label" id="data-label" role="note">Données : <strong id="data-label-value">non chargées</strong> · aucune donnée de marché réelle n’est intégrée</p>
-        <article class="metric-card"><span class="metric-label">Jeu de données</span><strong id="dataset-label">—</strong><small id="dataset-hash">Aucune exécution enregistrée</small></article>
-        <article class="metric-card"><span class="metric-label">Observations</span><strong id="observations">—</strong><small>Barres acceptées par le contrôle qualité</small></article>
-        <article class="metric-card"><span class="metric-label">Résultat net simulé</span><strong id="net-pnl">—</strong><small id="trade-count">Aucun trade simulé</small></article>
-        <article class="metric-card"><span class="metric-label">Drawdown maximum</span><strong id="drawdown">—</strong><small>Calculé sur les fonds réalisés</small></article>
+      <section class="metric-grid" aria-label="État des données et du dernier backtest">
+        <p class="data-label" id="data-label" role="note">Données : <strong id="data-label-value">non chargées</strong> · <span id="data-label-detail">chargement de l’état des données…</span></p>
+        <article class="metric-card"><span class="metric-label">Données de marché</span><strong id="ov-candles">—</strong><small id="ov-sources">Aucune source</small></article>
+        <article class="metric-card"><span class="metric-label">Dernier backtest (net)</span><strong id="ov-bt-net">—</strong><small id="ov-bt-detail">Aucun backtest</small></article>
+        <article class="metric-card"><span class="metric-label">Simulations actives</span><strong id="ov-sim">—</strong><small id="ov-sim-detail">Aucune simulation</small></article>
+        <article class="metric-card"><span class="metric-label">Worker</span><strong id="ov-worker">—</strong><small id="ov-worker-detail">État inconnu</small></article>
       </section>
 
       <section class="content-grid">
         <article class="panel strategy-panel">
           <div class="panel-heading">
             <div><p class="eyebrow">RECHERCHE</p><h2>Dernier backtest</h2></div>
-            <span id="run-mode" class="tag">SIMULATION</span>
+            <span class="tag">SIMULATION</span>
           </div>
-          <dl class="detail-list">
-            <div><dt>Stratégie</dt><dd id="strategy">—</dd></div>
-            <div><dt>Instrument</dt><dd id="instrument">—</dd></div>
-            <div><dt>Période</dt><dd id="period">—</dd></div>
-            <div><dt>Profit factor</dt><dd id="profit-factor">—</dd></div>
-            <div><dt>Taux de réussite</dt><dd id="win-rate">—</dd></div>
-            <div><dt>Refus du Risk Engine</dt><dd id="risk-rejections">—</dd></div>
-          </dl>
+          <dl class="detail-list" id="ov-bt-list"><div><dt>Aucun backtest</dt><dd>Lancez-en un dans l’onglet Backtests.</dd></div></dl>
           <div class="assumption-box">
             <strong>Lecture prudente</strong>
-            <p>Un résultat historique ou synthétique ne prédit pas les résultats futurs. Consultez les hypothèses et le nombre d’observations avant toute interprétation.</p>
+            <p>Un résultat historique ne prédit pas les résultats futurs. La stratégie de référence est expérimentale : aucune rentabilité n’est démontrée sans évaluation hors échantillon.</p>
           </div>
         </article>
 
@@ -43,24 +46,32 @@
           <div class="panel-heading"><div><p class="eyebrow">GARDE-FOUS</p><h2>État du système</h2></div><span class="status-ok">ACTIF</span></div>
           <ul class="guard-list">
             <li><span class="check">✓</span><span><strong>Mode SIMULATION</strong><small>Aucune commande envoyée à un courtier</small></span></li>
-            <li><span class="check">✓</span><span><strong>Risque indépendant</strong><small>Les signaux ne peuvent pas envoyer d’ordres</small></span></li>
-            <li><span class="check">✓</span><span><strong>Interface en lecture seule pour le trading</strong><small>Aucune route web ne modifie l’état d’exécution</small></span></li>
-            <li><span class="lock">▣</span><span><strong>Mode RÉEL verrouillé</strong><small>Seul le courtier simulé interne peut exécuter des ordres ; le connecteur démo cTrader sert uniquement au contrôle en lecture seule</small></span></li>
+            <li><span class="check">✓</span><span><strong>Limites de risque appliquées</strong><small>Stop obligatoire, risque par transaction, perte journalière, drawdown maximal, positions simultanées</small></span></li>
+            <li><span class="check">✓</span><span><strong>Aucun ordre réel depuis l’interface</strong><small>Le tableau de bord ne lance que des imports, des backtests et des simulations internes</small></span></li>
+            <li><span class="lock">▣</span><span><strong>Mode RÉEL verrouillé</strong><small>Seul le moteur simulé interne enregistre des ordres ; le connecteur démo cTrader sert uniquement au contrôle en lecture seule</small></span></li>
           </ul>
-          <p class="footnote">Accès authentifié côté serveur (session, rôle). Les rôles web ne donnent aucune permission d’exécution : le tableau de bord ne peut ni envoyer d’ordre, ni lever l’arrêt d’urgence, ni changer de mode.</p>
+          <p class="footnote">Accès authentifié côté serveur (session, rôle). Lancer un import, un backtest ou une simulation exige le rôle OPERATOR ; aucun rôle ne peut envoyer d’ordre réel, lever l’arrêt d’urgence ni changer de mode.</p>
         </article>
       </section>
 
       <section class="panel table-panel" aria-labelledby="runs-title">
-        <div class="panel-heading"><div><p class="eyebrow">REGISTRE</p><h2 id="runs-title">Exécutions récentes</h2></div><span id="run-total" class="muted">0 exécution</span></div>
+        <div class="panel-heading"><div><p class="eyebrow">REGISTRE HISTORIQUE (CLI)</p><h2 id="runs-title">Exécutions de la ligne de commande</h2></div><span id="run-total" class="muted">0 exécution</span></div>
+        <dl class="detail-list compact" aria-label="Dernière exécution de la ligne de commande">
+          <div><dt>Jeu</dt><dd id="dataset-label">—</dd></div><div><dt>Empreinte</dt><dd id="dataset-hash">—</dd></div>
+          <div><dt>Observations</dt><dd id="observations">—</dd></div><div><dt>Net simulé</dt><dd id="net-pnl">—</dd></div>
+          <div><dt>Trades</dt><dd id="trade-count">—</dd></div><div><dt>Drawdown</dt><dd id="drawdown">—</dd></div>
+          <div><dt>Stratégie</dt><dd id="strategy">—</dd></div><div><dt>Instrument</dt><dd id="instrument">—</dd></div>
+          <div><dt>Période</dt><dd id="period">—</dd></div><div><dt>Profit factor</dt><dd id="profit-factor">—</dd></div>
+          <div><dt>Taux de réussite</dt><dd id="win-rate">—</dd></div><div><dt>Refus du Risk Engine</dt><dd id="risk-rejections">—</dd></div>
+        </dl>
         <div class="table-scroll">
           <table>
             <thead><tr><th scope="col">Date UTC</th><th scope="col">Jeu</th><th scope="col">Stratégie</th><th scope="col">Trades</th><th scope="col">Net simulé</th><th scope="col">Mode</th></tr></thead>
-            <tbody id="runs-body"><tr><td colspan="6" class="empty-cell">Aucune expérience. Lancez `python -m astra demo` pour exécuter le jeu synthétique inclus.</td></tr></tbody>
+            <tbody id="runs-body"><tr><td colspan="6" class="empty-cell">Aucune exécution de la ligne de commande (`python -m astra demo`).</td></tr></tbody>
           </table>
         </div>
       </section>
-      <section class="content-grid" aria-label="Exécution simulée">
+      <section class="content-grid" aria-label="Exécution simulée (Order Gateway)">
         <article class="panel">
           <div class="panel-heading"><div><p class="eyebrow">CONTRÔLES</p><h2>Arrêt d’urgence et gels</h2></div><span id="entries-state" class="tag">—</span></div>
           <dl class="detail-list">
@@ -68,7 +79,7 @@
             <div><dt>Gels des entrées</dt><dd id="freezes">—</dd></div>
             <div><dt>Dernière réconciliation</dt><dd id="last-reconciliation">—</dd></div>
           </dl>
-          <p class="footnote">Lecture seule. Le levage de l’arrêt d’urgence exige un opérateur humain via la CLI locale ; les gels liés à la connexion ne se lèvent qu’après une réconciliation cohérente.</p>
+          <p class="footnote">Lecture seule. Le levage de l’arrêt d’urgence exige un opérateur humain via la CLI locale.</p>
         </article>
         <article class="panel">
           <div class="panel-heading"><div><p class="eyebrow">REGISTRE</p><h2>Modèles et expériences</h2></div><span id="model-total" class="muted">0 version</span></div>
@@ -76,15 +87,163 @@
           <p class="footnote">Une version candidate reste inactive tant que ses critères préenregistrés ne sont pas satisfaits et qu’un humain ne l’a pas promue.</p>
         </article>
       </section>
-
       <section class="panel table-panel" aria-labelledby="orders-title">
-        <div class="panel-heading"><div><p class="eyebrow">ORDER GATEWAY · COURTIER SIMULÉ</p><h2 id="orders-title">Ordres simulés</h2></div><span id="order-total" class="muted">0 ordre</span></div>
+        <div class="panel-heading"><div><p class="eyebrow">ORDER GATEWAY · COURTIER SIMULÉ</p><h2 id="orders-title">Ordres de l’Order Gateway</h2></div><span id="order-total" class="muted">0 ordre</span></div>
         <div class="table-scroll">
           <table>
             <thead><tr><th scope="col">Créé UTC</th><th scope="col">Compte</th><th scope="col">Objet</th><th scope="col">Sens</th><th scope="col">Unités</th><th scope="col">État</th><th scope="col">Motifs</th></tr></thead>
-            <tbody id="orders-body"><tr><td colspan="7" class="empty-cell">Aucun ordre. Lancez `python -m astra paper-replay` pour rejouer le jeu synthétique via l’Order Gateway.</td></tr></tbody>
+            <tbody id="orders-body"><tr><td colspan="7" class="empty-cell">Aucun ordre de l’Order Gateway (`python -m astra paper-replay`). Les ordres des simulations sont dans l’onglet Simulation.</td></tr></tbody>
           </table>
         </div>
       </section>
-      <p class="disclaimer">Les chiffres d’exemple proviennent d’une simulation avec hypothèses documentées. Ils ne constituent ni un conseil financier, ni une garantie de performance.</p>
+      </div>
+
+      <!-- ===================== DONNÉES ===================== -->
+      <div class="view" id="view-donnees" hidden>
+      <section class="intro"><div><p class="eyebrow">DONNÉES DE MARCHÉ</p><h2>Sources, couverture et qualité</h2>
+        <p class="muted">Aucune donnée n’est présentée comme du temps réel. Les données synthétiques restent marquées SYNTHÉTIQUE.</p></div>
+        <div class="live-state" id="live-state" role="status">Temps réel : non connecté</div></section>
+
+      <section class="panel table-panel">
+        <div class="panel-heading"><div><p class="eyebrow">CONNECTEURS</p><h2>Sources de données</h2></div>
+          <button type="button" class="operator-only" id="btn-ingest">Mettre à jour les taux BCE</button></div>
+        <div class="table-scroll"><table>
+          <thead><tr><th>Source</th><th>Nature</th><th>Fraîcheur</th><th>Dernière donnée</th><th>Dernier succès</th><th>Dernière erreur</th></tr></thead>
+          <tbody id="sources-body"><tr><td colspan="6" class="empty-cell">Chargement…</td></tr></tbody></table></div>
+        <p class="form-status" id="ingest-status" role="status"></p>
+      </section>
+
+      <section class="panel table-panel">
+        <div class="panel-heading"><div><p class="eyebrow">STOCKAGE</p><h2>Paires et unités de temps disponibles</h2></div><span class="muted" id="coverage-total">—</span></div>
+        <div class="table-scroll"><table>
+          <thead><tr><th>Paire</th><th>Unité</th><th>Source</th><th>Type</th><th>Bougies</th><th>Première</th><th>Dernière</th><th>Volume</th><th>Qualité</th></tr></thead>
+          <tbody id="coverage-body"><tr><td colspan="9" class="empty-cell">Aucune donnée stockée. Mettez à jour les taux BCE ou importez un fichier CSV.</td></tr></tbody></table></div>
+        <p class="form-status" id="quality-status" role="status"></p>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading"><div><p class="eyebrow">GRAPHIQUE</p><h2 id="chart-title">Cours</h2></div></div>
+        <div id="price-chart" class="chart"><p class="empty-cell">Choisissez « Voir » sur une ligne du tableau ci-dessus.</p></div>
+      </section>
+
+      <section class="panel operator-only">
+        <div class="panel-heading"><div><p class="eyebrow">IMPORT</p><h2>Importer un historique CSV OHLC</h2></div></div>
+        <form id="import-form" class="lab-form">
+          <label>Fichier CSV (12 Mo max.)<input type="file" name="file" accept=".csv,.txt,text/csv" required></label>
+          <label>Paire<select name="symbol" class="pair-select" required></select></label>
+          <label>Unité de temps<select name="timeframe" class="tf-select" required></select></label>
+          <label>Source (fournisseur, export)<input name="source" required maxlength="80" placeholder="ex. dukascopy-export, mt5-courtier"></label>
+          <label>Fuseau des horodatages sans décalage<input name="timezone" value="UTC" maxlength="60"></label>
+          <label>Nature<select name="nature"><option value="HISTORICAL">Historique réel</option><option value="SYNTHETIC">Synthétique</option></select></label>
+          <button type="submit">Vérifier et importer</button>
+        </form>
+        <p class="footnote">Colonnes attendues : horodatage (timestamp, Gmt time ou &lt;DATE&gt; &lt;TIME&gt;), open, high, low, close, volume facultatif. Les lignes invalides sont refusées et signalées ; un volume absent reste absent.</p>
+        <p class="form-status" id="import-status" role="status"></p>
+      </section>
+
+      <section class="panel table-panel">
+        <div class="panel-heading"><div><p class="eyebrow">HISTORIQUE</p><h2>Imports et acquisitions</h2></div></div>
+        <div class="table-scroll"><table>
+          <thead><tr><th>Début UTC</th><th>Source</th><th>Paire</th><th>Statut</th><th>Lues</th><th>Acceptées</th><th>Nouvelles</th><th>Refusées</th><th>Lacunes</th><th>Anomalies</th></tr></thead>
+          <tbody id="imports-body"><tr><td colspan="10" class="empty-cell">Aucun import.</td></tr></tbody></table></div>
+      </section>
+      </div>
+
+      <!-- ===================== BACKTESTS ===================== -->
+      <div class="view" id="view-backtests" hidden>
+      <section class="intro"><div><p class="eyebrow">LABORATOIRE</p><h2>Backtests</h2>
+        <p class="muted">Calcul réel sur les bougies stockées, reproductible : paramètres, version de stratégie, période et empreinte des données sont enregistrés.</p></div></section>
+      <section class="panel operator-only">
+        <div class="panel-heading"><div><p class="eyebrow">NOUVEAU</p><h2>Lancer un backtest</h2></div><span class="tag" id="strategy-tag">sma_atr_trend · expérimentale</span></div>
+        <form id="backtest-form" class="lab-form">
+          <label>Série de données<select name="series" class="series-select" required></select></label>
+          <label>Début (facultatif)<input type="date" name="start"></label>
+          <label>Fin (facultative)<input type="date" name="end"></label>
+          <label>Capital initial virtuel (USD)<input type="number" name="initial_capital" value="10000" min="100" step="100"></label>
+          <label>Risque par transaction (%)<input type="number" name="risk_per_trade_pct" value="0.5" min="0.01" max="2" step="0.01"></label>
+          <label>Stop (multiple d’ATR)<input type="number" name="stop_atr_multiple" value="2" min="0.5" max="10" step="0.1"></label>
+          <label>Spread (pips)<input type="number" name="spread_pips" value="1" min="0" max="50" step="0.1"></label>
+          <label>Slippage par côté (pips)<input type="number" name="slippage_pips" value="0.2" min="0" max="20" step="0.1"></label>
+          <label>Commission par côté (USD / 100 000)<input type="number" name="commission_per_100k" value="0" min="0" max="100" step="0.5"></label>
+          <label>Moyenne rapide<input type="number" name="fast" value="20" min="2" max="399"></label>
+          <label>Moyenne lente<input type="number" name="slow" value="50" min="3" max="400"></label>
+          <label>ATR minimal (% du prix)<input type="number" name="min_atr_pct" value="0.02" min="0" max="50" step="0.01"></label>
+          <label>ATR maximal (% du prix)<input type="number" name="max_atr_pct" value="3" min="0.01" max="50" step="0.01"></label>
+          <label>Perte journalière max (%)<input type="number" name="daily_loss_limit_pct" value="2" min="0.1" max="10" step="0.1"></label>
+          <label>Drawdown max (%)<input type="number" name="max_drawdown_pct" value="15" min="1" max="50" step="0.5"></label>
+          <label>Taille max (unités)<input type="number" name="max_position_units" value="1000000" min="1000" max="10000000" step="1000"></label>
+          <button type="submit">Lancer le backtest</button>
+        </form>
+        <p class="form-status" id="backtest-status" role="status"></p>
+      </section>
+      <section class="panel table-panel">
+        <div class="panel-heading"><div><p class="eyebrow">RÉSULTATS</p><h2>Backtests enregistrés</h2></div></div>
+        <div class="table-scroll"><table>
+          <thead><tr><th>N°</th><th>Créé UTC</th><th>Série</th><th>Période</th><th>Statut</th><th>Trades</th><th>Net</th><th>Drawdown</th><th></th></tr></thead>
+          <tbody id="backtests-body"><tr><td colspan="9" class="empty-cell">Aucun backtest. Choisissez une série et lancez-en un.</td></tr></tbody></table></div>
+      </section>
+      <section class="panel" id="backtest-detail" hidden>
+        <div class="panel-heading"><div><p class="eyebrow">DÉTAIL</p><h2 id="bt-title">Backtest</h2></div></div>
+        <div class="metric-grid" id="bt-metrics"></div>
+        <h3>Courbe du capital</h3><div id="bt-equity" class="chart"></div>
+        <h3>Hypothèses</h3><ul id="bt-assumptions" class="plain-list"></ul>
+        <h3>Données utilisées</h3><dl id="bt-data" class="detail-list compact"></dl>
+        <h3>Transactions</h3><div class="table-scroll"><table><thead><tr><th>Entrée</th><th>Sortie</th><th>Sens</th><th>Unités</th><th>Prix entrée</th><th>Prix sortie</th><th>Brut</th><th>Coûts</th><th>Net</th><th>Motif</th></tr></thead><tbody id="bt-trades"></tbody></table></div>
+        <h3>Signaux (changements de décision)</h3><div class="table-scroll"><table><thead><tr><th>Date</th><th>Décision</th><th>Prix</th><th>Indicateurs</th><th>Justification</th></tr></thead><tbody id="bt-signals"></tbody></table></div>
+        <h3>Ordres refusés par les limites de risque</h3><div class="table-scroll"><table><thead><tr><th>Date</th><th>Sens</th><th>Motif</th></tr></thead><tbody id="bt-refused"></tbody></table></div>
+      </section>
+      </div>
+
+      <!-- ===================== SIMULATION ===================== -->
+      <div class="view" id="view-simulation" hidden>
+      <section class="intro"><div><p class="eyebrow">TRADING SIMULÉ</p><h2>Simulation persistante</h2>
+        <p class="muted">Le worker traite chaque nouvelle bougie stockée : signaux, ordres simulés, positions, solde et limites de risque, conservés après redémarrage. Aucun courtier.</p></div></section>
+      <section class="panel operator-only">
+        <div class="panel-heading"><div><p class="eyebrow">NOUVELLE</p><h2>Démarrer une simulation</h2></div></div>
+        <form id="sim-form" class="lab-form">
+          <label>Nom<input name="name" maxlength="80" placeholder="ex. Majeures D1 BCE"></label>
+          <label>Source et unité<select name="series" class="source-tf-select" required></select></label>
+          <fieldset class="pair-checks"><legend>Paires</legend><div id="sim-pairs"></div></fieldset>
+          <label>Début du traitement<input type="date" name="start"></label>
+          <label>Capital initial virtuel (USD)<input type="number" name="initial_capital" value="10000" min="100" step="100"></label>
+          <label>Risque par transaction (%)<input type="number" name="risk_per_trade_pct" value="0.5" min="0.01" max="2" step="0.01"></label>
+          <label>Positions simultanées max.<input type="number" name="max_positions" value="3" min="1" max="7"></label>
+          <label>Perte journalière max (%)<input type="number" name="daily_loss_limit_pct" value="2" min="0.1" max="10" step="0.1"></label>
+          <label>Drawdown max (%)<input type="number" name="max_drawdown_pct" value="15" min="1" max="50" step="0.5"></label>
+          <label>Spread (pips)<input type="number" name="spread_pips" value="1" min="0" max="50" step="0.1"></label>
+          <button type="submit">Démarrer</button>
+        </form>
+        <p class="footnote">Sans date de début, seules les bougies publiées après le démarrage sont traitées (taux BCE : une par jour ouvré). Avec une date passée, la simulation rattrape l’historique puis continue.</p>
+        <p class="form-status" id="sim-status" role="status"></p>
+      </section>
+      <section class="panel table-panel">
+        <div class="panel-heading"><div><p class="eyebrow">SESSIONS</p><h2>Simulations</h2></div></div>
+        <div class="table-scroll"><table>
+          <thead><tr><th>N°</th><th>Nom</th><th>Paires</th><th>Statut</th><th>Capital</th><th>Net</th><th>Positions</th><th>Limites</th><th>Mise à jour</th><th></th></tr></thead>
+          <tbody id="sessions-body"><tr><td colspan="10" class="empty-cell">Aucune simulation.</td></tr></tbody></table></div>
+      </section>
+      <section class="panel" id="sim-detail" hidden>
+        <div class="panel-heading"><div><p class="eyebrow">DÉTAIL</p><h2 id="sim-title">Simulation</h2></div><div class="button-row operator-only" id="sim-buttons"></div></div>
+        <div class="metric-grid" id="sim-metrics"></div>
+        <h3>Capital</h3><div id="sim-equity" class="chart"></div>
+        <h3>Positions ouvertes</h3><div class="table-scroll"><table><thead><tr><th>Paire</th><th>Sens</th><th>Unités</th><th>Entrée</th><th>Prix</th><th>Stop</th></tr></thead><tbody id="sim-positions"></tbody></table></div>
+        <h3>Ordres simulés</h3><div class="table-scroll"><table><thead><tr><th>Date</th><th>Paire</th><th>Type</th><th>Sens</th><th>Unités</th><th>Statut</th><th>Prix</th><th>Motif</th></tr></thead><tbody id="sim-orders"></tbody></table></div>
+        <h3>Transactions</h3><div class="table-scroll"><table><thead><tr><th>Paire</th><th>Entrée</th><th>Sortie</th><th>Sens</th><th>Net</th><th>Motif</th></tr></thead><tbody id="sim-trades"></tbody></table></div>
+        <h3>Signaux</h3><div class="table-scroll"><table><thead><tr><th>Date</th><th>Paire</th><th>Décision</th><th>Prix</th><th>Justification</th></tr></thead><tbody id="sim-signals"></tbody></table></div>
+        <h3>Événements</h3><ul id="sim-events" class="plain-list"></ul>
+      </section>
+      </div>
+
+      <!-- ===================== JOURNAUX ===================== -->
+      <div class="view" id="view-journaux" hidden>
+      <section class="intro"><div><p class="eyebrow">EXPLOITATION</p><h2>Journaux et connecteurs</h2></div><div class="service-state" id="worker-state">—</div></section>
+      <section class="panel table-panel">
+        <div class="panel-heading"><div><p class="eyebrow">TÂCHES</p><h2>File de tâches du worker</h2></div></div>
+        <div class="table-scroll"><table>
+          <thead><tr><th>N°</th><th>Type</th><th>Statut</th><th>Demandée par</th><th>Créée UTC</th><th>Terminée UTC</th><th>Résultat ou erreur</th></tr></thead>
+          <tbody id="jobs-body"><tr><td colspan="7" class="empty-cell">Aucune tâche.</td></tr></tbody></table></div>
+      </section>
+      </div>
+
+      <p class="disclaimer">Les résultats proviennent de simulations avec hypothèses documentées. Ils ne constituent ni un conseil financier, ni une garantie de performance.</p>
     {% endblock %}

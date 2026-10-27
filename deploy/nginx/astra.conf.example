@@ -53,6 +53,8 @@ server {
     ssl_session_tickets off;
 
     client_max_body_size 64k;
+    # CSV history imports (/api/market/import) need up to 12 MB: add
+    #   location = /api/market/import { client_max_body_size 13m; <same proxy settings as location /> }
     client_body_timeout 10s;
     client_header_timeout 10s;
     keepalive_timeout 15s;

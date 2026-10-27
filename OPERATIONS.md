@@ -120,7 +120,7 @@ Evidence: tested locally against the simulator only (`tests/test_backup.py`; anc
 
 ## Dashboard
 
-The dashboard requires an account. Pages after sign-in: summary, runs, controls and freezes (OPERATOR), orders (OPERATOR), reconciliations (OPERATOR), registry; every data block is labelled SIMULATION or SYNTHETIC because no real market feed is integrated. Account procedures (run locally on the server, as the `astra` user, with the web environment loaded):
+The dashboard requires an account. Tabs after sign-in: Vue d’ensemble (data state, last backtest, simulations, worker, CLI runs, controls and Order Gateway orders for OPERATOR), Données, Backtests, Simulation, Journaux. Reading needs READ_ONLY; imports, ECB updates, backtests and starting or stopping a simulation need OPERATOR. Every result is labelled SIMULATION; ECB rates are shown as official daily reference rates (not real time), synthetic data as SYNTHÉTIQUE. Account procedures (run locally on the server, as the `astra` user, with the web environment loaded):
 
 | Task | Command |
 |---|---|
@@ -138,6 +138,22 @@ The dashboard requires an account. Pages after sign-in: summary, runs, controls 
 | Lost or damaged key ring | Restore it from its separate backup. If it is lost for good, nothing can decrypt the TOTP secrets: run `astra auth reset-mfa` for every account (users re-enrol) after a fresh `mfa-key-init`. Recovery codes still let users in meanwhile. |
 | Renew the proxy secret | Write the new value as the first line of `/etc/astra/proxy.secret`, keep the old one as the second, restart `astra-web`, then update the proxy include and reload the proxy. Finally remove the old line and restart again. |
 
+## Market data, backtests and paper simulations (worker)
+
+The dashboard tabs Données, Backtests, Simulation and Journaux record requests; the worker (`astra-worker.service`, `python -m astra worker`) runs them. SIMULATION only: no component here opens a broker connection.
+
+| Task | How |
+|---|---|
+| Market data sources | ECB reference rates (`ECB_EXR`, official, one fix per TARGET business day at 14:15 CET, no credentials; pairs other than EUR/USD derived from two official rates; close only). CSV OHLC imports (any authorised provider export: ISO timestamps, MT4/MT5 `<DATE> <TIME>`, Dukascopy `GMT+hhmm`, a declared time zone for naive times). No live quote feed is configured. |
+| ECB acquisition | Automatic: the worker asks at most every 6 hours, from the last stored day; three tries per run; after a failed run it backs off 5 min, 10 min, ... up to 6 h. Manual: dashboard « Mettre à jour les taux BCE », or `python -m astra data ingest-ecb [--force]`. |
+| CSV import | Dashboard « Importer » (OPERATOR, 12 MB at most: the file is validated at once, then queued), or `python -m astra data import --csv <file> --symbol EURUSD --timeframe H1 --source <name> [--timezone Europe/Paris] [--nature HISTORICAL]`. Invalid rows are refused and listed; duplicates are idempotent; a candle stored with other values is kept and reported as a conflict; an absent volume stays absent. |
+| Coverage and quality | `python -m astra data coverage`; dashboard Données (Qualité: gaps outside the weekly Forex closure, Friday 17:00 to Sunday 17:00 New York time; D1 gaps are missing weekdays, bank holidays included). |
+| Backtest | Dashboard Backtests, or `python -m astra lab backtest --symbol GBPUSD --timeframe D1 --source ECB_EXR [--start 2018-01-01]`. Stored with parameters, versions, data fingerprint, metrics, equity curve, trades, signals and refused orders. |
+| Simulation | Dashboard Simulation: pairs, start date (past dates catch up first), capital, risk per trade, positions, daily loss and drawdown limits. The worker processes each new stored candle; state, orders, trades, signals and events are in SQLite. Stop and restart from the dashboard; a drawdown stop is final for that simulation (start a new one). |
+| Interrupted jobs | A job running when the worker stops is marked FAILED with the reason, never replayed silently; queue it again. Simulation steps and candle inserts are idempotent. |
+| Logs | `journalctl -u astra-worker`; dashboard Journaux (job queue, worker heartbeat, sources). A worker silent for more than 60 s shows as « silencieux ». |
+| Backups | `astra-backup.timer`, daily 02:30 UTC: verified online backups of `astra.sqlite3` and `auth.sqlite3` in `/var/lib/astra/backups/{astra,auth}` (14 kept). Copy them off the host; back up `/etc/astra/mfa.key` separately. Restore: stop `astra-worker` and `astra-web`, then `python -m astra backup restore <file> --operator <name> --reason "<why>"` (see above). |
+
 ## Not implemented
 
-External service supervision (restart on crash, start at boot), alert delivery (e-mail/messaging), metrics endpoint beyond `/api/health`, log shipping, scheduled or encrypted backups, drift monitoring, shadow-mode signal comparison, and a continuous service wired to a real connector or a real feed. In V5 terms (section 5.13 and gates F and H), operations and observability are partial: local logs, heartbeat, backup and a read-only local dashboard exist; supervision, alerting, secured remote access and a shadow service on a real feed do not.
+Alert delivery without a configured recipient (the journal entry is written; set `ASTRA_ALERT_TO`), a metrics endpoint beyond `/api/health`, log shipping, encrypted off-host backup copies, drift monitoring, shadow-mode signal comparison, a live quote feed (no provider with credentials is configured), and any connection of the simulation to a real broker. Supervision exists through systemd (`Restart=`, `OnFailure=` alert unit) for `astra-web` and `astra-worker`.

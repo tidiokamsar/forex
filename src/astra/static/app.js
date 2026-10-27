@@ -43,9 +43,9 @@ async function loadDashboard() {
     ]);
     state.textContent = health.status === "ok" ? "● SERVICE DISPONIBLE" : "SERVICE DÉGRADÉ";
     const latest = summary.latest_run;
-    setText("data-label-value", latest ? (DATA_LABELS[latest.source_type] || "INCONNUE") : "aucune exécution · SIMULATION");
+    // The data banner (data-label-value) is owned by lab.js, which reads the candle store.
     if (latest) {
-      setText("dataset-label", `${latest.source_type} (déclarée) · ${latest.source_name}`);
+      setText("dataset-label", `${DATA_LABELS[latest.source_type] || "INCONNUE"} · ${latest.source_name}`);
       setText("dataset-hash", `Origine fournisseur non vérifiée · SHA-256 ${shortHash(latest.dataset_sha256)}`);
       setText("observations", number.format(latest.observations));
       setText("net-pnl", currency.format(latest.net_pnl));

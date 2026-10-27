@@ -25,6 +25,10 @@
     SSLSessionTickets off
 
     LimitRequestBody 65536
+    # CSV history imports need up to 12 MB on that route only:
+    <Location "/api/market/import">
+        LimitRequestBody 13631488
+    </Location>
     RequestReadTimeout header=10-20,MinRate=500 body=10,MinRate=500
     ProxyTimeout 30
 

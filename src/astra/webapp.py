@@ -34,6 +34,7 @@ from .auth.mfa_crypto import load_cipher
 from .auth.store import SessionRecord, SessionStage
 from .config import AppConfig, WebConfig
 from .execution import ExecutionStore, TradingControls
+from .labweb import register_lab_routes
 from .registry import ModelRegistry
 from .storage import BacktestStore
 
@@ -44,7 +45,7 @@ DEVICE_COOKIE = "__Host-astra_device"
 DEVICE_COOKIE_SECONDS = 90 * 24 * 3600
 STATIC_DIR = Path(__file__).with_name("static")
 PUBLIC_STATIC = {"styles.css": "text/css; charset=utf-8"}
-PRIVATE_STATIC = {"app.js": "text/javascript; charset=utf-8"}
+PRIVATE_STATIC = {"app.js": "text/javascript; charset=utf-8", "lab.js": "text/javascript; charset=utf-8"}
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
        "object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
@@ -570,6 +571,11 @@ def create_app(config: AppConfig, web: WebConfig, *, auth: AuthStore | None = No
     def admin_message(message: str, status: int) -> Response:
         return page("admin_users.html", status, csrf_token=csrf_for_session(g.session), users=auth.list_users(),
                     roles=[role.value for role in WebRole], me=g.session.user.username, message=message)
+
+    # -- market data, backtests and paper simulations (astra.labweb; requests only, the worker runs them) --
+    import_dir = Path(os.environ.get("ASTRA_IMPORT_DIR") or (Path(backtests.path).parent / "imports"))
+    register_lab_routes(app, database=Path(backtests.path), import_dir=import_dir, require=require, actor=actor,
+                        error=_error)
 
     return app
 

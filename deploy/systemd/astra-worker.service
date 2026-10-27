@@ -1,0 +1,57 @@
+# ASTRA worker: CSV imports, ECB reference rates (every 6 h, with back-off), backtests and paper simulations.
+# SIMULATION only: it opens no broker connection and sends no order. Same account, data and environment as
+# astra-web; unlike astra-web it needs outbound HTTPS (data-api.ecb.europa.eu), so it has no IP deny list.
+[Unit]
+Description=ASTRA worker (data acquisition, backtests, paper simulations; SIMULATION only)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=10
+OnFailure=astra-alert@%n.service
+
+[Service]
+Type=simple
+User=astra
+Group=astra
+WorkingDirectory=/opt/astra/app
+EnvironmentFile=/etc/astra/web.env
+Environment=PYTHONPATH=/opt/astra/app/src
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=ASTRA_LOG_LEVEL=INFO
+ExecStart=/opt/astra/venv/bin/python -m astra worker
+Restart=always
+RestartSec=10
+UMask=0077
+MemoryMax=1G
+TasksMax=64
+StateDirectory=astra
+StateDirectoryMode=0700
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target
