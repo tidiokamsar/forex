@@ -252,6 +252,25 @@ class AuthenticationTests(WebAppCase):
                                                         "confirm_password": "Brand-New-Pass-42", "csrf_token": self.csrf(page)})
         self.assertEqual(changed.status_code, 303)
 
+    def test_malformed_device_cookies_are_ignored_not_errors(self):
+        # Raw Cookie header (the test client's jar would alter or drop these values): a superscript digit
+        # and a 5000-digit timestamp must be ignored, not raise (was HTTP 500).
+        self.add_user("alice", WebRole.READ_ONLY)
+        from astra.auth import crypto
+
+        prefix = crypto.token_digest("alice")[:16]  # the real account prefix, so the timestamp is parsed
+        bad_values = ["x.y", "a.b.c.d", f"{prefix}." + "n" * 32 + ".\u00b2.mac",
+                      f"{prefix}." + "n" * 32 + "." + "9" * 5000 + ".mac"]
+        for value in bad_values:
+            self.app.test_client_class = HttpsClient
+            client = self.app.test_client(use_cookies=False)
+            client.environ_base["REMOTE_ADDR"] = "203.0.113.77"
+            page = client.get("/login")
+            pre = re.search(r"__Host-astra_pre=([^;]+)", page.headers["Set-Cookie"]).group(1)
+            response = client.post("/login", data={"username": "alice", "password": PASSWORD, "csrf_token": self.csrf(page)},
+                                   headers={"Origin": ORIGIN, "Cookie": f"__Host-astra_pre={pre}; __Host-astra_device={value}"})
+            self.assertEqual(response.status_code, 303, value[:40])
+
     def test_device_cookie_dies_with_a_password_reset(self):
         client = self.client("203.0.113.5")
         self.add_user("alice", WebRole.READ_ONLY)

@@ -24,6 +24,8 @@ The service defaults to `127.0.0.1:8765`. `ASTRA_HOST` is restricted to loopback
 | `ASTRA_BACKUP_DIR` | `cli` | Backup folder (default `var/backups`) |
 | `ASTRA_LOG_LEVEL`, `ASTRA_LOG_DIR` | `cli` | Log level and optional rotating log file folder |
 | `ASTRA_CTRADER_ACCOUNT_ID`, `ASTRA_SECRET_*` | `cli`, `governance.SecretVault` | Read-only `ctrader-check` only; set in your own shell, never in a file |
+| `ASTRA_AUTH_DATABASE`, `ASTRA_WEB_SECRET_FILE` | `config.WebConfig` | Dashboard accounts and sessions (SQLite) and the CSRF/device-cookie key file |
+| `ASTRA_PUBLIC_HOSTS`, `ASTRA_HTTPS`, `ASTRA_TRUSTED_PROXY`, `ASTRA_PROXY_SECRET_FILE` | `config.WebConfig` | Public mode behind the TLS proxy; all four are required together (section "Remote dashboard") |
 
 The SQLite database is created under `var/`. Keep it local and protect file permissions. `python -m astra serve` runs the authenticated dashboard on loopback with the development server (stop with Ctrl+C); production uses gunicorn and systemd (section "Remote dashboard"). Never expose port 8765 directly: remote access goes only through the TLS reverse proxy, after the go-live checklist.
 
@@ -55,7 +57,7 @@ The dashboard is the Flask application `astra.webapp` served by gunicorn on `127
 | Mode | Settings | Reachable at | Use |
 |---|---|---|---|
 | Private (default) | `ASTRA_PUBLIC_HOSTS` empty, `ASTRA_HTTPS=0`, `ASTRA_TRUSTED_PROXY=0` | `http://127.0.0.1:8765` on the host, or through `ssh -L 8765:127.0.0.1:8765 <host>` | Until a qualified host and a valid certificate exist |
-| Public | `ASTRA_PUBLIC_HOSTS=<dedicated DNS name>`, `ASTRA_HTTPS=1`, `ASTRA_TRUSTED_PROXY=1` | `https://<name>` through the TLS reverse proxy only | After the go-live checklist below |
+| Public | `ASTRA_PUBLIC_HOSTS=<dedicated DNS name>`, `ASTRA_HTTPS=1`, `ASTRA_TRUSTED_PROXY=1`, `ASTRA_PROXY_SECRET_FILE=/etc/astra/proxy.secret` | `https://<name>` through the TLS reverse proxy only | After the go-live checklist below |
 
 **Prerequisite (blocking): a trustworthy host.**
 - A host with an open or only partially remediated intrusion is not acceptable. Root-level access there exposes the password hashes, the TOTP secrets, the CSRF key, the proxy secret and the TLS key, and captures what users type; no application or proxy setting mitigates that.
@@ -72,7 +74,7 @@ The dashboard is the Flask application `astra.webapp` served by gunicorn on `127
    - Install `/etc/astra/web.env` (root:astra 0640) and `/etc/astra/alert.env` (templates in `deploy/`).
    - Public mode only: generate the proxy secret into `/etc/astra/proxy.secret` (root:astra 0640) and into the proxy's root-only include (`deploy/apache/astra-proxy-secret.conf.example`).
    - Install the units: `astra-web`, `astra-nft`, `astra-alert@`, `astra-cert-check.{service,timer}`.
-4. **First administrator.** Create it in the service's own context, so the state directory and permissions are right: `sudo systemd-run --pipe --wait -p User=astra -p EnvironmentFile=/etc/astra/web.env -p StateDirectory=astra -p Environment=PYTHONPATH=/opt/astra/app/src /opt/astra/venv/bin/python -m astra auth init-admin --username <name>`. The password is typed twice, or with `--generate` shown once.
+4. **First administrator.** Create it in the service's own context, so the state directory and permissions are right: `sudo systemd-run --pipe --wait -p User=astra -p EnvironmentFile=/etc/astra/web.env -p StateDirectory=astra -p StateDirectoryMode=0700 -p UMask=0077 -p Environment=PYTHONPATH=/opt/astra/app/src /opt/astra/venv/bin/python -m astra auth init-admin --username <name>`. The password is typed twice, or with `--generate` shown once.
 5. **Start and verify the unit.**
    - Enable `astra-web`, which also starts `astra-nft`.
    - Check `systemd-analyze security astra-web`, that the journal shows no SIGSYS, and that outbound traffic from the unit is refused.
@@ -98,7 +100,8 @@ The dashboard is the Flask application `astra.webapp` served by gunicorn on `127
   - `/etc/astra/web.env` and `/etc/astra/proxy.secret` 0640;
   - `/var/lib/astra` 0700, with the databases and `web_secret.key` 0600;
   - the proxy include and the TLS key 0600.
-- Alerts: a renewal dry run passes, the reload hook fires, and a test alert reaches the operator (journal only is not enough).
+- Alerts: a renewal dry run passes, the reload hook fires, and a test alert reaches the operator (journal only is not enough). The alert unit is sandboxed (`ProtectSystem=strict`, `NoNewPrivileges`), so a queue-based MTA such as Postfix (setgid `postdrop`) cannot queue mail from it: use a relay-only client (for example msmtp) or adjust the unit, and test.
+- Restarting `nftables.service` re-runs `/etc/nftables.conf`, which usually flushes every rule; `astra-nft` is `PartOf=` it and is restarted too. Verify that the rule is present again after such a restart.
 - Drills: kill gunicorn, reboot the host (the nftables rule comes back before the app), and restore `auth.sqlite3` and `astra.sqlite3`.
 
 **Behaviour on incidents:**

@@ -30,7 +30,7 @@ server {
     server_tokens off;
     access_log /var/log/nginx/astra-access.log astra_min;
     # ACME HTTP-01 challenges only; everything else goes to HTTPS on the fixed public name.
-    location ^~ /.well-known/acme-challenge/ { root /var/lib/letsencrypt/webroot; default_type text/plain; }
+    location ^~ /.well-known/acme-challenge/ { root /var/www/acme; default_type text/plain; }
     location / { return 301 https://PUBLIC_HOST$request_uri; }
 }
 

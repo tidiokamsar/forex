@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import secrets
 import sqlite3
 from collections.abc import Callable
@@ -131,7 +132,7 @@ def create_app(config: AppConfig, web: WebConfig, *, auth: AuthStore | None = No
         """The device id if this browser holds a valid, unexpired device cookie for ``username``."""
 
         parts = (request.cookies.get(DEVICE_COOKIE) or "").split(".")
-        if len(parts) != 4 or not 16 <= len(parts[1]) <= 64 or not parts[2].isdigit():
+        if len(parts) != 4 or not 16 <= len(parts[1]) <= 64 or not re.fullmatch(r"[0-9]{1,12}", parts[2]):
             return None
         name = username.strip().casefold() if isinstance(username, str) else ""
         if parts[0] != crypto.token_digest(name)[:16]:
