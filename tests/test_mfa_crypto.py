@@ -324,6 +324,26 @@ class ReviewFixTests(MfaCase):
         self.assertEqual(response.status_code, 303)
         self.assertEqual(running.mfa_cipher.active_key_id, new_id)
 
+    def test_replacement_with_the_same_mtime_is_still_reloaded(self):
+        key_file = Path(self.temp.name) / "mfa.key"
+        store = AuthStore(self.auth.path, clock=self.clock, mfa_cipher=mfa_crypto.load_cipher(key_file), mfa_key_path=key_file)
+        old_id = store._cipher().active_key_id
+        before = key_file.stat()
+        new_id = mfa_crypto.add_active_key(key_file)
+        os.utime(key_file, ns=(before.st_atime_ns, before.st_mtime_ns))  # same mtime, as after a restore
+        self.assertNotEqual(old_id, new_id)
+        self.assertEqual(store._cipher().active_key_id, new_id)
+
+    def test_enrolment_with_a_broken_key_ring_is_throttled(self):
+        self.add_user("boss", WebRole.ADMIN)
+        keyless = AuthStore(self.auth.path, clock=self.clock)
+        client = self.client(app=self.make_app(auth=keyless))
+        self.login(client, "boss")
+        statuses = [client.get("/mfa/setup").status_code for _ in range(12)]
+        self.assertTrue(all(s == 503 for s in statuses), statuses)
+        events = [e for e in self.auth.events(500) if e["action"] == "mfa.secret_unavailable"]
+        self.assertLessEqual(len(events), 6)
+
     def test_migration_refuses_values_that_are_not_totp_secrets(self):
         self.enrolled_admin("boss")
         self.enrolled_admin("chief")

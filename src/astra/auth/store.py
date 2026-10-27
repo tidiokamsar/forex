@@ -155,25 +155,27 @@ class AuthStore:
         # TOTP secrets are stored only encrypted with this key ring (astra.auth.mfa_crypto). Without it,
         # every operation that needs a TOTP secret fails closed with AuthUnavailable (HTTP 503).
         self.mfa_cipher = mfa_cipher
-        # With a key file, the ring is reloaded when the file changes, so running workers pick up a
-        # rotation at once (they never keep encrypting with a key that was rotated out).
+        # With a key file, the ring is reloaded whenever the file changes (inode, size or mtime: the
+        # atomic replace of a rotation changes the inode), so running workers pick up a rotation at once.
+        # The first use always loads it from the file, so a ring passed in can never be stale.
         self.mfa_key_path = Path(mfa_key_path) if mfa_key_path else None
-        self._mfa_key_mtime = self._key_mtime()
+        self._mfa_key_fingerprint: tuple[int, int, int] | None = None
 
-    def _key_mtime(self) -> int | None:
+    def _key_fingerprint(self) -> tuple[int, int, int] | None:
         try:
-            return self.mfa_key_path.stat().st_mtime_ns if self.mfa_key_path else None
+            info = self.mfa_key_path.stat()
         except OSError:
             return None
+        return (info.st_ino, info.st_size, info.st_mtime_ns)
 
     def _cipher(self) -> MfaCipher:
         if self.mfa_key_path is not None:
-            mtime = self._key_mtime()
-            if mtime is None:
+            fingerprint = self._key_fingerprint()  # taken before loading: a change during the load is seen next time
+            if fingerprint is None:
                 raise MfaKeyError("MFA key ring not readable (ASTRA_MFA_KEY_FILE)")
-            if mtime != self._mfa_key_mtime or self.mfa_cipher is None:
+            if fingerprint != self._mfa_key_fingerprint or self.mfa_cipher is None:
                 self.mfa_cipher = load_cipher(self.mfa_key_path)
-                self._mfa_key_mtime = mtime
+                self._mfa_key_fingerprint = fingerprint
         if self.mfa_cipher is None:
             raise MfaKeyError("MFA key ring not configured (ASTRA_MFA_KEY_FILE)")
         return self.mfa_cipher
@@ -711,7 +713,7 @@ class AuthStore:
 
         if session.stage is not SessionStage.MFA_ENROLL:
             raise AuthError("l'enrôlement MFA n'est pas attendu pour cette session")
-        with self._mfa_guard(session.user.username), self._write() as db:
+        with self._mfa_guard(session.user.username, f"enroll:{session.user.id}"), self._write() as db:
             row = db.execute("SELECT id, username, mfa_pending_secret FROM users WHERE id = ?", (session.user.id,)).fetchone()
             if row["mfa_pending_secret"]:
                 secret = self._open(row["id"], row["username"], "pending", row["mfa_pending_secret"])
@@ -725,7 +727,7 @@ class AuthStore:
                                user_agent: str | None = None) -> tuple[LoginResult, list[str]]:
         if session.stage is not SessionStage.MFA_ENROLL:
             raise AuthError("l'enrôlement MFA n'est pas attendu pour cette session")
-        with self._mfa_guard(session.user.username), self._write() as db:
+        with self._mfa_guard(session.user.username, f"enroll:{session.user.id}"), self._write() as db:
             row = db.execute("SELECT * FROM users WHERE id = ?", (session.user.id,)).fetchone()
             secret = self._open(row["id"], row["username"], "pending", row["mfa_pending_secret"]) \
                 if row["mfa_pending_secret"] else None

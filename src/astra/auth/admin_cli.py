@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import os
 import secrets
 import string
 import sys
@@ -65,6 +66,10 @@ def _run(args: argparse.Namespace) -> int:
     key_path = web.mfa_key_path
     if action == "init-admin" and not key_path.exists():
         # The first administrator must enrol TOTP: create the key ring first (outside the database).
+        # As root this would create a root-only ring the service cannot read: require mfa-key-init --group.
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            raise AuthError(f"no MFA key ring at {key_path}: create it first with "
+                            "'astra auth mfa-key-init --group astra' (as root), then rerun init-admin")
         key_id = mfa_crypto.init_key_file(key_path)
         print(f"MFA key ring created: {key_path} (key {key_id}); back it up separately from the database.", file=sys.stderr)
     if action == "mfa-key-init":
