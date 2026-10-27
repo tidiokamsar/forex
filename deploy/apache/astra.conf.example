@@ -1,0 +1,52 @@
+# ASTRA behind Apache httpd (for a host where Apache already serves other sites on 80/443, such as GLPI).
+# A DEDICATED DNS NAME is required (PUBLIC_HOST, for example astra.example.org): the bare IP and the other
+# names stay with their current virtual hosts. Requires mod_ssl, mod_proxy, mod_proxy_http, mod_headers,
+# mod_reqtimeout. Not applied anywhere yet; review it against the host's existing configuration first.
+
+<VirtualHost *:80>
+    ServerName PUBLIC_HOST
+    # ACME HTTP-01 challenges (certbot --webroot), everything else to HTTPS on the fixed name.
+    Alias /.well-known/acme-challenge/ /var/lib/letsencrypt/webroot/.well-known/acme-challenge/
+    <Directory /var/lib/letsencrypt/webroot/.well-known/acme-challenge/>
+        Require all granted
+    </Directory>
+    RedirectMatch 301 ^/(?!\.well-known/acme-challenge/)(.*)$ https://PUBLIC_HOST/$1
+</VirtualHost>
+
+<VirtualHost *:443>
+    ServerName PUBLIC_HOST
+    SSLEngine on
+    SSLCertificateFile    /etc/letsencrypt/live/PUBLIC_HOST/fullchain.pem
+    SSLCertificateKeyFile /etc/letsencrypt/live/PUBLIC_HOST/privkey.pem
+    SSLProtocol -all +TLSv1.2 +TLSv1.3
+    SSLHonorCipherOrder off
+    SSLSessionTickets off
+
+    LimitRequestBody 65536
+    RequestReadTimeout header=10-20,MinRate=500 body=10,MinRate=500
+    ProxyTimeout 30
+
+    # Only this proxy talks to the app; client-supplied forwarding headers are dropped, not passed on.
+    ProxyPreserveHost On
+    ProxyRequests Off
+    RequestHeader unset X-Forwarded-For early
+    RequestHeader unset X-Forwarded-Host early
+    RequestHeader unset X-Forwarded-Server early
+    RequestHeader unset X-Forwarded-Port early
+    RequestHeader unset X-Forwarded-Prefix early
+    RequestHeader unset X-Forwarded-Ssl early
+    RequestHeader unset X-Forwarded-Protocol early
+    RequestHeader unset X-Real-IP early
+    RequestHeader unset Forwarded early
+    RequestHeader set X-Forwarded-Proto "https"
+    # mod_proxy_http then appends the real client address as the only X-Forwarded-For value (it also
+    # re-adds X-Forwarded-Host/-Server, which the app ignores: ProxyFix reads only For and Proto).
+    ProxyAddHeaders On
+    ProxyPass        / http://127.0.0.1:8765/ retry=0
+    ProxyPassReverse / http://127.0.0.1:8765/
+
+    # No query strings or cookies in the access log.
+    LogFormat "%a [%{%Y-%m-%dT%H:%M:%S}t] \"%m %U\" %>s %B %D" astra_min
+    CustomLog ${APACHE_LOG_DIR}/astra-access.log astra_min
+    ErrorLog ${APACHE_LOG_DIR}/astra-error.log
+</VirtualHost>

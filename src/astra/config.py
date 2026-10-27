@@ -102,6 +102,9 @@ class WebConfig:
                 raise ValueError(f"ASTRA_PUBLIC_HOSTS entry is not a plain host name or address: {host!r}")
         if self.public_hosts and not self.https:
             raise ValueError("a public host requires ASTRA_HTTPS=1: the dashboard is never served over plain HTTP remotely")
+        if self.public_hosts and not self.trusted_proxy:
+            # Behind the proxy every client would share 127.0.0.1: one client could throttle everyone.
+            raise ValueError("a public host requires ASTRA_TRUSTED_PROXY=1 (the local TLS proxy is the only client)")
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> WebConfig:

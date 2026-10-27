@@ -1,0 +1,15 @@
+# Checks the public certificate's remaining validity; fails (and alerts through OnFailure) below the
+# threshold. Run by astra-cert-check.timer. Set ASTRA_CERT_HOST and ASTRA_CERT_MIN_HOURS in /etc/astra/alert.env.
+[Unit]
+Description=ASTRA certificate expiry check
+OnFailure=astra-alert@%n.service
+
+[Service]
+Type=oneshot
+User=astra
+EnvironmentFile=/etc/astra/alert.env
+ExecStart=/opt/astra/venv/bin/python /opt/astra/app/tools/ops/check_certificate.py --host ${ASTRA_CERT_HOST} --min-hours ${ASTRA_CERT_MIN_HOURS}
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes

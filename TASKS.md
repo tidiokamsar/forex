@@ -102,3 +102,14 @@ Offline and research only; no venue contacted by code, no account, no key, no or
 | GB-PROTECT | `main` branch protection, secret scanning, push protection, Actions restrictions | DONE (verified by API read-back) | `reports/GATE_B_REPORT.md` |
 | GB-CI | Workflow `ci.yml` (quality, plan, full-suite), `tools/ci/secret_scan.py`, `tools/ci/check_unittest_log.py`, `docs/CI.md` | Written and reviewed; NOT operational: no CI run has executed (GitHub account locked for a billing issue) | `.github/workflows/ci.yml`, `docs/CI.md` |
 | GB-RUN | A real, successful CI run on the final commit | BLOCKED (owner must clear the billing lock, then re-run) | GitHub Actions |
+
+## Gate Auth and deployment (branch `feat/auth-deploy`)
+
+| ID | Scope | Status | Evidence |
+|---|---|---|---|
+| AUTH-CORE | Accounts, Argon2id, server-side sessions, TOTP MFA, recovery codes, device-cookie throttling, append-only audit | DONE (offline tests); independent review found 2 medium, fixed | `src/astra/auth/`, `tests/test_webapp.py` |
+| AUTH-WEB | Flask app replacing the stdlib server: Host/Origin/CSRF, roles per route, headers, no trading mutation | DONE (offline tests) | `src/astra/webapp.py` |
+| AUTH-DEPLOY | gunicorn, hardened systemd, alert and certificate-check units, nginx and Apache examples, nftables loopback rule | Written and reviewed; NOT installed anywhere | `deploy/`, DEPLOYMENT.md |
+| AUTH-HOST | Deployment on 102.211.199.132 | BLOCKED: read-only inspection only (user decision); no sudo without password; Python 3.12 only; 80/443 and the IP belong to GLPI; partially remediated intrusion | `reports/AUTH_AND_DEPLOYMENT_REPORT.md` |
+| AUTH-TLS | Valid public certificate and renewal for a dedicated DNS name | BLOCKED: no DNS name exists for ASTRA | same |
+

@@ -120,7 +120,17 @@ Evidence: tested locally against the simulator only (`tests/test_backup.py`; anc
 
 ## Dashboard
 
-`python -m astra serve` serves a French, GET-only dashboard on loopback. The page shows mode and live lock, the latest run with its declared source label and hash, runs, kill switch and freezes, reconciliations, orders and model versions; `/api/audit` and `/api/experiments` are served as JSON but not rendered. It does not show the attempt log, the evidence anchor state, data quality issues or service heartbeats. It has no authentication, authorization, TLS or rate limiting and must not be exposed beyond the local machine.
+The dashboard requires an account. Pages after sign-in: summary, runs, controls and freezes (OPERATOR), orders (OPERATOR), reconciliations (OPERATOR), registry; every data block is labelled SIMULATION or SYNTHETIC because no real market feed is integrated. Account procedures (run locally on the server, as the `astra` user, with the web environment loaded):
+
+| Task | Command |
+|---|---|
+| First administrator | `python -m astra auth init-admin --username <name>` (typed twice) or `--generate` (shown once, change at first login) |
+| New account | Web: Comptes, Créer (admin password required); or `python -m astra auth add-user --username <name> --role READ_ONLY` |
+| Compromised account | `astra auth disable --username <name>` (revokes every session), then `reset-password` and `reset-mfa` before re-enabling |
+| Lost authenticator | `astra auth reset-mfa --username <name>`; the user re-enrols at the next login |
+| Lost password | `astra auth reset-password --username <name>` (temporary password shown once, expires after 72 h) |
+| End every session of an account | `astra auth revoke-sessions --username <name>` |
+| Housekeeping | `astra auth cleanup` (daily), `astra auth events --limit 200` (audit) |
 
 ## Not implemented
 

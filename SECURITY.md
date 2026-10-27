@@ -32,10 +32,48 @@
 - The CI workflow (`.github/workflows/ci.yml`, [docs/CI.md](docs/CI.md)), not yet executed (GitHub account locked for a billing issue), has `contents: read` only (plus `pull-requests: read` for one job), uses `pull_request` and never `pull_request_target`, receives no secret, does not persist the checkout token, and has no deploy, release or merge step. `tools/ci/secret_scan.py` scans the tracked tree and the full history of each analysed commit.
 - Not enabled: GitHub secret scanning for non-provider patterns (the setting did not take effect on this account), Dependabot security updates (the project has no third-party dependency; it would also open pull requests on its own).
 
+## Web authentication (Gate Auth, branch `feat/auth-deploy`)
+
+The dashboard (`astra.webapp`, Flask) requires a server-side session for every route except `/login`, `/api/health` (answers only `{"status": "ok"|"unavailable"}`) and `/static/styles.css`. The trading, risk and research code is unchanged and still imports no third-party package.
+
+- **Passwords.** Argon2id via `argon2-cffi` 25.1.0, RFC 9106 low-memory profile (64 MiB, 3 iterations, parallelism 4, 16-byte salt), above the OWASP minimum; rehash on login if the profile changes. At least 12 characters, at most 256, must not contain the identifier. An unknown identifier costs the same verification as a known one.
+- **No default account.** No public registration. The first administrator is created locally on the server with `astra auth init-admin` (password typed twice, or generated and shown once, never stored in clear). Generated or reset passwords must be changed at the next login and expire after 72 h.
+- **Sessions.**
+  - The token is 256 random bits and the browser receives only that opaque value, in the `__Host-astra_session` cookie (Secure, HttpOnly, SameSite=Strict, Path=/, no Domain). The database stores its SHA-256 digest only.
+  - Sessions expire after 15 minutes of inactivity and 8 hours in any case; intermediate steps (MFA, enrolment, forced password change) expire after 5 minutes.
+  - A new token is issued at login, after MFA, after enrolment and after a password change; the old one is revoked.
+  - All of an account's sessions end on logout, password change or reset, MFA reset, role change and deactivation. At most 5 sessions per account.
+  - Sessions survive a restart, and expired ones are deleted by `astra auth cleanup`.
+  - Any session-store error answers 503, never anonymous access.
+- **MFA.**
+  - TOTP (RFC 6238, `pyotp` 2.10.0) is mandatory for ADMIN and OPERATOR before any data is shown; a code is accepted once (replay refused).
+  - Ten single-use recovery codes (100 bits each) are shown once and stored as digests.
+  - The documented recovery path for a lost device or password is local: `astra auth reset-mfa` / `reset-password` on the server, by someone with shell access. There is no public reset endpoint.
+- **Throttling.**
+  - Failed logins are counted per address, per (account, address) and, for unknown browsers, per account. The delay is progressive from the 5th failure (2 s, doubling) and capped at 15 minutes, and the counters decay after a quiet hour.
+  - A browser that already signed in successfully holds a signed `__Host-astra_device` cookie (OWASP "device cookie"). It is throttled on its own key, so an attacker failing from other addresses cannot lock the real user out.
+  - Admin re-authentication and password changes are throttled the same way.
+- **Requests.**
+  - Exact Host allowlist: the public name only in public mode, loopback names only in private (tunnel) mode.
+  - Every state-changing request needs an allowed `Origin` and a CSRF token: HMAC-bound to the session, or to the pre-login cookie for the login form.
+  - The body is limited to 64 KiB.
+  - Response headers: CSP without inline code, `nosniff`, `X-Frame-Options DENY`, `Referrer-Policy no-referrer`, `Cache-Control no-store`, COOP and CORP, plus HSTS in HTTPS mode.
+  - `X-Forwarded-For`/`-Proto` are read from exactly one trusted proxy hop, only when `ASTRA_TRUSTED_PROXY=1` (required in public mode).
+- **Roles, checked on the server for each route.**
+  - READ_ONLY: summary, runs, models, experiments, session, status.
+  - OPERATOR: also orders, controls, reconciliations, audit.
+  - ADMIN: also accounts and the authentication audit. Every account action requires the administrator's password again; the last active administrator cannot be disabled or demoted.
+  - Web roles are not execution roles. No web route submits, cancels, releases the kill switch, clears a freeze, promotes a model or changes the mode, and `astra.auth` imports nothing from execution, brokers, risk or governance (tests enforce both).
+- **Audit.** `auth_events` is append-only (triggers refuse UPDATE and DELETE) and records actor, action, target, result, time and address, never a password, token, cookie, TOTP secret or code. Anonymous origin refusals are not recorded, so nobody can grow the table at will.
+- **Residual risks.**
+  - TOTP secrets are stored in clear in `auth.sqlite3` (mode 0600). A copy of that file or of its backups gives the second factor of every account, so treat those backups as secrets.
+  - Concurrent guesses can slip a few attempts past a throttle window (at most one per worker thread).
+  - The whole model assumes the host itself is trustworthy: on a compromised host, credentials typed into the dashboard can be captured whatever the application does.
+
 ## Known gaps
 
-- No user authentication, authorization, dashboard TLS, network access controls, secret store, external or human-signed order authorization, or multi-user isolation. (The internal HMAC execution permit proves only that the gateway's checks ran in this process; it is not a human signature.) The service must remain on loopback.
-- Roles are asserted by the calling code or the local CLI user, not authenticated.
+- The dashboard has authentication, sessions, roles and MFA (section above), and TLS is provided by the reverse proxy configuration in `deploy/`. These remain missing: authentication for the CLI and the execution path, a secret store, external or human-signed order authorization, and multi-user isolation of the trading data. (The internal HMAC execution permit proves only that the gateway's checks ran in this process; it is not a human signature.) The application itself listens on loopback only.
+- Execution roles (`governance.Role`) are asserted by the calling code or the local CLI user, not authenticated; web roles never grant them.
 - The importer limits total bytes, rows, columns, field length, and stored issue count; a size-limit error rejects the import before data is parsed.
 - Reconciliation is implemented and tested against the simulated broker only. Backup and restore are tested locally with the simulator only; backups are unencrypted copies of the database and must be protected like it. No dependency scanner, SBOM, secure token store, or external service supervisor has been implemented.
 - The local SQLite audit trail is not tamper-proof or externally replicated.

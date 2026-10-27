@@ -21,7 +21,9 @@ A newer push cancels the older run of the same branch or pull request (`concurre
 2. `python -m compileall -q src tests tools`.
 3. `node --check src/astra/static/app.js` (the dashboard script).
 4. `python tools/ci/secret_scan.py`: every tracked file, plus every line added in the history of the analysed commit. It fails on private key blocks (including PGP), known token formats (AWS, GitHub, Slack, Google, JWT, `sk-`/`sk-ant-`, Stripe `sk_live_`/`rk_live_`, Bearer), credential-like literals (quoted, or unquoted alone on a configuration line), credentials in URLs, tracked key/database/log/env files, and a `.env.example` secret with a value. Environment-variable names (upper case with an underscore) and obviously fake fixtures are not hits. The history scan also covers merge resolutions and renames, and stops with exit 2 on a shallow clone. Values are never printed in full.
-5. Targeted multi-venue tests: `test_multi_venue_security_review`, `test_multi_venue_verification`, `test_market_risk`, `test_binance_spot`, `test_venue_registry`, `test_venues_contract`, `test_markets`.
+5. Targeted tests: the 7 multi-venue modules (`test_multi_venue_security_review`, `test_multi_venue_verification`, `test_market_risk`, `test_binance_spot`, `test_venue_registry`, `test_venues_contract`, `test_markets`) and `test_webapp` (authentication, sessions, roles, CSRF).
+
+Both jobs first install `requirements/web.txt` with `--require-hashes` (see [DEPENDENCIES.md](DEPENDENCIES.md)).
 
 `full-suite` (timeout 75 min, `PYTHON_COLORS=0` so the log has no colour codes):
 1. `python -m unittest discover -s . -v` in `tests/` with `PYTHONPATH=../src`; the log is copied with `tee`, and the step exits with the suite's own exit code (`PIPESTATUS[0]` under `bash -eo pipefail`), so the pipe cannot hide a failure.

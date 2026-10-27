@@ -140,4 +140,10 @@ async function loadOperations() {
 }
 
 loadDashboard();
-loadOperations();
+// Display only: the server refuses these routes to READ_ONLY anyway (403).
+const role = document.querySelector('meta[name="astra-role"]')?.content;
+if (role === "OPERATOR" || role === "ADMIN") {
+  loadOperations();
+} else {
+  setText("entries-state", "RÉSERVÉ AU RÔLE OPERATOR");
+}

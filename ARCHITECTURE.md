@@ -2,7 +2,7 @@
 
 ## Current shape
 
-ASTRA is a dependency-free Python modular monolith. `data` validates CSV datasets that carry a caller-declared provenance label; `research` produces signals and runs event-time simulations; `risk` evaluates every simulated entry independently; `storage` writes results, sealed research plans and audit events to SQLite; `web` serves read-only local views; and `config` fails closed outside simulation and loopback hosting. Strategies do not call storage or web handlers, and the risk engine has no broker methods. Every dataset used so far is synthetic.
+ASTRA is a dependency-free Python modular monolith. `data` validates CSV datasets that carry a caller-declared provenance label; `research` produces signals and runs event-time simulations; `risk` evaluates every simulated entry independently; `storage` writes results, sealed research plans and audit events to SQLite; `webapp` (Flask, the only module with third-party dependencies together with `auth`) serves the authenticated dashboard; and `config` fails closed outside simulation and loopback hosting. Strategies do not call storage or web handlers, and the risk engine has no broker methods. Every dataset used so far is synthetic.
 
 ```text
 CSV + provenance
@@ -140,6 +140,14 @@ astra.venues.registry   venue_registry.json (version + SHA-256) -> VenueRecord s
 - Market models are separate per market type. Crypto quantities and prices are `Decimal` (floats refused) and round down to the exchange step. Futures and fixed-expiry options are data models only; no backtest, risk or execution path uses them.
 - Registry statuses are cumulative evidence with dates. `BLOCKED`, `UNVERIFIED` or `ELIGIBILITY_UNKNOWN` closes every gate; reading public data needs `OFFICIAL_API_VERIFIED` and `REGION_ELIGIBILITY_VERIFIED`, reading an account also `READ_ONLY_CONNECTED`; `can_trade` is False for every venue in this lot. The loader validates the schema strictly and refuses a content-hash mismatch (`python -m astra.venues.registry rehash` reseals after an edit). Records carry the evidence of the 2026-10-26 dossiers (registry 0.3.0, 15 venues); every eligibility is still unknown, so every gate is closed. The cTrader adapter and the Binance Spot connector (`astra.venues.binance_spot`: public market data and an account reader that requires a provider-verified read-only key, GET only, HMAC-SHA256 signing) are recorded as tested offline only, not `READ_ONLY_CONNECTED`.
 
+## Authenticated dashboard (feat/auth-deploy)
+
+- `astra.auth` holds accounts, server-side sessions, TOTP MFA, throttling and the append-only authentication audit, in a separate SQLite file (`auth.sqlite3`).
+- `astra.webapp` is the Flask application: Host and Origin allowlists, CSRF, roles per route, security headers. It reads the trading stores and never mutates them.
+- Production runs gunicorn on 127.0.0.1:8765 under systemd, behind a TLS reverse proxy (`deploy/`); private mode needs no proxy (SSH tunnel).
+- The web layer is the only consumer of the pinned third-party packages (`requirements/web.txt`). `astra.cli` imports it lazily, so research and simulation commands still run with the standard library alone.
+- Web roles (READ_ONLY, OPERATOR, ADMIN) are separate from execution roles. The dashboard has no route that changes trading state; operator actions on trading still go through the local CLI.
+
 ## Target architecture V5: component status
 
 Reference: ASTRA architectural directive V5, section 5. This table records what the code on this branch does; it is not a plan or a promise. **Implemented** = present and tested locally on synthetic data or offline fixtures; **Partial** = some responsibilities present, others missing; **Not implemented** = no code. No component has been exercised with real market data, a real broker connection or a real account, and nothing here is evidence of profitability.
@@ -178,8 +186,8 @@ The choice is intentionally local and reversible. The custom `RiskEngine`, data 
 - A backtest run is not updated by the code after persistence, but no trigger protects `backtest_runs`; run metadata contains source type, source name, SHA-256, assumptions, metrics, and risk rejections.
 - Research-integrity tables are append-only through SQLite triggers: `research_protocols`, `holdout_signatures`, `holdout_reuse_checks`, `research_attempt_events` and `evidence_anchor_bindings`; a `holdout_evaluations` row cannot be deleted, nor changed once `COMPLETED` or `FAILED`. Triggers stop the API and casual edits, not the owner of the file.
 - SQLite stores research records and audit events, not credentials. The `service_state` table holds operational state (service heartbeats, last processed bar, active stop price, broker event cursor per account); it is not audited.
-- The dashboard accepts GET only. POST, PUT, and DELETE receive HTTP 405.
-- The service binds only to loopback and checks the `Host` header. It has no authentication, TLS, CORS allowance, or remote-access claim, and must not be exposed.
+- The dashboard's only state-changing routes are sign-in, sign-out, MFA, password and account administration; every trading route is GET only (other methods: 405).
+- The application binds only to loopback and checks the `Host` header; remote access is possible only through the TLS reverse proxy and requires an authenticated session (see SECURITY.md, "Web authentication").
 - Durable idempotency comes from the gateway's `orders` table (intent id primary key, derived client order id unique). The RiskEngine's in-memory set is a second line of defence only.
 - The dashboard stays GET-only; operator actions go through the local CLI.
 

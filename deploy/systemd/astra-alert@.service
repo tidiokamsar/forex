@@ -1,0 +1,10 @@
+# Alert for a failed ASTRA unit (%i) or an expiring certificate. Writes a CRITICAL journal entry and,
+# if a local MTA exists and ASTRA_ALERT_TO is set in /etc/astra/alert.env, sends a short e-mail.
+# The alert channel is an operator decision; this unit is an example and is not yet tested on a host.
+[Unit]
+Description=ASTRA alert for %i
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/astra/alert.env
+ExecStart=/bin/sh -c 'logger -p daemon.crit -t astra-alert "ASTRA unit failed or check refused: %i"; if [ -n "$ASTRA_ALERT_TO" ] && command -v sendmail >/dev/null; then printf "Subject: [ASTRA] alert %%s\\n\\n%%s\\n" "%i" "See: journalctl -u %i" | sendmail "$ASTRA_ALERT_TO"; fi'

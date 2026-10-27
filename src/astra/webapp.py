@@ -36,6 +36,8 @@ from .storage import BacktestStore
 
 SESSION_COOKIE = "__Host-astra_session"
 PRE_COOKIE = "__Host-astra_pre"
+DEVICE_COOKIE = "__Host-astra_device"
+DEVICE_COOKIE_SECONDS = 90 * 24 * 3600
 STATIC_DIR = Path(__file__).with_name("static")
 PUBLIC_STATIC = {"styles.css": "text/css; charset=utf-8"}
 PRIVATE_STATIC = {"app.js": "text/javascript; charset=utf-8"}
@@ -45,21 +47,31 @@ CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' 
 
 
 def load_secret_key(path: Path) -> bytes:
-    """The server key for CSRF tokens: 32 random bytes in a 0600 file, created on first use."""
+    """The server key for CSRF tokens: 32 random bytes in a 0600 file, created on first use.
+
+    The key is written to a private temporary file and moved into place atomically, so two workers
+    starting together never read a partial key: the loser of the race simply reads the winner's file.
+    """
 
     path = Path(path)
-    if path.exists():
-        key = path.read_bytes()
-        if len(key) != 32:
+    for _ in range(50):
+        if path.exists():
+            key = path.read_bytes()
+            if len(key) == 32:
+                return key
             raise RuntimeError(f"{path} must contain exactly 32 bytes")
-        return key
-    path.parent.mkdir(parents=True, exist_ok=True)
-    key = secrets.token_bytes(32)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
-    fd = os.open(path, flags, 0o600)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(key)
-    return key
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        with os.fdopen(os.open(temporary, flags, 0o600), "wb") as handle:
+            handle.write(secrets.token_bytes(32))
+        try:
+            os.link(temporary, path)  # fails if another worker created the key first
+        except FileExistsError:
+            pass
+        finally:
+            temporary.unlink()
+    raise RuntimeError(f"cannot create {path}")
 
 
 def create_app(config: AppConfig, web: WebConfig, *, auth: AuthStore | None = None, secret_key: bytes | None = None,
@@ -79,9 +91,16 @@ def create_app(config: AppConfig, web: WebConfig, *, auth: AuthStore | None = No
         app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=0, x_port=0, x_prefix=0)
 
     local_hosts = {f"{config.host}:{config.port}", f"127.0.0.1:{config.port}", f"localhost:{config.port}"}
-    allowed_hosts = local_hosts | set(web.public_hosts)
-    local_scheme = "https" if web.https and not web.public_hosts else "http"
-    allowed_origins = {f"{local_scheme}://{h}" for h in local_hosts} | {f"https://{h}" for h in web.public_hosts}
+    if web.public_hosts:
+        # Public mode: only the proxied public name is accepted. A local process that connects to the
+        # loopback port directly (bypassing the proxy and its limits) gets 400 (deployment review M1).
+        allowed_hosts = set(web.public_hosts)
+        allowed_origins = {f"https://{h}" for h in web.public_hosts}
+    else:
+        # Private mode (loopback or SSH tunnel): only the loopback names.
+        allowed_hosts = local_hosts
+        scheme = "https" if web.https else "http"
+        allowed_origins = {f"{scheme}://{h}" for h in local_hosts}
     cookie_kwargs = {"secure": True, "httponly": True, "samesite": "Strict", "path": "/"}
 
     def client_ip() -> str | None:
@@ -93,6 +112,24 @@ def create_app(config: AppConfig, web: WebConfig, *, auth: AuthStore | None = No
     def csrf_for_pre(pre: str) -> str:
         return crypto.keyed_digest(key, "pre:" + crypto.token_digest(pre))
 
+    def device_for(username: str) -> str | None:
+        """The device id if this browser holds a valid device cookie for ``username`` (signed with the server key)."""
+
+        parts = (request.cookies.get(DEVICE_COOKIE) or "").split(".")
+        if len(parts) != 3 or not 16 <= len(parts[1]) <= 64:
+            return None
+        name = username.strip().casefold() if isinstance(username, str) else ""
+        if parts[0] != crypto.token_digest(name)[:16]:
+            return None
+        expected = crypto.keyed_digest(key, f"device:{name}:{parts[1]}")
+        return parts[1] if crypto.constant_time_equal(parts[2], expected) else None
+
+    def new_device_cookie(username: str) -> str:
+        name = username.strip().casefold()
+        nonce = crypto.new_token()[:32]
+        mac = crypto.keyed_digest(key, f"device:{name}:{nonce}")
+        return f"{crypto.token_digest(name)[:16]}.{nonce}.{mac}"
+
     # -- request guards ------------------------------------------------------------------------
 
     @app.before_request
@@ -103,7 +140,7 @@ def create_app(config: AppConfig, web: WebConfig, *, auth: AuthStore | None = No
         if request.method in UNSAFE_METHODS:
             origin = request.headers.get("Origin")
             if origin is None or origin.lower() not in allowed_origins:
-                auth_record("web:anonymous", "request.origin", "refused", detail=f"path={request.path}")
+                # Not audited: anonymous refusals must not let anyone grow the append-only audit table.
                 return _error(403, "origin_refused")
         g.session = None
         token = request.cookies.get(SESSION_COOKIE)
@@ -239,15 +276,20 @@ def create_app(config: AppConfig, web: WebConfig, *, auth: AuthStore | None = No
             return login_page("Session de connexion expirée, réessayez.", 403)
         if g.session is not None:
             auth.logout(g.session, client_ip())
-        result = auth.authenticate(request.form.get("username", ""), request.form.get("password", ""), client_ip(),
-                                   request.headers.get("User-Agent"))
+        username = request.form.get("username", "")
+        result = auth.authenticate(username, request.form.get("password", ""), client_ip(),
+                                   request.headers.get("User-Agent"), device=device_for(username))
         if result.status == "throttled":
             response = login_page(f"Trop de tentatives. Réessayez dans {result.retry_after_seconds} s.", 429)
             response.headers["Retry-After"] = str(result.retry_after_seconds)
             return response
         if result.status != "ok":
             return login_page("Identifiant ou mot de passe incorrect.", 401)
-        return set_session_cookie(redirect(_stage_location_for(result.stage), code=303), result.token)
+        response = set_session_cookie(redirect(_stage_location_for(result.stage), code=303), result.token)
+        if device_for(username) is None:
+            # Correct password: remember this browser as a known device for this account (not a session).
+            response.set_cookie(DEVICE_COOKIE, new_device_cookie(username), max_age=DEVICE_COOKIE_SECONDS, **cookie_kwargs)
+        return response
 
     @app.post("/logout")
     def logout() -> Response:
@@ -296,7 +338,7 @@ def create_app(config: AppConfig, web: WebConfig, *, auth: AuthStore | None = No
         if result.status != "ok":
             secret, uri = auth.begin_mfa_enrollment(session)
             return page("mfa_setup.html", 401, csrf_token=csrf_for_session(session), secret=secret, uri=uri,
-                        message="Code incorrect : un nouveau secret a été généré, recommencez l'enrôlement.")
+                        message="Code incorrect. Vérifiez l'heure de l'appareil et réessayez.")
         response = page("recovery_codes.html", codes=codes, next_url=_stage_location_for(result.stage))
         return set_session_cookie(response, result.token)
 
@@ -319,6 +361,11 @@ def create_app(config: AppConfig, web: WebConfig, *, auth: AuthStore | None = No
                                           request.headers.get("User-Agent"))
         except AuthError as exc:
             return page("password.html", 400, csrf_token=csrf_for_session(session), forced=forced, message=str(exc))
+        if result.status == "throttled":
+            response = page("password.html", 429, csrf_token=csrf_for_session(session), forced=forced,
+                            message=f"Trop de tentatives. Réessayez dans {result.retry_after_seconds} s.")
+            response.headers["Retry-After"] = str(result.retry_after_seconds)
+            return response
         if result.status != "ok":
             return page("password.html", 401, csrf_token=csrf_for_session(session), forced=forced,
                         message="Mot de passe actuel incorrect.")

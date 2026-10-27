@@ -1,31 +1,55 @@
-# ASTRA behind nginx: the only public component. Replace PUBLIC_HOST and the certificate paths.
-# Use only after the application's own authentication tests pass on the target host.
-# The application stays on 127.0.0.1:8765 and is never reachable directly from the network.
+# ASTRA behind nginx: the only public component. Replace PUBLIC_HOST (a dedicated DNS name, for example
+# astra.example.org) and the certificate paths. Use only after the application's authentication tests pass
+# on the target host. The application stays on 127.0.0.1:8765; deploy/nftables/astra-loopback.nft makes the
+# proxy the only local process allowed to reach it. On a host where Apache already owns 80/443, use
+# deploy/apache/astra.conf.example instead: two servers cannot share those ports.
 
 limit_req_zone $binary_remote_addr zone=astra_login:10m rate=10r/m;
 limit_req_zone $binary_remote_addr zone=astra_all:10m rate=20r/s;
+# No query string, Referer, User-Agent or cookie in the access log.
+log_format astra_min '$remote_addr [$time_iso8601] "$request_method $uri" $status $body_bytes_sent $request_time';
+
+# Catch-all: requests for any other name or bare IP get nothing (no certificate, no redirect).
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+    return 444;
+}
+server {
+    listen 443 ssl default_server;
+    listen [::]:443 ssl default_server;
+    server_name _;
+    ssl_reject_handshake on;
+}
 
 server {
     listen 80;
     listen [::]:80;
     server_name PUBLIC_HOST;
     server_tokens off;
-    # ACME HTTP-01 challenges only; everything else goes to HTTPS.
+    access_log /var/log/nginx/astra-access.log astra_min;
+    # ACME HTTP-01 challenges only; everything else goes to HTTPS on the fixed public name.
     location ^~ /.well-known/acme-challenge/ { root /var/lib/letsencrypt/webroot; default_type text/plain; }
-    location / { return 301 https://$host$request_uri; }
+    location / { return 301 https://PUBLIC_HOST$request_uri; }
 }
 
 server {
     listen 443 ssl;
     listen [::]:443 ssl;
-    http2 on;
+    http2 on;  # nginx >= 1.25.1; older versions: "listen 443 ssl http2;"
     server_name PUBLIC_HOST;
     server_tokens off;
+    access_log /var/log/nginx/astra-access.log astra_min;
 
     ssl_certificate     /etc/letsencrypt/live/PUBLIC_HOST/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/PUBLIC_HOST/privkey.pem;
+    # Mozilla "intermediate" profile.
     ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384:DHE-RSA-CHACHA20-POLY1305;
     ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:astra:10m;
+    ssl_session_timeout 1d;
     ssl_session_tickets off;
 
     client_max_body_size 64k;
@@ -41,11 +65,15 @@ server {
     proxy_set_header X-Forwarded-Host "";
     proxy_set_header X-Forwarded-Port "";
     proxy_set_header X-Forwarded-Prefix "";
+    proxy_set_header X-Forwarded-Ssl "";
+    proxy_set_header X-Forwarded-Protocol "";
+    proxy_set_header X-Real-IP "";
     proxy_set_header Forwarded "";
     proxy_read_timeout 30s;
     proxy_connect_timeout 5s;
 
-    location = /login {
+    # Every authentication step gets the strict limit (the app also throttles per account and address).
+    location ~ ^/(login|login/mfa|mfa/setup|account/password)$ {
         limit_req zone=astra_login burst=5 nodelay;
         limit_req_status 429;
         proxy_pass http://127.0.0.1:8765;

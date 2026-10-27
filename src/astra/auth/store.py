@@ -74,6 +74,7 @@ class AuthPolicy:
     throttle_free_failures: int = 5
     throttle_base_seconds: int = 2
     throttle_max_seconds: int = 15 * 60
+    temporary_password_seconds: int = 72 * 3600  # generated or reset passwords must be changed within 72 h
     mfa_required_roles: frozenset[WebRole] = frozenset({WebRole.ADMIN, WebRole.OPERATOR})
 
     def __post_init__(self) -> None:
@@ -85,6 +86,8 @@ class AuthPolicy:
             raise ValueError("minimum password length must be at least 12")
         if not 1 <= self.throttle_free_failures <= 20 or not 1 <= self.throttle_base_seconds <= self.throttle_max_seconds:
             raise ValueError("invalid throttle settings")
+        if not 3600 <= self.temporary_password_seconds <= 7 * 86400:
+            raise ValueError("temporary_password_seconds must lie between 1 h and 7 days")
         if WebRole.ADMIN not in self.mfa_required_roles:
             raise ValueError("ADMIN accounts must require MFA")
 
@@ -424,6 +427,20 @@ class AuthStore:
             )
 
     @staticmethod
+    def _keys(label: str, client_ip: str | None, device: str | None = None) -> list[str]:
+        """Throttle keys: [account-wide or known device, (account, address), address].
+
+        OWASP "device cookies": a browser that already signed in successfully to this account (``device``,
+        verified by the caller) is throttled on its own key instead of the account-wide key, so an attacker
+        failing from other addresses cannot lock the legitimate user out. Unknown browsers share the
+        account-wide key, which limits online guessing spread over many addresses.
+        """
+
+        ip = client_ip or "unknown"
+        first = f"device:{label}|{device}" if device else f"user:{label}"
+        return [first, f"userip:{label}|{ip}", f"ip:{ip}"]
+
+    @staticmethod
     def _clear_throttle(db: sqlite3.Connection, key: str) -> None:
         db.execute("DELETE FROM login_throttle WHERE throttle_key = ?", (key,))
 
@@ -473,10 +490,10 @@ class AuthStore:
         return SessionStage.FULL
 
     def authenticate(self, username: str, password: str, client_ip: str | None,
-                     user_agent: str | None = None) -> LoginResult:
+                     user_agent: str | None = None, device: str | None = None) -> LoginResult:
         name = normalize_username(username) if isinstance(username, str) else ""
         label = _safe_label(name)
-        keys = [f"user:{label}", f"ip:{client_ip or 'unknown'}"]
+        keys = self._keys(label, client_ip, device)
         with self._write() as db:
             wait = self._throttle_wait(db, keys)
             if wait:
@@ -492,9 +509,15 @@ class AuthStore:
                 reason = "disabled" if ok and row is not None else "bad_credentials"
                 self._event(db, f"web:{label}", "login", "refused", target=label, client_ip=client_ip, detail=reason)
                 return LoginResult("invalid")
+            age = self._now() - _parse(row["password_changed_at"])
+            if row["must_change_password"] and age > timedelta(seconds=self.policy.temporary_password_seconds):
+                # An initial or reset password nobody used in time is dead: an administrator issues a new one.
+                self._event(db, f"web:{label}", "login", "refused", target=label, client_ip=client_ip,
+                            detail="temporary_password_expired")
+                return LoginResult("invalid")
             if crypto.password_needs_rehash(row["password_hash"]):
                 db.execute("UPDATE users SET password_hash = ? WHERE id = ?", (crypto.hash_password(password), row["id"]))
-            for key in keys:
+            for key in keys[:2]:  # the per-address key keeps counting: it guards against password spraying
                 self._clear_throttle(db, key)
             stage = self._first_stage(row)
             token = self._new_session(db, row["id"], stage, client_ip, user_agent)
@@ -570,9 +593,11 @@ class AuthStore:
 
         if session.stage is not SessionStage.MFA_ENROLL:
             raise AuthError("l'enrôlement MFA n'est pas attendu pour cette session")
-        secret = crypto.new_totp_secret()
         with self._write() as db:
-            db.execute("UPDATE users SET mfa_pending_secret = ? WHERE id = ?", (secret, session.user.id))
+            row = db.execute("SELECT mfa_pending_secret FROM users WHERE id = ?", (session.user.id,)).fetchone()
+            secret = row["mfa_pending_secret"] or crypto.new_totp_secret()
+            if not row["mfa_pending_secret"]:
+                db.execute("UPDATE users SET mfa_pending_secret = ? WHERE id = ?", (secret, session.user.id))
         return secret, crypto.totp_uri(secret, session.user.username)
 
     def confirm_mfa_enrollment(self, session: SessionRecord, code: str, client_ip: str | None,
@@ -603,11 +628,16 @@ class AuthStore:
 
         if session.stage not in (SessionStage.FULL, SessionStage.PASSWORD_CHANGE):
             raise AuthError("session non autorisée à changer le mot de passe")
-        with self._connect() as db:
+        keys = self._keys(session.user.username, client_ip)[:2]
+        with self._write() as db:
+            wait = self._throttle_wait(db, keys)
+            if wait:
+                self._event(db, f"web:{session.user.username}", "password.change", "throttled", client_ip=client_ip)
+                return LoginResult("throttled", retry_after_seconds=wait)
             row = db.execute("SELECT * FROM users WHERE id = ?", (session.user.id,)).fetchone()
         if not crypto.verify_password(row["password_hash"], current if isinstance(current, str) else ""):
             with self._write() as db:
-                self._record_failure(db, [f"user:{row['username']}"])
+                self._record_failure(db, keys)
                 self._event(db, f"web:{row['username']}", "password.change", "refused", client_ip=client_ip,
                             detail="bad_current_password")
             return LoginResult("invalid")
@@ -626,7 +656,7 @@ class AuthStore:
     def confirm_password(self, session: SessionRecord, password: str, client_ip: str | None) -> bool:
         """Step-up re-authentication of the session's own user; failures count against the account throttle."""
 
-        key = [f"user:{session.user.username}"]
+        key = self._keys(session.user.username, client_ip)[:2]
         with self._write() as db:
             if self._throttle_wait(db, key):
                 self._event(db, f"web:{session.user.username}", "step_up", "throttled", client_ip=client_ip)

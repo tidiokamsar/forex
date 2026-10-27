@@ -6,7 +6,8 @@ ASTRA is a local quantitative research and **simulation-only** trading workspace
 
 ## Requirements
 
-- Python 3.11 or later, standard library only (developed on 3.14.6)
+- Python 3.11 or later, standard library only for research and simulation (developed and tested on 3.14.6)
+- The authenticated dashboard (`serve`, `auth`) needs the pinned packages: `python -m pip install --require-hashes -r requirements/web.txt`
 - No broker credentials or network access, except for the optional read-only `ctrader-check`
 
 ## Quick start (PowerShell)
@@ -16,10 +17,11 @@ $env:PYTHONPATH = "src"
 python -m astra status
 python -m astra demo
 python -m astra paper-replay
+python -m astra auth init-admin --username <name>
 python -m astra serve
 ```
 
-Open `http://127.0.0.1:8765`. All bundled data is **synthetic** (`data/synthetic_eurusd_m15.csv`, 160 bars, SHA-256 pinned).
+Open `http://127.0.0.1:8765` and sign in (an ADMIN enrols TOTP at first sign-in). All bundled data is **synthetic** (`data/synthetic_eurusd_m15.csv`, 160 bars, SHA-256 pinned).
 
 ## Commands
 
@@ -41,7 +43,8 @@ Open `http://127.0.0.1:8765`. All bundled data is **synthetic** (`data/synthetic
 | `backup verify PATH` | Check a backup's hash, integrity and row counts against its manifest |
 | `backup restore PATH --operator <name> --reason "..."` | Human restore, refused while a service heartbeat is alive; every account with orders frozen until a consistent reconciliation |
 | `attempts list\|count\|verify [--expected-head ROW_HASH]` | Read-only views of the hash-chained attempt registry: attempts, store-wide trial count, chain verification (see [RESEARCH_PROTOCOL.md](RESEARCH_PROTOCOL.md)) |
-| `serve` | Read-only loopback dashboard |
+| `serve` | Authenticated dashboard on loopback (read-only for trading) |
+| `auth` | Dashboard accounts: `init-admin`, `add-user`, `disable`, `enable`, `set-role`, `revoke-sessions`, `reset-password`, `reset-mfa`, `list`, `cleanup`, `events` |
 | `ctrader-check --operator <name>` | Read-only cTrader DEMO connection check; sends no order (see [BROKERS.md](BROKERS.md)) |
 
 CSV columns are `timestamp,instrument,open,high,low,close`; `volume`, `bid`, `ask` are optional. Timestamps need a UTC offset. Label sources honestly (`HISTORICAL`, `DELAYED`, `LIVE`, `SIMULATED`, `SYNTHETIC`).
@@ -100,10 +103,10 @@ Latest recorded result: see [ACCEPTANCE_REPORT.md](ACCEPTANCE_REPORT.md).
 - Strategy candidates in the registry do not drive execution: the service and paper replay use `--strategy`, and `SHADOW` is a status only.
 - The cTrader demo adapter is tested offline only; its read-only `ctrader-check` has not been run against a real demo account, and DEMO order execution is disabled. Its reconnection, rate limiting and token handling are also tested offline only.
 - Backup/restore and the continuous service exist and are tested locally with the simulator only; the service CLI runs on the simulated broker and a synthetic feed. No restore drill against a real broker account.
-- Missing: external service supervision (restart, start at boot), alert delivery, authentication, dashboard TLS, encrypted backups, CI, drift monitoring and the autonomous improvement loop. V5 component status: [ARCHITECTURE.md](ARCHITECTURE.md).
+- Missing: supervision of the trading service, alert delivery beyond the example units in `deploy/`, encrypted backups, a CI run (the workflow exists; GitHub refused to run it), drift monitoring and the autonomous improvement loop. The dashboard has authentication, sessions and MFA, but no qualified host yet. V5 component status: [ARCHITECTURE.md](ARCHITECTURE.md).
 - No profitability claim: no strategy or model has been shown to be profitable.
 - Instrument specifications and costs are illustrative; no swaps or financing are modelled.
 - The kill switch is global to a store; entry freezes and daily-loss state are per account. The SQLite audit trail is mutable by its owner.
-- The dashboard binds to loopback only; do not expose it.
+- The dashboard binds to loopback only; remote access only through the TLS proxy configuration in `deploy/` after its go-live checklist.
 
 Further reading: [ARCHITECTURE.md](ARCHITECTURE.md), [SECURITY.md](SECURITY.md), [RISK_POLICY.md](RISK_POLICY.md), [RESEARCH_PROTOCOL.md](RESEARCH_PROTOCOL.md), [TASKS.md](TASKS.md), [ROADMAP.md](ROADMAP.md).

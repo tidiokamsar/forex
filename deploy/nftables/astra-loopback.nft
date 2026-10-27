@@ -1,0 +1,12 @@
+#!/usr/sbin/nft -f
+# Only the reverse proxy's user (and the ASTRA service itself, for its local checks) may connect to the
+# dashboard's loopback port. Any other local process (another web application, a shell user, malware)
+# is refused, so it cannot bypass the proxy's limits or forge forwarding headers (deployment review M1).
+# Adjust the proxy user: "www-data" for Debian/Ubuntu Apache or nginx. Test before persisting.
+table inet astra_loopback {
+    chain output {
+        type filter hook output priority filter; policy accept;
+        ip daddr 127.0.0.1 tcp dport 8765 meta skuid != { "www-data", "astra" } counter drop
+        ip6 daddr ::1 tcp dport 8765 meta skuid != { "www-data", "astra" } counter drop
+    }
+}

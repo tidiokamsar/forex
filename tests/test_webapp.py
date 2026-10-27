@@ -63,7 +63,11 @@ class Clock:
 
 
 class WebAppCase(unittest.TestCase):
-    trusted_proxy = False
+    """Public mode: the app answers only to https://astra.test through one trusted proxy hop."""
+
+    trusted_proxy = True
+    public_hosts = (HOST,)
+    client_class = None
 
     def setUp(self):
         self.temp = workspace_tempdir()
@@ -77,7 +81,7 @@ class WebAppCase(unittest.TestCase):
         self.auth = AuthStore(root / "auth.sqlite3", clock=self.clock)
         self.auth.initialize()
         self.web = WebConfig(auth_database_path=root / "auth.sqlite3", secret_key_path=root / "web_secret.key",
-                             public_hosts=(HOST,), trusted_proxy=self.trusted_proxy, https=True)
+                             public_hosts=self.public_hosts, trusted_proxy=self.trusted_proxy, https=bool(self.public_hosts))
         self.config = AppConfig(database_path=self.db)
         self.key = b"k" * 32
         self.app = self.make_app()
@@ -90,7 +94,7 @@ class WebAppCase(unittest.TestCase):
 
     def client(self, ip="203.0.113.10", app=None):
         app = app or self.app
-        app.test_client_class = HttpsClient
+        app.test_client_class = self.client_class or HttpsClient
         client = app.test_client()
         client.environ_base["REMOTE_ADDR"] = ip
         return client
@@ -204,6 +208,39 @@ class AuthenticationTests(WebAppCase):
         self.clock.advance(self.auth.policy.throttle_max_seconds + 1)
         self.assertEqual(self.login(self.client("198.51.100.8"), "alice").status_code, 303)
 
+    def test_rotating_addresses_cannot_lock_out_a_known_device(self):
+        # Review M1: an attacker failing from ever-new addresses blocks the account-wide key, but the
+        # legitimate user's browser, known from an earlier successful login, keeps signing in.
+        self.add_user("alice", WebRole.READ_ONLY)
+        victim = self.client("203.0.113.5")
+        self.assertEqual(self.login(victim, "alice").status_code, 303)
+        device = victim.get_cookie("__Host-astra_device", domain=HOST).value
+        for i in range(30):
+            self.post(victim, "/logout", {"csrf_token": self.page_csrf(victim)})
+            self.login(self.client(f"198.18.1.{i}"), "alice", "Wrong-Password-123")
+            self.assertEqual(self.login(victim, "alice").status_code, 303, i)
+            self.clock.advance(60)
+        # An unknown browser is subject to the account-wide throttle the attacker triggered.
+        self.assertEqual(self.login(self.client("203.0.113.6"), "alice").status_code, 429)
+        # A forged device cookie gives nothing.
+        intruder = self.client("198.18.2.1")
+        intruder.set_cookie("__Host-astra_device", device[:-1] + ("0" if device[-1] != "0" else "1"), domain=HOST)
+        self.assertEqual(self.login(intruder, "alice").status_code, 429)
+
+    def test_temporary_password_expires(self):
+        self.add_user("alice", WebRole.READ_ONLY, must_change=True)
+        self.clock.advance(self.auth.policy.temporary_password_seconds + 1)
+        self.assertEqual(self.login(self.client(), "alice").status_code, 401)
+        self.assertIn("temporary_password_expired", json.dumps(self.auth.events(5)))
+
+    def test_mfa_setup_page_keeps_the_same_pending_secret(self):
+        self.add_user("boss", WebRole.ADMIN)
+        client = self.client()
+        self.login(client, "boss")
+        first = re.search(r'<code class="secret">([A-Z2-7]{16,})</code>', client.get("/mfa/setup").get_data(as_text=True))
+        second = re.search(r'<code class="secret">([A-Z2-7]{16,})</code>', client.get("/mfa/setup").get_data(as_text=True))
+        self.assertEqual(first.group(1), second.group(1))
+
     def test_failures_from_one_address_throttle_every_username_from_it(self):
         for i in range(5):
             self.login(self.client("192.0.2.66"), f"guess{i}", "Wrong-Password-123")
@@ -263,6 +300,18 @@ class AuthenticationTests(WebAppCase):
         self.assertEqual(second.get("/api/session").status_code, 401)
         self.assertEqual(self.login(self.client("203.0.113.30"), "alice").status_code, 401)
         self.assertEqual(self.login(self.client("203.0.113.31"), "alice", "Brand-New-Pass-42").status_code, 303)
+
+    def test_current_password_guessing_is_throttled(self):
+        # Review M2: a stolen session cannot guess the current password without limit.
+        client = self.session_client("alice", WebRole.READ_ONLY)
+        page = client.get("/account/password")
+        statuses = [self.post(client, "/account/password", {"current_password": f"Wrong-Password-{i:03d}",
+                                                             "new_password": "Brand-New-Pass-42", "confirm_password": "Brand-New-Pass-42",
+                                                             "csrf_token": self.csrf(page)}).status_code for i in range(8)]
+        self.assertIn(429, statuses)
+        right = self.post(client, "/account/password", {"current_password": PASSWORD, "new_password": "Brand-New-Pass-42",
+                                                        "confirm_password": "Brand-New-Pass-42", "csrf_token": self.csrf(page)})
+        self.assertEqual(right.status_code, 429)
 
     def test_forced_password_change_blocks_data_until_done(self):
         self.add_user("alice", WebRole.READ_ONLY, must_change=True)
@@ -448,18 +497,10 @@ class PermissionTests(WebAppCase):
             self.assertEqual(response.status_code, 403, origin)
 
     def test_forged_host_header_is_refused(self):
-        for host in ("evil.example", "astra.test.evil.example", "astra.test:8443", "astra.test@evil.example"):
+        # In public mode the loopback names are refused too: a local process cannot bypass the proxy.
+        for host in ("evil.example", "astra.test.evil.example", "astra.test:8443", "astra.test@evil.example",
+                     "127.0.0.1:8765", "localhost:8765"):
             self.assertEqual(self.client().get("/api/health", headers={"Host": host}).status_code, 400, host)
-
-    def test_forwarded_for_is_ignored_without_a_trusted_proxy(self):
-        self.add_user("alice", WebRole.READ_ONLY)
-        for i in range(5):
-            self.login(self.client("192.0.2.80"), f"x{i}", "Wrong-Password-123")
-        spoofed = self.client("192.0.2.80")
-        page = spoofed.get("/login")
-        response = self.post(spoofed, "/login", {"username": "alice", "password": PASSWORD, "csrf_token": self.csrf(page)},
-                             headers={"X-Forwarded-For": "198.51.100.200"})
-        self.assertEqual(response.status_code, 429)
 
     def test_static_files_and_paths_do_not_leak(self):
         client = self.client()
@@ -631,11 +672,37 @@ class AuthCliTests(unittest.TestCase):
             self.assertIn("Secure", cookie)
             self.assertEqual(len((root / "k.key").read_bytes()), 32)
 
-    def test_public_host_requires_https(self):
+    def test_public_host_requires_https_and_a_trusted_proxy(self):
         with self.assertRaises(ValueError):
-            WebConfig(public_hosts=("astra.example",), https=False)
+            WebConfig(public_hosts=("astra.example",), https=False, trusted_proxy=True)
         with self.assertRaises(ValueError):
-            WebConfig(public_hosts=("*.example",), https=True)
+            WebConfig(public_hosts=("astra.example",), https=True, trusted_proxy=False)
+        with self.assertRaises(ValueError):
+            WebConfig(public_hosts=("*.example",), https=True, trusted_proxy=True)
+
+
+class PrivateModeTests(WebAppCase):
+    """Loopback or SSH-tunnel access: no public host, no proxy; forwarded headers are ignored."""
+
+    trusted_proxy = False
+    public_hosts = ()
+    client_class = LoopbackClient
+
+    def post(self, client, path, data=None, origin="http://127.0.0.1:8765", **kwargs):
+        return super().post(client, path, data, origin=origin, **kwargs)
+
+    def test_forwarded_for_is_ignored_without_a_trusted_proxy(self):
+        self.add_user("alice", WebRole.READ_ONLY)
+        for i in range(5):
+            self.login(self.client("192.0.2.80"), f"x{i}", "Wrong-Password-123")
+        spoofed = self.client("192.0.2.80")
+        page = spoofed.get("/login")
+        response = self.post(spoofed, "/login", {"username": "alice", "password": PASSWORD, "csrf_token": self.csrf(page)},
+                             headers={"X-Forwarded-For": "198.51.100.200"})
+        self.assertEqual(response.status_code, 429)
+
+    def test_public_names_are_refused_in_private_mode(self):
+        self.assertEqual(self.client().get("/api/health", headers={"Host": HOST}).status_code, 400)
 
 
 class TrustedProxyTests(WebAppCase):

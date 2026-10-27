@@ -5,8 +5,10 @@
 Run from the project directory in PowerShell:
 
 ```powershell
+python -m venv .venv
+.venv\Scripts\python -m pip install --require-hashes -r requirements/web.txt   # web tests (test_webapp)
 $env:PYTHONPATH = "src"
-python -m unittest discover -s tests -v
+.venv\Scripts\python -m unittest discover -s tests -v
 python -m compileall -q src tests
 node --check src/astra/static/app.js
 python -m ruff check src tests
