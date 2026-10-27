@@ -63,7 +63,7 @@ The dashboard (`astra.webapp`, Flask) requires a server-side session for every r
   - In public mode, every request must also carry the proxy secret (`X-Astra-Proxy`, compared in constant time; 403 otherwise). The secret file may hold two values (current and previous), so it can be renewed without downtime. It protects only the proxy-to-application path and never replaces user authentication. The proxy reads it from a root-only include, so a local process that reaches the loopback port directly cannot pass for the proxy even if it forges Host and Origin. A second barrier, the nftables rule in `deploy/`, admits only the proxy user to that port.
   - Every state-changing request needs an allowed `Origin` and a CSRF token: HMAC-bound to the session, or to the pre-login cookie for the login form.
   - The body is limited to 64 KiB.
-  - Response headers: CSP without inline code, `nosniff`, `X-Frame-Options DENY`, `Referrer-Policy no-referrer`, `Cache-Control no-store`, COOP and CORP, plus HSTS in HTTPS mode.
+  - Response headers: CSP without inline code, `nosniff`, `X-Frame-Options DENY`, `Referrer-Policy same-origin` (with `no-referrer`, browsers send `Origin: null` on form POSTs, which the Origin check refuses), `Cache-Control no-store`, COOP and CORP, plus HSTS in HTTPS mode.
   - `X-Forwarded-For`/`-Proto` are read from exactly one trusted proxy hop, only when `ASTRA_TRUSTED_PROXY=1` (required in public mode).
 - **Roles, checked on the server for each route.**
   - READ_ONLY: summary, runs, models, experiments, session, status.

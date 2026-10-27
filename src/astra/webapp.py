@@ -202,7 +202,9 @@ def create_app(config: AppConfig, web: WebConfig, *, auth: AuthStore | None = No
         response.headers["Content-Security-Policy"] = CSP
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
-        response.headers["Referrer-Policy"] = "no-referrer"
+        # same-origin, not no-referrer: with no-referrer browsers send "Origin: null" on form POSTs,
+        # which the Origin check refuses. Cross-site requests still get no referrer and Origin null.
+        response.headers["Referrer-Policy"] = "same-origin"
         response.headers["Cache-Control"] = "no-store"
         response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
         response.headers["Cross-Origin-Resource-Policy"] = "same-origin"

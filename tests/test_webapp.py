@@ -582,7 +582,8 @@ class PermissionTests(WebAppCase):
         self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
         self.assertEqual(headers["X-Frame-Options"], "DENY")
-        self.assertEqual(headers["Referrer-Policy"], "no-referrer")
+        # Not no-referrer: browsers would then send "Origin: null" on the login form POST (refused).
+        self.assertEqual(headers["Referrer-Policy"], "same-origin")
         self.assertEqual(headers["Cache-Control"], "no-store")
         self.assertIn("max-age=", headers["Strict-Transport-Security"])
 
