@@ -4,14 +4,17 @@
 Description=ASTRA loopback port filter (only the proxy may reach 127.0.0.1:8765)
 Before=astra-web.service
 After=nftables.service
-# A restart of nftables.service usually starts with "flush ruleset": restart this unit with it.
+# A restart or reload of nftables.service re-runs /etc/nftables.conf, which usually starts with
+# "flush ruleset": follow both, so the rule is rebuilt right after the flush.
 PartOf=nftables.service
+ReloadPropagatedFrom=nftables.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStartPre=/usr/sbin/nft -c -f /opt/astra/app/deploy/nftables/astra-loopback.nft
 ExecStart=/usr/sbin/nft -f /opt/astra/app/deploy/nftables/astra-loopback.nft
+ExecReload=/usr/sbin/nft -f /opt/astra/app/deploy/nftables/astra-loopback.nft
 ExecStop=-/usr/sbin/nft delete table inet astra_loopback
 
 [Install]

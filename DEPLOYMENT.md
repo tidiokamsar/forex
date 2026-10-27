@@ -101,7 +101,7 @@ The dashboard is the Flask application `astra.webapp` served by gunicorn on `127
   - `/var/lib/astra` 0700, with the databases and `web_secret.key` 0600;
   - the proxy include and the TLS key 0600.
 - Alerts: a renewal dry run passes, the reload hook fires, and a test alert reaches the operator (journal only is not enough). The alert unit is sandboxed (`ProtectSystem=strict`, `NoNewPrivileges`), so a queue-based MTA such as Postfix (setgid `postdrop`) cannot queue mail from it: use a relay-only client (for example msmtp) or adjust the unit, and test.
-- Restarting `nftables.service` re-runs `/etc/nftables.conf`, which usually flushes every rule; `astra-nft` is `PartOf=` it and is restarted too. Verify that the rule is present again after such a restart.
+- Restarting or reloading `nftables.service` re-runs `/etc/nftables.conf`, which usually flushes every rule. `astra-nft` follows both (`PartOf=` for a restart, `ReloadPropagatedFrom=` for a reload) and rebuilds its table. Verify that the rule is present again after a restart and after a reload.
 - Drills: kill gunicorn, reboot the host (the nftables rule comes back before the app), and restore `auth.sqlite3` and `astra.sqlite3`.
 
 **Behaviour on incidents:**
