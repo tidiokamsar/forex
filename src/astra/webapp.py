@@ -17,6 +17,7 @@ Security model (SECURITY.md, "Web authentication"):
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import re
 import secrets
@@ -83,7 +84,10 @@ PRODUCTION_PYTHON = (3, 14)  # the version the suite is validated on (docs/DEPEN
 def load_proxy_secret(path: Path) -> tuple[str, ...]:
     """One or two accepted secrets (current, then previous during a rotation), one per line."""
 
-    values = tuple(line.strip() for line in Path(path).read_text(encoding="ascii").splitlines() if line.strip())
+    path = Path(path)
+    if os.name == "posix" and path.stat().st_mode & 0o007:
+        raise RuntimeError(f"{path} must not be accessible to other users (chmod 0640)")
+    values = tuple(line.strip() for line in path.read_text(encoding="ascii").splitlines() if line.strip())
     if not 1 <= len(values) <= 2 or any(len(v) < 32 or not v.isalnum() for v in values):
         raise RuntimeError(f"{path} must hold one or two alphanumeric secrets of at least 32 characters, one per line")
     return values
@@ -95,7 +99,7 @@ def open_auth_store(web: WebConfig, **kwargs: Any) -> AuthStore:
     cipher = None
     if Path(web.mfa_key_path).exists():
         cipher = load_cipher(web.mfa_key_path)  # a malformed or exposed key file stops startup
-    return AuthStore(web.auth_database_path, mfa_cipher=cipher, **kwargs)
+    return AuthStore(web.auth_database_path, mfa_cipher=cipher, mfa_key_path=web.mfa_key_path, **kwargs)
 
 
 def create_app(config: AppConfig, web: WebConfig, *, auth: AuthStore | None = None, secret_key: bytes | None = None,
@@ -108,6 +112,8 @@ def create_app(config: AppConfig, web: WebConfig, *, auth: AuthStore | None = No
     if web.public_hosts and proxy_secret is None:
         proxy_secret = load_proxy_secret(web.proxy_secret_path)
     proxy_secrets = (proxy_secret,) if isinstance(proxy_secret, str) else proxy_secret
+    if proxy_secrets is not None and (not proxy_secrets or any(len(v) < 32 for v in proxy_secrets)):
+        raise RuntimeError("the proxy secret must be at least 32 characters")
     backtests = store or BacktestStore(config.database_path)
     execution = ExecutionStore(backtests.path)
     models = ModelRegistry(backtests.path)
@@ -593,7 +599,18 @@ def create_app_from_env() -> Flask:
         raise RuntimeError(f"production runs on Python {PRODUCTION_PYTHON[0]}.{PRODUCTION_PYTHON[1]} only "
                            f"(found {sys.version.split()[0]}); see DEPLOYMENT.md")
     config, web = AppConfig.from_env(), WebConfig.from_env()
+    if web.public_hosts:
+        # Public mode: the MFA key ring must exist and must not sit next to the account database
+        # (a copy of that directory would otherwise carry both).
+        if not Path(web.mfa_key_path).is_file():
+            raise RuntimeError(f"public mode requires the MFA key ring {web.mfa_key_path} (astra auth mfa-key-init)")
+        if Path(web.mfa_key_path).resolve().parent == Path(web.auth_database_path).resolve().parent:
+            raise RuntimeError("the MFA key ring must not be in the same directory as the account database")
     auth = open_auth_store(web)
+    if auth.mfa_cipher is not None:
+        logging.getLogger("astra.web").warning("MFA key ring loaded, active key %s", auth.mfa_cipher.active_key_id)
+    else:
+        logging.getLogger("astra.web").warning("no MFA key ring at %s: TOTP sign-in answers 503", web.mfa_key_path)
     auth.initialize()
     store = BacktestStore(config.database_path)
     store.initialize()

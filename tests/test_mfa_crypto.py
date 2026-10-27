@@ -305,6 +305,89 @@ class ProxySecretRotationTests(MfaCase):
             load_proxy_secret(path)
 
 
+class ReviewFixTests(MfaCase):
+    """Regression tests for the AUTH-2 review findings (M1, L1-L6)."""
+
+    def test_running_store_picks_up_a_rotation_without_restart(self):
+        secret, _ = self.enrolled_admin()
+        key_file = Path(self.temp.name) / "mfa.key"
+        running = AuthStore(self.auth.path, clock=self.clock, mfa_cipher=mfa_crypto.load_cipher(key_file), mfa_key_path=key_file)
+        app = self.make_app(auth=running)
+        new_id = mfa_crypto.add_active_key(key_file)
+        os.utime(key_file, ns=(1, 2_000_000_000_000_000_000))  # make the change visible even on coarse clocks
+        AuthStore(self.auth.path, clock=self.clock, mfa_cipher=mfa_crypto.load_cipher(key_file)).reencrypt_mfa_secrets("cli")
+        client = self.client(ip="203.0.113.61", app=app)
+        page = client.get("/login")
+        self.post(client, "/login", {"username": "boss", "password": PASSWORD, "csrf_token": self.csrf(page)})
+        page = client.get("/login/mfa")
+        response = self.post(client, "/login/mfa", {"code": self.code(secret), "csrf_token": self.csrf(page)})
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(running.mfa_cipher.active_key_id, new_id)
+
+    def test_migration_refuses_values_that_are_not_totp_secrets(self):
+        self.enrolled_admin("boss")
+        self.enrolled_admin("chief")
+        write_secret(self.auth, "boss", "astra-mfa:v1::AAAA:BBBB")  # empty key id
+        write_secret(self.auth, "chief", "not base32 \u00e9 at all")
+        counts = self.auth.reencrypt_mfa_secrets("cli")
+        self.assertEqual((counts["migrated"], counts["unreadable"]), (0, 2))
+        self.assertEqual(stored_secret(self.auth, "boss"), "astra-mfa:v1::AAAA:BBBB")
+        self.assertEqual(self.auth.plaintext_mfa_secrets(), 1)  # the non-sealed value is reported, not hidden
+        with self.assertRaises(MfaKeyError):
+            self.cipher.seal(1, "active", "not-a-secret")
+
+    def test_unicode_digits_are_refused_not_errors(self):
+        self.enrolled_admin()
+        for code in ("\u0661\u0662\u0663\u0664\u0665\u0666", "12345\u00b2"):
+            self.assertEqual(self.mfa_login("boss", code).status_code, 401, code.encode("unicode_escape"))
+
+    def test_attempts_with_a_broken_key_ring_are_throttled(self):
+        self.enrolled_admin()
+        keyless = AuthStore(self.auth.path, clock=self.clock)
+        statuses = [self.mfa_login("boss", "123456", auth=keyless).status_code for _ in range(12)]
+        self.assertTrue(all(s in (503, 429) for s in statuses), statuses)
+        events = [e for e in self.auth.events(500) if e["action"] == "mfa.secret_unavailable"]
+        self.assertLessEqual(len(events), 6)  # the throttle stops the audit from growing at will
+
+    def test_public_mode_refuses_to_start_without_a_separate_key_ring(self):
+        from astra import webapp
+
+        root = Path(self.temp.name)
+        secret_file = root / "proxy.secret"
+        secret_file.write_text("s" * 40 + "\n", encoding="ascii")
+        env = {"ASTRA_DATABASE": str(root / "astra.sqlite3"), "ASTRA_AUTH_DATABASE": str(root / "auth.sqlite3"),
+               "ASTRA_WEB_SECRET_FILE": str(root / "web.key"), "ASTRA_PUBLIC_HOSTS": "astra.example", "ASTRA_HTTPS": "1",
+               "ASTRA_TRUSTED_PROXY": "1", "ASTRA_PROXY_SECRET_FILE": str(secret_file)}
+        with mock.patch.object(webapp, "PRODUCTION_PYTHON", sys.version_info[:2]):
+            with mock.patch.dict("os.environ", {**env, "ASTRA_MFA_KEY_FILE": str(root / "missing.key")}), \
+                    self.assertRaisesRegex(RuntimeError, "MFA key ring"):
+                webapp.create_app_from_env()
+            with mock.patch.dict("os.environ", {**env, "ASTRA_MFA_KEY_FILE": str(root / "mfa.key")}), \
+                    self.assertRaisesRegex(RuntimeError, "same directory"):
+                webapp.create_app_from_env()
+
+    def test_keys_never_appear_in_a_repr_and_write_errors_are_key_errors(self):
+        key = mfa_crypto.MfaKey("kabc", b"\x01" * 32)
+        self.assertNotIn("\\x01", repr(key))
+        blocker = Path(self.temp.name) / "afile"
+        blocker.write_text("x", encoding="ascii")
+        with self.assertRaises(MfaKeyError):
+            mfa_crypto.init_key_file(blocker / "mfa.key")  # parent is a file: OSError becomes MfaKeyError
+
+    def test_short_proxy_secret_is_refused(self):
+        from astra.webapp import create_app
+
+        with self.assertRaises(RuntimeError):
+            create_app(self.config, self.web, auth=self.auth, secret_key=self.key, store=self.store, proxy_secret="")
+
+    @unittest.skipUnless(os.name == "posix", "ownership and modes are POSIX only")
+    def test_rotation_keeps_the_file_mode(self):
+        key_file = Path(self.temp.name) / "mfa.key"
+        os.chmod(key_file, 0o640)
+        mfa_crypto.add_active_key(key_file)
+        self.assertEqual(key_file.stat().st_mode & 0o777, 0o640)
+
+
 class PythonLockTests(unittest.TestCase):
     def test_production_entry_refuses_another_python(self):
         from astra import webapp

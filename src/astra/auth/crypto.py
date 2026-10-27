@@ -73,7 +73,7 @@ def totp_timestep(secret: str, code: str, at: float) -> int | None:
     """The 30-second step a valid code belongs to (current, previous or next), else None."""
 
     code = code.strip().replace(" ", "")
-    if len(code) != 6 or not code.isdigit():
+    if len(code) != 6 or not code.isascii() or not code.isdigit():  # ASCII digits only (no Unicode digits)
         return None
     totp = pyotp.TOTP(secret)
     for offset in (0, -1, 1):

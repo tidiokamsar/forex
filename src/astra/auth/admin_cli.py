@@ -68,11 +68,11 @@ def _run(args: argparse.Namespace) -> int:
         key_id = mfa_crypto.init_key_file(key_path)
         print(f"MFA key ring created: {key_path} (key {key_id}); back it up separately from the database.", file=sys.stderr)
     if action == "mfa-key-init":
-        key_id = mfa_crypto.init_key_file(key_path)
+        key_id = mfa_crypto.init_key_file(key_path, group=args.group)
         print(json.dumps({"mfa_key_file": str(key_path), "active_key": key_id}))
         return 0
     cipher = mfa_crypto.load_cipher(key_path) if key_path.exists() else None
-    store = AuthStore(web.auth_database_path, mfa_cipher=cipher)
+    store = AuthStore(web.auth_database_path, mfa_cipher=cipher, mfa_key_path=key_path if cipher else None)
     store.initialize()
     if action == "mfa-status":
         print(json.dumps({"mfa_key_file": str(key_path), "key_ring": list(cipher.key_ids) if cipher else None,
@@ -85,9 +85,10 @@ def _run(args: argparse.Namespace) -> int:
         return 0
     if action == "mfa-key-rotate":
         new_id = mfa_crypto.add_active_key(key_path)
-        store.mfa_cipher = mfa_crypto.load_cipher(key_path)
-        counts = store.reencrypt_mfa_secrets(actor)
+        counts = store.reencrypt_mfa_secrets(actor)  # the store reloads the ring because the file changed
         print(json.dumps({"active_key": new_id, **counts}))
+        print("Running dashboards reload the key ring on their next MFA operation. Retire the old key only"
+              " after mfa-status shows it is no longer in use.", file=sys.stderr)
         return 0
     if action == "mfa-key-retire":
         mfa_crypto.remove_key(key_path, args.kid, store.mfa_key_ids_in_use())

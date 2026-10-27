@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from . import crypto
-from .mfa_crypto import MfaCipher, MfaKeyError, sealed_key_id
+from .mfa_crypto import TOTP_SECRET, MfaCipher, MfaKeyError, is_sealed, load_cipher, sealed_key_id
 
 USERNAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9._-]{2,63}")
 
@@ -147,28 +147,47 @@ class AuthStore:
     """SQLite store for web accounts and sessions; a separate file from the trading database."""
 
     def __init__(self, path: Path | str, policy: AuthPolicy | None = None,
-                 clock: Callable[[], datetime] | None = None, mfa_cipher: MfaCipher | None = None) -> None:
+                 clock: Callable[[], datetime] | None = None, mfa_cipher: MfaCipher | None = None,
+                 mfa_key_path: Path | str | None = None) -> None:
         self.path = Path(path)
         self.policy = policy or AuthPolicy()
         self._clock = clock or (lambda: datetime.now(UTC))
         # TOTP secrets are stored only encrypted with this key ring (astra.auth.mfa_crypto). Without it,
         # every operation that needs a TOTP secret fails closed with AuthUnavailable (HTTP 503).
         self.mfa_cipher = mfa_cipher
+        # With a key file, the ring is reloaded when the file changes, so running workers pick up a
+        # rotation at once (they never keep encrypting with a key that was rotated out).
+        self.mfa_key_path = Path(mfa_key_path) if mfa_key_path else None
+        self._mfa_key_mtime = self._key_mtime()
+
+    def _key_mtime(self) -> int | None:
+        try:
+            return self.mfa_key_path.stat().st_mtime_ns if self.mfa_key_path else None
+        except OSError:
+            return None
+
+    def _cipher(self) -> MfaCipher:
+        if self.mfa_key_path is not None:
+            mtime = self._key_mtime()
+            if mtime is None:
+                raise MfaKeyError("MFA key ring not readable (ASTRA_MFA_KEY_FILE)")
+            if mtime != self._mfa_key_mtime or self.mfa_cipher is None:
+                self.mfa_cipher = load_cipher(self.mfa_key_path)
+                self._mfa_key_mtime = mtime
+        if self.mfa_cipher is None:
+            raise MfaKeyError("MFA key ring not configured (ASTRA_MFA_KEY_FILE)")
+        return self.mfa_cipher
 
     # -- TOTP secret protection ---------------------------------------------------------------
 
     def _seal(self, user_id: int, purpose: str, secret: str) -> str:
-        if self.mfa_cipher is None:
-            raise MfaKeyError("MFA key ring not configured (ASTRA_MFA_KEY_FILE)")
-        return self.mfa_cipher.seal(user_id, purpose, secret)
+        return self._cipher().seal(user_id, purpose, secret)
 
     def _open(self, user_id: int, username: str, purpose: str, stored: str) -> str:
-        if self.mfa_cipher is None:
-            raise MfaKeyError("MFA key ring not configured (ASTRA_MFA_KEY_FILE)")
-        return self.mfa_cipher.open(user_id, purpose, stored)
+        return self._cipher().open(user_id, purpose, stored)
 
     @contextmanager
-    def _mfa_guard(self, username: str) -> Iterator[None]:
+    def _mfa_guard(self, username: str, throttle_key: str | None = None) -> Iterator[None]:
         """Turn a key-ring failure into AuthUnavailable (503) after the caller's transaction rolled back.
 
         Use as the OUTER context of the write transaction, so the audit event is written on its own
@@ -178,7 +197,14 @@ class AuthStore:
         try:
             yield
         except MfaKeyError as exc:
-            self.record("system", "mfa.secret_unavailable", "refused", target=username, detail=str(exc)[:120])
+            with self._write() as db:
+                if throttle_key:
+                    # Counted like a failed code, so attempts while the key ring is broken are throttled and
+                    # the audit table cannot be grown at will (review L4).
+                    if self._throttle_wait(db, [throttle_key]):
+                        raise AuthUnavailable("MFA secret unavailable") from exc
+                    self._record_failure(db, [throttle_key])
+                self._event(db, "system", "mfa.secret_unavailable", "refused", target=username, detail=str(exc)[:120])
             raise AuthUnavailable("MFA secret unavailable") from exc
 
     # -- schema ------------------------------------------------------------------------------
@@ -354,8 +380,10 @@ class AuthStore:
         reported, so an administrator can investigate (or reset that account's MFA explicitly).
         """
 
-        if self.mfa_cipher is None:
-            raise AuthUnavailable("MFA key ring not configured (ASTRA_MFA_KEY_FILE)")
+        try:
+            cipher = self._cipher()
+        except MfaKeyError as exc:
+            raise AuthUnavailable(str(exc)) from exc
         counts = {"migrated": 0, "rotated": 0, "unchanged": 0, "unreadable": 0}
         with self._write() as db:
             rows = db.execute("SELECT id, username, mfa_secret, mfa_pending_secret FROM users").fetchall()
@@ -364,17 +392,23 @@ class AuthStore:
                     stored = row[column]
                     if not stored:
                         continue
-                    if not self.mfa_cipher.needs_reencryption(stored):
+                    sealed_before = is_sealed(stored)
+                    if sealed_before and not cipher.needs_reencryption(stored):
                         counts["unchanged"] += 1
                         continue
                     try:
-                        plain = self.mfa_cipher.open(row["id"], purpose, stored) if sealed_key_id(stored) else stored
+                        if sealed_before:
+                            plain = cipher.open(row["id"], purpose, stored)
+                        elif TOTP_SECRET.fullmatch(stored):
+                            plain = stored  # a genuine plaintext base32 secret written before AUTH-2
+                        else:
+                            raise MfaKeyError("not a TOTP secret")
+                        sealed = cipher.seal(row["id"], purpose, plain)
                     except MfaKeyError:
-                        counts["unreadable"] += 1
+                        counts["unreadable"] += 1  # left untouched for an administrator to inspect
                         continue
-                    sealed = self.mfa_cipher.seal(row["id"], purpose, plain)
                     db.execute(f"UPDATE users SET {column} = ? WHERE id = ?", (sealed, row["id"]))
-                    counts["rotated" if sealed_key_id(stored) else "migrated"] += 1
+                    counts["rotated" if sealed_before else "migrated"] += 1
             self._event(db, actor, "mfa.reencrypt", "ok", detail=",".join(f"{k}={v}" for k, v in counts.items()))
         return counts
 
@@ -386,7 +420,7 @@ class AuthStore:
     def plaintext_mfa_secrets(self) -> int:
         with self._connect() as db:
             rows = db.execute("SELECT mfa_secret, mfa_pending_secret FROM users").fetchall()
-        return sum(1 for row in rows for value in row if value and not sealed_key_id(value))
+        return sum(1 for row in rows for value in row if value and not is_sealed(value))
 
     def password_epoch(self, username: str) -> str:
         """An opaque value that changes whenever the account's password changes or is reset (binds device cookies)."""
@@ -639,7 +673,7 @@ class AuthStore:
         if session.stage is not SessionStage.MFA_PENDING:
             raise AuthError("aucune vérification MFA en attente")
         key = [f"mfa:{session.user.id}"]
-        with self._mfa_guard(session.user.username), self._write() as db:
+        with self._mfa_guard(session.user.username, key[0]), self._write() as db:
             wait = self._throttle_wait(db, key)
             if wait:
                 self._event(db, f"web:{session.user.username}", "mfa", "throttled", client_ip=client_ip)
@@ -649,7 +683,7 @@ class AuthStore:
             step = None
             # A six-digit code needs the encrypted TOTP secret; a recovery code (stored as a digest) does not,
             # so recovery stays possible while the key ring is unavailable.
-            if row["mfa_secret"] and code.strip().replace(" ", "").isdigit():
+            if row["mfa_secret"] and re.fullmatch(r"[0-9]{6}", code.strip().replace(" ", "")):
                 secret = self._open(row["id"], row["username"], "active", row["mfa_secret"])
                 step = crypto.totp_timestep(secret, code, self._now().timestamp())
             method = "totp"

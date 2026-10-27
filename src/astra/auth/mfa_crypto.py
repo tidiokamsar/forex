@@ -24,11 +24,13 @@ Random 96-bit nonces stay far below the NIST limit of 2**32 encryptions per key 
 from __future__ import annotations
 
 import base64
+import contextlib
 import os
 import re
 import secrets
+import stat
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -39,6 +41,7 @@ FILE_HEADER = "astra-mfa-keys v1"
 PREFIX = "astra-mfa:v1:"
 KEY_ID = re.compile(r"[a-z0-9][a-z0-9_-]{2,31}")
 PURPOSES = ("active", "pending")
+TOTP_SECRET = re.compile(r"[A-Z2-7]{16,128}=*")  # the only plaintext values migration may encrypt
 
 
 class MfaKeyError(RuntimeError):
@@ -58,7 +61,7 @@ def _unb64(text: str) -> bytes:
 @dataclass(frozen=True, slots=True)
 class MfaKey:
     key_id: str
-    key: bytes
+    key: bytes = field(repr=False)  # never shown in a repr, traceback or debugger listing
 
 
 class MfaCipher:
@@ -84,6 +87,8 @@ class MfaCipher:
         return f"{PREFIX}{key_id}|user={user_id}|{purpose}".encode("ascii")
 
     def seal(self, user_id: int, purpose: str, secret: str) -> str:
+        if not isinstance(secret, str) or not TOTP_SECRET.fullmatch(secret):
+            raise MfaKeyError("refusing to encrypt a value that is not a base32 TOTP secret")
         nonce = secrets.token_bytes(12)
         key_id = self.active_key_id
         data = self._keys[key_id].encrypt(nonce, secret.encode("ascii"), self._aad(key_id, user_id, purpose))
@@ -139,7 +144,10 @@ def load_cipher(path: Path | str) -> MfaCipher:
 
     path = Path(path)
     try:
-        if os.name == "posix" and path.stat().st_mode & 0o007:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode):
+            raise MfaKeyError(f"{path} must be a regular file (not a link or a directory)")
+        if os.name == "posix" and info.st_mode & 0o007:
             raise MfaKeyError(f"{path} must not be accessible to other users (chmod 0600 or 0640)")
         text = path.read_text(encoding="ascii")
     except FileNotFoundError as exc:
@@ -157,26 +165,76 @@ def new_key_id(existing: tuple[str, ...] = ()) -> str:
             return candidate
 
 
-def _write(path: Path, keys: list[MfaKey]) -> None:
+@contextlib.contextmanager
+def _locked(path: Path) -> Iterator[None]:
+    """Exclusive lock on the key ring for writers (POSIX flock on a side file), so two rotations cannot lose a key."""
+
+    if os.name != "posix":
+        yield
+        return
+    import fcntl
+
+    try:
+        fd = os.open(path.with_name(f".{path.name}.lock"), os.O_WRONLY | os.O_CREAT, 0o600)
+    except OSError as exc:
+        raise MfaKeyError(f"cannot lock the MFA key ring next to {path}: {exc.strerror}") from exc
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _write(path: Path, keys: list[MfaKey], group: str | None = None) -> None:
+    """Atomically replace the key ring, keeping the owner, group and mode of the file it replaces.
+
+    A new file is 0600, or 0640 with ``group`` (for example the service group) when given. Any OS error
+    becomes MfaKeyError; the temporary file is removed on failure.
+    """
+
     body = FILE_HEADER + "\n" + "".join(f"{k.key_id} {_b64(k.key)}\n" for k in keys)
-    path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{secrets.token_hex(6)}")
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(body.encode("ascii"))
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        previous = path.stat() if path.exists() else None
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            if os.name == "posix":
+                if previous is not None:
+                    os.fchown(handle.fileno(), previous.st_uid, previous.st_gid)
+                    os.fchmod(handle.fileno(), stat.S_IMODE(previous.st_mode) & 0o640)
+                elif group is not None:
+                    import grp
+
+                    os.fchown(handle.fileno(), -1, grp.getgrnam(group).gr_gid)
+                    os.fchmod(handle.fileno(), 0o640)
+            handle.write(body.encode("ascii"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        if os.name == "posix":
+            directory = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+    except (OSError, KeyError) as exc:
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+        detail = exc.strerror if isinstance(exc, OSError) else "unknown group"
+        raise MfaKeyError(f"cannot write the MFA key ring {path}: {detail}"
+                          " (run the key commands as root, see OPERATIONS.md)") from exc
 
 
-def init_key_file(path: Path | str) -> str:
+def init_key_file(path: Path | str, group: str | None = None) -> str:
     """Create the key file with one new key (refused if the file exists). Returns the key id."""
 
     path = Path(path)
-    if path.exists():
-        raise MfaKeyError(f"{path} already exists")
-    key = MfaKey(new_key_id(), secrets.token_bytes(32))
-    _write(path, [key])
+    with _locked(path):
+        if path.exists():
+            raise MfaKeyError(f"{path} already exists")
+        key = MfaKey(new_key_id(), secrets.token_bytes(32))
+        _write(path, [key], group=group)
     return key.key_id
 
 
@@ -184,20 +242,23 @@ def add_active_key(path: Path | str) -> str:
     """Put a new key first in the ring (it encrypts from now on); older keys stay for decryption."""
 
     path = Path(path)
-    current = load_cipher(path)
-    keys = list(_parse(path.read_text(encoding="ascii")))
-    key = MfaKey(new_key_id(current.key_ids), secrets.token_bytes(32))
-    _write(path, [key, *keys])
+    with _locked(path):
+        current = load_cipher(path)
+        keys = list(_parse(path.read_text(encoding="ascii")))
+        key = MfaKey(new_key_id(current.key_ids), secrets.token_bytes(32))
+        _write(path, [key, *keys])
     return key.key_id
 
 
 def remove_key(path: Path | str, key_id: str, still_used: set[str]) -> None:
     path = Path(path)
-    keys = list(_parse(path.read_text(encoding="ascii")))
-    if key_id not in {k.key_id for k in keys}:
-        raise MfaKeyError(f"MFA key {key_id!r} is not in the key ring")
-    if keys[0].key_id == key_id:
-        raise MfaKeyError("the active MFA key cannot be retired; rotate first")
-    if key_id in still_used:
-        raise MfaKeyError(f"MFA key {key_id!r} still protects stored secrets; run astra auth mfa-reencrypt first")
-    _write(path, [k for k in keys if k.key_id != key_id])
+    with _locked(path):
+        load_cipher(path)  # same validity and permission checks as at startup
+        keys = list(_parse(path.read_text(encoding="ascii")))
+        if key_id not in {k.key_id for k in keys}:
+            raise MfaKeyError(f"MFA key {key_id!r} is not in the key ring")
+        if keys[0].key_id == key_id:
+            raise MfaKeyError("the active MFA key cannot be retired; rotate first")
+        if key_id in still_used:
+            raise MfaKeyError(f"MFA key {key_id!r} still protects stored secrets; run astra auth mfa-reencrypt first")
+        _write(path, [k for k in keys if k.key_id != key_id])

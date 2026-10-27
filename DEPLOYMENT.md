@@ -72,7 +72,9 @@ The dashboard is the Flask application `astra.webapp` served by gunicorn on `127
 2. **Releases.** Create the `astra` system user. Copy the reviewed commit to `/opt/astra/releases/<sha>` (root-owned), with its own venv: `python3.14 -m venv /opt/astra/releases/<sha>/venv`, then `pip install --require-hashes -r requirements/web.txt -r requirements/server.txt`. Point `/opt/astra/app` and `/opt/astra/venv` at that release with `ln -sfn`.
 3. **Configuration.**
    - Install `/etc/astra/web.env` (root:astra 0640) and `/etc/astra/alert.env` (templates in `deploy/`).
-   - Create the MFA key ring outside the data directory: `sudo -u astra env ASTRA_MFA_KEY_FILE=/etc/astra/mfa.key ... python -m astra auth mfa-key-init`. Alternatively, `init-admin` creates it. Then set it to root:astra 0640 and back it up separately from the database backups. Without the key ring, TOTP sign-in fails closed.
+   - Create the MFA key ring **as root**, before the first administrator: `sudo env ASTRA_MFA_KEY_FILE=/etc/astra/mfa.key PYTHONPATH=/opt/astra/app/src /opt/astra/venv/bin/python -m astra auth mfa-key-init --group astra`. This writes it as root:astra 0640, and later rewrites keep that owner, group and mode.
+   - Back the key ring up separately from the database backups.
+   - In public mode the dashboard refuses to start without it, or with it in the database directory. Without the key ring, TOTP sign-in fails closed.
    - Public mode only: generate the proxy secret into `/etc/astra/proxy.secret` (root:astra 0640) and into the proxy's root-only include (`deploy/apache/astra-proxy-secret.conf.example`).
    - Install the units: `astra-web`, `astra-nft`, `astra-alert@`, `astra-cert-check.{service,timer}`.
 4. **First administrator.** Create it in the service's own context, so the state directory and permissions are right: `sudo systemd-run --pipe --wait -p User=astra -p EnvironmentFile=/etc/astra/web.env -p StateDirectory=astra -p StateDirectoryMode=0700 -p UMask=0077 -p Environment=PYTHONPATH=/opt/astra/app/src /opt/astra/venv/bin/python -m astra auth init-admin --username <name>`. The password is typed twice, or with `--generate` shown once.
