@@ -6,6 +6,7 @@ Until the authentication gate, ASTRA used the standard library only. The trading
 
 - **The HTTP layer.** Python documents `http.server` as not recommended for production, and an Internet-facing authenticated application should not be built on hand-written request parsing. Flask, with Werkzeug, is a maintained framework. It supplies routing, request and form parsing, cookie handling, a body-size limit and templates with automatic escaping.
 - **Password storage.** OWASP recommends Argon2id, which the standard library does not provide. `argon2-cffi` is the reference binding of the reference C implementation.
+- **TOTP secret encryption.** The TOTP secret must be recovered to verify a code, so it is encrypted, not hashed. `cryptography` (the Python Cryptographic Authority's library) provides AES-GCM; the standard library has no authenticated cipher.
 - **TOTP.** `pyotp` implements RFC 6238 and the provisioning URI that authenticator apps read. It avoids a hand-written implementation of the second factor.
 - **The production WSGI server.** gunicorn is a maintained server for Linux. Werkzeug's development server is used only by `astra serve` on loopback.
 - **Not used.** No identity provider, paid service, frontend toolchain or JavaScript library.
@@ -33,6 +34,7 @@ At pinning time:
 | cffi | 2.1.1 | 2026-08-03 | Required by the bindings |
 | pycparser | 3.0 | 2026-01-21 | Required by cffi (3.12, released 2026-10-22, was too recent) |
 | pyotp | 2.10.0 | 2026-06-14 | TOTP |
+| cryptography | 50.0.2 | 2026-09-30 | AES-256-GCM encryption of the TOTP secrets (AUTH-2) |
 | gunicorn | 26.2.0 | 2026-08-24 | Production server (Linux only) |
 
 The CI installs `requirements/web.txt` before the checks. A version change is a reviewed commit that regenerates the hashes from PyPI.

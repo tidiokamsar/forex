@@ -9,6 +9,7 @@ Third-party dependencies (``argon2-cffi`` for Argon2id, ``pyotp`` for TOTP) are 
 hashes in ``requirements/web.txt``; the trading code does not import them.
 """
 
+from .mfa_crypto import MfaCipher, MfaKeyError
 from .store import (
     AuthError,
     AuthPolicy,
@@ -26,6 +27,8 @@ __all__ = [
     "AuthStore",
     "AuthUnavailable",
     "LoginResult",
+    "MfaCipher",
+    "MfaKeyError",
     "SessionRecord",
     "UserRecord",
     "WebRole",

@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from . import crypto
+from .mfa_crypto import MfaCipher, MfaKeyError, sealed_key_id
 
 USERNAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9._-]{2,63}")
 
@@ -146,10 +147,39 @@ class AuthStore:
     """SQLite store for web accounts and sessions; a separate file from the trading database."""
 
     def __init__(self, path: Path | str, policy: AuthPolicy | None = None,
-                 clock: Callable[[], datetime] | None = None) -> None:
+                 clock: Callable[[], datetime] | None = None, mfa_cipher: MfaCipher | None = None) -> None:
         self.path = Path(path)
         self.policy = policy or AuthPolicy()
         self._clock = clock or (lambda: datetime.now(UTC))
+        # TOTP secrets are stored only encrypted with this key ring (astra.auth.mfa_crypto). Without it,
+        # every operation that needs a TOTP secret fails closed with AuthUnavailable (HTTP 503).
+        self.mfa_cipher = mfa_cipher
+
+    # -- TOTP secret protection ---------------------------------------------------------------
+
+    def _seal(self, user_id: int, purpose: str, secret: str) -> str:
+        if self.mfa_cipher is None:
+            raise MfaKeyError("MFA key ring not configured (ASTRA_MFA_KEY_FILE)")
+        return self.mfa_cipher.seal(user_id, purpose, secret)
+
+    def _open(self, user_id: int, username: str, purpose: str, stored: str) -> str:
+        if self.mfa_cipher is None:
+            raise MfaKeyError("MFA key ring not configured (ASTRA_MFA_KEY_FILE)")
+        return self.mfa_cipher.open(user_id, purpose, stored)
+
+    @contextmanager
+    def _mfa_guard(self, username: str) -> Iterator[None]:
+        """Turn a key-ring failure into AuthUnavailable (503) after the caller's transaction rolled back.
+
+        Use as the OUTER context of the write transaction, so the audit event is written on its own
+        connection once the database is unlocked. MFA stays enabled: nothing is changed on failure.
+        """
+
+        try:
+            yield
+        except MfaKeyError as exc:
+            self.record("system", "mfa.secret_unavailable", "refused", target=username, detail=str(exc)[:120])
+            raise AuthUnavailable("MFA secret unavailable") from exc
 
     # -- schema ------------------------------------------------------------------------------
 
@@ -316,6 +346,47 @@ class AuthStore:
             self._event(db, actor, "user.create", "ok", target=name, detail=f"role={role.value}")
             row = db.execute("SELECT * FROM users WHERE id = ?", (cursor.lastrowid,)).fetchone()
         return self._user(row)
+
+    def reencrypt_mfa_secrets(self, actor: str) -> dict[str, int]:
+        """Encrypt plaintext TOTP secrets (migration) and re-encrypt those under an older key (rotation).
+
+        Nothing is deleted and MFA stays enabled: a secret that cannot be decrypted is left as it is and
+        reported, so an administrator can investigate (or reset that account's MFA explicitly).
+        """
+
+        if self.mfa_cipher is None:
+            raise AuthUnavailable("MFA key ring not configured (ASTRA_MFA_KEY_FILE)")
+        counts = {"migrated": 0, "rotated": 0, "unchanged": 0, "unreadable": 0}
+        with self._write() as db:
+            rows = db.execute("SELECT id, username, mfa_secret, mfa_pending_secret FROM users").fetchall()
+            for row in rows:
+                for column, purpose in (("mfa_secret", "active"), ("mfa_pending_secret", "pending")):
+                    stored = row[column]
+                    if not stored:
+                        continue
+                    if not self.mfa_cipher.needs_reencryption(stored):
+                        counts["unchanged"] += 1
+                        continue
+                    try:
+                        plain = self.mfa_cipher.open(row["id"], purpose, stored) if sealed_key_id(stored) else stored
+                    except MfaKeyError:
+                        counts["unreadable"] += 1
+                        continue
+                    sealed = self.mfa_cipher.seal(row["id"], purpose, plain)
+                    db.execute(f"UPDATE users SET {column} = ? WHERE id = ?", (sealed, row["id"]))
+                    counts["rotated" if sealed_key_id(stored) else "migrated"] += 1
+            self._event(db, actor, "mfa.reencrypt", "ok", detail=",".join(f"{k}={v}" for k, v in counts.items()))
+        return counts
+
+    def mfa_key_ids_in_use(self) -> set[str]:
+        with self._connect() as db:
+            rows = db.execute("SELECT mfa_secret, mfa_pending_secret FROM users").fetchall()
+        return {kid for row in rows for value in row for kid in [sealed_key_id(value)] if kid}
+
+    def plaintext_mfa_secrets(self) -> int:
+        with self._connect() as db:
+            rows = db.execute("SELECT mfa_secret, mfa_pending_secret FROM users").fetchall()
+        return sum(1 for row in rows for value in row if value and not sealed_key_id(value))
 
     def password_epoch(self, username: str) -> str:
         """An opaque value that changes whenever the account's password changes or is reset (binds device cookies)."""
@@ -568,14 +639,19 @@ class AuthStore:
         if session.stage is not SessionStage.MFA_PENDING:
             raise AuthError("aucune vérification MFA en attente")
         key = [f"mfa:{session.user.id}"]
-        with self._write() as db:
+        with self._mfa_guard(session.user.username), self._write() as db:
             wait = self._throttle_wait(db, key)
             if wait:
                 self._event(db, f"web:{session.user.username}", "mfa", "throttled", client_ip=client_ip)
                 return LoginResult("throttled", retry_after_seconds=wait)
             row = db.execute("SELECT * FROM users WHERE id = ?", (session.user.id,)).fetchone()
             code = code if isinstance(code, str) else ""
-            step = crypto.totp_timestep(row["mfa_secret"], code, self._now().timestamp()) if row["mfa_secret"] else None
+            step = None
+            # A six-digit code needs the encrypted TOTP secret; a recovery code (stored as a digest) does not,
+            # so recovery stays possible while the key ring is unavailable.
+            if row["mfa_secret"] and code.strip().replace(" ", "").isdigit():
+                secret = self._open(row["id"], row["username"], "active", row["mfa_secret"])
+                step = crypto.totp_timestep(secret, code, self._now().timestamp())
             method = "totp"
             accepted = step is not None and step > row["mfa_last_step"]  # a code is accepted once (no replay)
             if accepted:
@@ -601,20 +677,24 @@ class AuthStore:
 
         if session.stage is not SessionStage.MFA_ENROLL:
             raise AuthError("l'enrôlement MFA n'est pas attendu pour cette session")
-        with self._write() as db:
-            row = db.execute("SELECT mfa_pending_secret FROM users WHERE id = ?", (session.user.id,)).fetchone()
-            secret = row["mfa_pending_secret"] or crypto.new_totp_secret()
-            if not row["mfa_pending_secret"]:
-                db.execute("UPDATE users SET mfa_pending_secret = ? WHERE id = ?", (secret, session.user.id))
+        with self._mfa_guard(session.user.username), self._write() as db:
+            row = db.execute("SELECT id, username, mfa_pending_secret FROM users WHERE id = ?", (session.user.id,)).fetchone()
+            if row["mfa_pending_secret"]:
+                secret = self._open(row["id"], row["username"], "pending", row["mfa_pending_secret"])
+            else:
+                secret = crypto.new_totp_secret()
+                db.execute("UPDATE users SET mfa_pending_secret = ? WHERE id = ?",
+                           (self._seal(row["id"], "pending", secret), row["id"]))
         return secret, crypto.totp_uri(secret, session.user.username)
 
     def confirm_mfa_enrollment(self, session: SessionRecord, code: str, client_ip: str | None,
                                user_agent: str | None = None) -> tuple[LoginResult, list[str]]:
         if session.stage is not SessionStage.MFA_ENROLL:
             raise AuthError("l'enrôlement MFA n'est pas attendu pour cette session")
-        with self._write() as db:
+        with self._mfa_guard(session.user.username), self._write() as db:
             row = db.execute("SELECT * FROM users WHERE id = ?", (session.user.id,)).fetchone()
-            secret = row["mfa_pending_secret"]
+            secret = self._open(row["id"], row["username"], "pending", row["mfa_pending_secret"]) \
+                if row["mfa_pending_secret"] else None
             typed = code if isinstance(code, str) else ""
             step = crypto.totp_timestep(secret, typed, self._now().timestamp()) if secret else None
             if step is None:
@@ -622,7 +702,7 @@ class AuthStore:
                 return LoginResult("invalid"), []
             codes = crypto.new_recovery_codes()
             db.execute("UPDATE users SET mfa_secret = ?, mfa_pending_secret = NULL, mfa_enabled = 1, mfa_last_step = ?"
-                       " WHERE id = ?", (secret, step, row["id"]))
+                       " WHERE id = ?", (self._seal(row["id"], "active", secret), step, row["id"]))
             db.execute("DELETE FROM recovery_codes WHERE user_id = ?", (row["id"],))
             db.executemany("INSERT INTO recovery_codes(user_id, code_digest) VALUES (?, ?)",
                            [(row["id"], crypto.token_digest(crypto.normalize_recovery_code(c))) for c in codes])

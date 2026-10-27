@@ -16,6 +16,7 @@ import string
 import sys
 
 from ..config import WebConfig
+from . import mfa_crypto
 from .store import AuthError, AuthStore, WebRole
 
 
@@ -47,11 +48,52 @@ def _prompt_password(store: AuthStore, username: str) -> str:
 
 
 def run(args: argparse.Namespace) -> int:
+    """Run one ``astra auth`` action; key-ring and storage failures become clear errors (exit 1)."""
+
+    from .store import AuthUnavailable
+
+    try:
+        return _run(args)
+    except (mfa_crypto.MfaKeyError, AuthUnavailable) as exc:
+        raise AuthError(str(exc)) from exc
+
+
+def _run(args: argparse.Namespace) -> int:
     web = WebConfig.from_env()
-    store = AuthStore(web.auth_database_path)
-    store.initialize()
     actor = _operator()
     action = args.auth_action
+    key_path = web.mfa_key_path
+    if action == "init-admin" and not key_path.exists():
+        # The first administrator must enrol TOTP: create the key ring first (outside the database).
+        key_id = mfa_crypto.init_key_file(key_path)
+        print(f"MFA key ring created: {key_path} (key {key_id}); back it up separately from the database.", file=sys.stderr)
+    if action == "mfa-key-init":
+        key_id = mfa_crypto.init_key_file(key_path)
+        print(json.dumps({"mfa_key_file": str(key_path), "active_key": key_id}))
+        return 0
+    cipher = mfa_crypto.load_cipher(key_path) if key_path.exists() else None
+    store = AuthStore(web.auth_database_path, mfa_cipher=cipher)
+    store.initialize()
+    if action == "mfa-status":
+        print(json.dumps({"mfa_key_file": str(key_path), "key_ring": list(cipher.key_ids) if cipher else None,
+                          "active_key": cipher.active_key_id if cipher else None,
+                          "keys_in_use": sorted(store.mfa_key_ids_in_use()),
+                          "plaintext_secrets": store.plaintext_mfa_secrets()}))
+        return 0
+    if action == "mfa-reencrypt":
+        print(json.dumps(store.reencrypt_mfa_secrets(actor)))
+        return 0
+    if action == "mfa-key-rotate":
+        new_id = mfa_crypto.add_active_key(key_path)
+        store.mfa_cipher = mfa_crypto.load_cipher(key_path)
+        counts = store.reencrypt_mfa_secrets(actor)
+        print(json.dumps({"active_key": new_id, **counts}))
+        return 0
+    if action == "mfa-key-retire":
+        mfa_crypto.remove_key(key_path, args.kid, store.mfa_key_ids_in_use())
+        store.record(actor, "mfa.key_retired", "ok", detail=f"kid={args.kid}")
+        print(json.dumps({"retired": args.kid}))
+        return 0
     if action == "init-admin":
         password = _generated_password() if args.generate else _prompt_password(store, args.username)
         user = store.create_user(actor, args.username, WebRole.ADMIN, password, must_change_password=args.generate,

@@ -47,6 +47,11 @@ The dashboard (`astra.webapp`, Flask) requires a server-side session for every r
   - Any session-store error answers 503, never anonymous access.
 - **MFA.**
   - TOTP (RFC 6238, `pyotp` 2.10.0) is mandatory for ADMIN and OPERATOR before any data is shown; a code is accepted once (replay refused).
+  - TOTP secrets (active and pending) are stored **only encrypted**: AES-256-GCM (`cryptography` 50.0.2), a fresh random 96-bit nonce per encryption, and associated data binding each value to its format version, key id, account id and purpose. The stored format is `astra-mfa:v1:<key id>:<nonce>:<ciphertext>`.
+  - The key ring (`ASTRA_MFA_KEY_FILE`, production `/etc/astra/mfa.key`, root:astra 0640) lives outside Git, SQLite, the database backups and the logs. A file readable by others is refused on Linux.
+  - A missing key ring, an unknown key id, a wrong key, corrupted data, a secret copied to another account, or a plaintext secret all answer 503 and are audited (`mfa.secret_unavailable`). MFA is never disabled automatically.
+  - Recovery codes, stored as digests, keep working when the key ring is unavailable.
+  - Rotation and migration: `astra auth mfa-key-rotate`, `mfa-reencrypt`, `mfa-key-retire` (OPERATIONS.md).
   - Ten single-use recovery codes (100 bits each) are shown once and stored as digests.
   - The documented recovery path for a lost device or password is local: `astra auth reset-mfa` / `reset-password` on the server, by someone with shell access. There is no public reset endpoint.
 - **Throttling.**
@@ -55,7 +60,7 @@ The dashboard (`astra.webapp`, Flask) requires a server-side session for every r
   - Admin re-authentication and password changes inside a signed-in session are throttled on keys of their own (per account, and per account and address), so failed logins from elsewhere cannot block them. Residual: someone holding a stolen session can keep that account's step-up throttled; the administrator then revokes sessions and resets the password with the local CLI (`astra auth revoke-sessions`, `reset-password`), which needs no step-up.
 - **Requests.**
   - Exact Host allowlist: the public name only in public mode, loopback names only in private (tunnel) mode.
-  - In public mode, every request must also carry the proxy secret (`X-Astra-Proxy`, compared in constant time; 403 otherwise). The proxy reads it from a root-only include, so a local process that reaches the loopback port directly cannot pass for the proxy even if it forges Host and Origin. A second barrier, the nftables rule in `deploy/`, admits only the proxy user to that port.
+  - In public mode, every request must also carry the proxy secret (`X-Astra-Proxy`, compared in constant time; 403 otherwise). The secret file may hold two values (current and previous), so it can be renewed without downtime. It protects only the proxy-to-application path and never replaces user authentication. The proxy reads it from a root-only include, so a local process that reaches the loopback port directly cannot pass for the proxy even if it forges Host and Origin. A second barrier, the nftables rule in `deploy/`, admits only the proxy user to that port.
   - Every state-changing request needs an allowed `Origin` and a CSRF token: HMAC-bound to the session, or to the pre-login cookie for the login form.
   - The body is limited to 64 KiB.
   - Response headers: CSP without inline code, `nosniff`, `X-Frame-Options DENY`, `Referrer-Policy no-referrer`, `Cache-Control no-store`, COOP and CORP, plus HSTS in HTTPS mode.
@@ -67,7 +72,7 @@ The dashboard (`astra.webapp`, Flask) requires a server-side session for every r
   - Web roles are not execution roles. No web route submits, cancels, releases the kill switch, clears a freeze, promotes a model or changes the mode, and `astra.auth` imports nothing from execution, brokers, risk or governance (tests enforce both).
 - **Audit.** `auth_events` is append-only (triggers refuse UPDATE and DELETE) and records actor, action, target, result, time and address, never a password, token, cookie, TOTP secret or code. Anonymous Origin and CSRF refusals and repeated throttled attempts are not recorded. Failed logins still are, at a rate bounded by the throttle and the proxy limits, and the table has no retention policy yet.
 - **Residual risks.**
-  - TOTP secrets are stored in clear in `auth.sqlite3` (mode 0600). A copy of that file or of its backups gives the second factor of every account, so treat those backups as secrets.
+  - TOTP secrets are encrypted at rest (AUTH-2). Someone holding both `auth.sqlite3` and the key ring can still recover them, so store the key ring separately from the database backups. The running service necessarily holds the key in memory.
   - Concurrent guesses can slip a few attempts past a throttle window (at most one per worker thread).
   - Whoever uses a generated or reset password first, within its 72 h validity, also enrols the TOTP device: deliver those passwords out of band and promptly.
   - The whole model assumes the host itself is trustworthy: on a compromised host, credentials typed into the dashboard can be captured whatever the application does.

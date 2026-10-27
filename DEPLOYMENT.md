@@ -59,7 +59,7 @@ The dashboard is the Flask application `astra.webapp` served by gunicorn on `127
 | Private (default) | `ASTRA_PUBLIC_HOSTS` empty, `ASTRA_HTTPS=0`, `ASTRA_TRUSTED_PROXY=0` | `http://127.0.0.1:8765` on the host, or through `ssh -L 8765:127.0.0.1:8765 <host>` | Until a qualified host and a valid certificate exist |
 | Public | `ASTRA_PUBLIC_HOSTS=<dedicated DNS name>`, `ASTRA_HTTPS=1`, `ASTRA_TRUSTED_PROXY=1`, `ASTRA_PROXY_SECRET_FILE=/etc/astra/proxy.secret` | `https://<name>` through the TLS reverse proxy only | After the go-live checklist below |
 
-**Prerequisite (blocking): a trustworthy host.**
+**Prerequisite (blocking): a trustworthy host,** qualified with [docs/HOST_QUALIFICATION.md](docs/HOST_QUALIFICATION.md), section B. The previously inspected server `102.211.199.132` is not used (section A of that document).
 - A host with an open or only partially remediated intrusion is not acceptable. Root-level access there exposes the password hashes, the TOTP secrets, the CSRF key, the proxy secret and the TLS key, and captures what users type; no application or proxy setting mitigates that.
 - Before installing, record:
   - forensic closure or a rebuild of the host;
@@ -68,10 +68,11 @@ The dashboard is the Flask application `astra.webapp` served by gunicorn on `127
 - A dedicated clean VM is preferred.
 
 **Installation on a Linux host (requires an administrator with sudo; not yet performed anywhere):**
-1. **Python.** Install Python 3.14 (the version the suite is validated on), or first run the whole suite on the host's Python and record the result. Python 3.12 is accepted by `pyproject.toml` but untested.
+1. **Python 3.14** (production target, decided in AUTH-2). Install a maintained 3.14 patch release from a trusted source; it receives bugfixes until October 2030, whereas 3.12 only gets security fixes. `deploy/PYTHON_VERSION` records it, and the production entry point (`create_app_from_env`) refuses any other minor version. Using 3.12 instead would require running and recording the full suite on it first; that variant is not validated.
 2. **Releases.** Create the `astra` system user. Copy the reviewed commit to `/opt/astra/releases/<sha>` (root-owned), with its own venv: `python3.14 -m venv /opt/astra/releases/<sha>/venv`, then `pip install --require-hashes -r requirements/web.txt -r requirements/server.txt`. Point `/opt/astra/app` and `/opt/astra/venv` at that release with `ln -sfn`.
 3. **Configuration.**
    - Install `/etc/astra/web.env` (root:astra 0640) and `/etc/astra/alert.env` (templates in `deploy/`).
+   - Create the MFA key ring outside the data directory: `sudo -u astra env ASTRA_MFA_KEY_FILE=/etc/astra/mfa.key ... python -m astra auth mfa-key-init`. Alternatively, `init-admin` creates it. Then set it to root:astra 0640 and back it up separately from the database backups. Without the key ring, TOTP sign-in fails closed.
    - Public mode only: generate the proxy secret into `/etc/astra/proxy.secret` (root:astra 0640) and into the proxy's root-only include (`deploy/apache/astra-proxy-secret.conf.example`).
    - Install the units: `astra-web`, `astra-nft`, `astra-alert@`, `astra-cert-check.{service,timer}`.
 4. **First administrator.** Create it in the service's own context, so the state directory and permissions are right: `sudo systemd-run --pipe --wait -p User=astra -p EnvironmentFile=/etc/astra/web.env -p StateDirectory=astra -p StateDirectoryMode=0700 -p UMask=0077 -p Environment=PYTHONPATH=/opt/astra/app/src /opt/astra/venv/bin/python -m astra auth init-admin --username <name>`. The password is typed twice, or with `--generate` shown once.

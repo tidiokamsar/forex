@@ -113,3 +113,13 @@ Offline and research only; no venue contacted by code, no account, no key, no or
 | AUTH-HOST | Deployment on 102.211.199.132 | BLOCKED: read-only inspection only (user decision); no sudo without password; Python 3.12 only; 80/443 and the IP belong to GLPI; partially remediated intrusion | `reports/AUTH_AND_DEPLOYMENT_REPORT.md` |
 | AUTH-TLS | Valid public certificate and renewal for a dedicated DNS name | BLOCKED: no DNS name exists for ASTRA | same |
 
+## AUTH-2: MFA hardening (branch `feat/auth-deploy`)
+
+| ID | Scope | Status | Evidence |
+|---|---|---|---|
+| AUTH2-MFA | TOTP secrets encrypted with AES-256-GCM (key ring outside the database, key id and version, account binding, fail closed), migration of plaintext secrets, rotation and retirement | DONE (offline tests); independent review | `src/astra/auth/mfa_crypto.py`, `tests/test_mfa_crypto.py` |
+| AUTH2-PROXY | Proxy secret renewable (current and previous accepted) | DONE (offline tests) | `src/astra/webapp.py` |
+| AUTH2-PY | Production target Python 3.14 locked (`deploy/PYTHON_VERSION`, entry-point check) | DONE | `deploy/PYTHON_VERSION`, DEPLOYMENT.md |
+| AUTH2-HOST | Qualification procedure for the old server and for a dedicated clean host | DONE (documented); no host qualified yet | `docs/HOST_QUALIFICATION.md` |
+| AUTH2-CI | GitHub Actions run | BLOCKED (account billing lock) | `reports/AUTH2_HARDENING_REPORT.md` |
+

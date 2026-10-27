@@ -20,6 +20,7 @@ from flask.testing import FlaskClient
 
 from _support import workspace_tempdir
 from astra.auth import AuthStore, AuthUnavailable, WebRole
+from astra.auth.mfa_crypto import init_key_file, load_cipher
 from astra.auth.store import SessionStage
 from astra.config import AppConfig, WebConfig
 from astra.engine import run_paper_replay
@@ -85,7 +86,9 @@ class WebAppCase(unittest.TestCase):
         ExecutionStore(self.db).initialize()
         ModelRegistry(self.db).initialize()
         self.clock = Clock()
-        self.auth = AuthStore(root / "auth.sqlite3", clock=self.clock)
+        init_key_file(root / "mfa.key")
+        self.cipher = load_cipher(root / "mfa.key")
+        self.auth = AuthStore(root / "auth.sqlite3", clock=self.clock, mfa_cipher=self.cipher)
         self.auth.initialize()
         self.web = WebConfig(auth_database_path=root / "auth.sqlite3", secret_key_path=root / "web_secret.key",
                              public_hosts=self.public_hosts, trusted_proxy=self.trusted_proxy, https=bool(self.public_hosts),
@@ -447,7 +450,7 @@ class SessionTests(WebAppCase):
     def test_sessions_survive_an_application_restart(self):
         client = self.session_client("alice", WebRole.READ_ONLY)
         token = client.get_cookie(SESSION_COOKIE, domain=HOST).value
-        restarted = self.make_app(auth=AuthStore(self.auth.path, clock=self.clock))
+        restarted = self.make_app(auth=AuthStore(self.auth.path, clock=self.clock, mfa_cipher=self.cipher))
         again = self.client(app=restarted)
         again.set_cookie(SESSION_COOKIE, token, domain=HOST)
         self.assertEqual(again.get("/api/session").status_code, 200)
@@ -455,7 +458,7 @@ class SessionTests(WebAppCase):
     def test_storage_failure_never_grants_access(self):
         client = self.session_client("alice", WebRole.READ_ONLY)
         token = client.get_cookie(SESSION_COOKIE, domain=HOST).value
-        broken = AuthStore(self.auth.path, clock=self.clock)
+        broken = AuthStore(self.auth.path, clock=self.clock, mfa_cipher=self.cipher)
         with mock.patch.object(broken, "resolve", side_effect=AuthUnavailable("down")):
             failing = self.client(app=self.make_app(auth=broken))
             failing.set_cookie(SESSION_COOKIE, token, domain=HOST)
@@ -705,7 +708,7 @@ class AuthCliTests(unittest.TestCase):
         from astra.cli import main
 
         with workspace_tempdir() as temp:
-            env = {"ASTRA_AUTH_DATABASE": str(Path(temp) / "auth.sqlite3")}
+            env = {"ASTRA_AUTH_DATABASE": str(Path(temp) / "auth.sqlite3"), "ASTRA_MFA_KEY_FILE": str(Path(temp) / "mfa.key")}
             out, err = io.StringIO(), io.StringIO()
             with mock.patch.dict("os.environ", env), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 code = main(["auth", "init-admin", "--username", "chief", "--generate"])
@@ -714,6 +717,7 @@ class AuthCliTests(unittest.TestCase):
             self.assertEqual((created["role"], created["must_change_password"]), ("ADMIN", True))
             self.assertNotIn("Mot de passe", out.getvalue())
             self.assertIn("affiché une seule fois", err.getvalue())
+            self.assertTrue((Path(temp) / "mfa.key").exists(), "init-admin creates the MFA key ring")
             out2, err2 = io.StringIO(), io.StringIO()
             with mock.patch.dict("os.environ", env), contextlib.redirect_stdout(out2), contextlib.redirect_stderr(err2):
                 self.assertEqual(main(["auth", "init-admin", "--username", "other", "--generate"]), 1)

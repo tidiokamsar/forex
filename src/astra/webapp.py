@@ -29,6 +29,7 @@ from typing import Any
 from flask import Flask, Response, abort, g, jsonify, make_response, redirect, render_template, request, send_file
 
 from .auth import AuthError, AuthStore, AuthUnavailable, WebRole, crypto
+from .auth.mfa_crypto import load_cipher
 from .auth.store import SessionRecord, SessionStage
 from .config import AppConfig, WebConfig
 from .execution import ExecutionStore, TradingControls
@@ -76,22 +77,37 @@ def load_secret_key(path: Path) -> bytes:
     raise RuntimeError(f"cannot create {path}")
 
 
-def load_proxy_secret(path: Path) -> str:
-    value = Path(path).read_text(encoding="ascii").strip()
-    if len(value) < 32 or not value.isalnum():
-        raise RuntimeError(f"{path} must hold an alphanumeric secret of at least 32 characters")
-    return value
+PRODUCTION_PYTHON = (3, 14)  # the version the suite is validated on (docs/DEPENDENCIES.md, deploy/PYTHON_VERSION)
+
+
+def load_proxy_secret(path: Path) -> tuple[str, ...]:
+    """One or two accepted secrets (current, then previous during a rotation), one per line."""
+
+    values = tuple(line.strip() for line in Path(path).read_text(encoding="ascii").splitlines() if line.strip())
+    if not 1 <= len(values) <= 2 or any(len(v) < 32 or not v.isalnum() for v in values):
+        raise RuntimeError(f"{path} must hold one or two alphanumeric secrets of at least 32 characters, one per line")
+    return values
+
+
+def open_auth_store(web: WebConfig, **kwargs: Any) -> AuthStore:
+    """The account store with its MFA key ring; without the key file, MFA operations fail closed (503)."""
+
+    cipher = None
+    if Path(web.mfa_key_path).exists():
+        cipher = load_cipher(web.mfa_key_path)  # a malformed or exposed key file stops startup
+    return AuthStore(web.auth_database_path, mfa_cipher=cipher, **kwargs)
 
 
 def create_app(config: AppConfig, web: WebConfig, *, auth: AuthStore | None = None, secret_key: bytes | None = None,
-               store: BacktestStore | None = None, proxy_secret: str | None = None) -> Flask:
+               store: BacktestStore | None = None, proxy_secret: str | tuple[str, ...] | None = None) -> Flask:
     app = Flask(__name__, static_folder=None, template_folder="templates")
     app.config.update(MAX_CONTENT_LENGTH=64 * 1024, MAX_FORM_MEMORY_SIZE=64 * 1024, MAX_FORM_PARTS=50,
                       TEMPLATES_AUTO_RELOAD=False)
-    auth = auth or AuthStore(web.auth_database_path)
+    auth = auth or open_auth_store(web)
     key = secret_key or load_secret_key(web.secret_key_path)
     if web.public_hosts and proxy_secret is None:
         proxy_secret = load_proxy_secret(web.proxy_secret_path)
+    proxy_secrets = (proxy_secret,) if isinstance(proxy_secret, str) else proxy_secret
     backtests = store or BacktestStore(config.database_path)
     execution = ExecutionStore(backtests.path)
     models = ModelRegistry(backtests.path)
@@ -152,8 +168,12 @@ def create_app(config: AppConfig, web: WebConfig, *, auth: AuthStore | None = No
 
     @app.before_request
     def guard() -> Response | None:
-        if proxy_secret is not None and not crypto.constant_time_equal(request.headers.get(PROXY_HEADER, ""), proxy_secret):
-            return _error(403, "proxy_required")
+        if proxy_secrets is not None:
+            sent = request.headers.get(PROXY_HEADER, "")
+            # Compare against every accepted secret (no early exit), so timing does not tell which one matched.
+            matches = [crypto.constant_time_equal(sent, value) for value in proxy_secrets]
+            if not any(matches):
+                return _error(403, "proxy_required")
         host = (request.headers.get("Host") or "").lower()
         if host not in allowed_hosts:
             return _error(400, "invalid_host")
@@ -567,8 +587,13 @@ def _error(status: int, code: str) -> Response:
 def create_app_from_env() -> Flask:
     """Entry point for the production WSGI server: ``gunicorn 'astra.webapp:create_app_from_env()'``."""
 
+    import sys
+
+    if sys.version_info[:2] != PRODUCTION_PYTHON:
+        raise RuntimeError(f"production runs on Python {PRODUCTION_PYTHON[0]}.{PRODUCTION_PYTHON[1]} only "
+                           f"(found {sys.version.split()[0]}); see DEPLOYMENT.md")
     config, web = AppConfig.from_env(), WebConfig.from_env()
-    auth = AuthStore(web.auth_database_path)
+    auth = open_auth_store(web)
     auth.initialize()
     store = BacktestStore(config.database_path)
     store.initialize()

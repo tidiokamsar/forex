@@ -131,6 +131,11 @@ The dashboard requires an account. Pages after sign-in: summary, runs, controls 
 | Lost password | `astra auth reset-password --username <name>` (temporary password shown once, expires after 72 h) |
 | End every session of an account | `astra auth revoke-sessions --username <name>` |
 | Housekeeping | `astra auth cleanup` (daily), `astra auth events --limit 200` (audit) |
+| MFA key ring status | `astra auth mfa-status`: key ids, keys still used, plaintext secrets left |
+| First AUTH-2 start on an existing database | Back up `auth.sqlite3`, run `astra auth mfa-key-init` (if no key ring), then `astra auth mfa-reencrypt`. Check `mfa-status` shows `plaintext_secrets: 0`. Until then, TOTP sign-in for the unmigrated accounts answers 503; recovery codes still work. |
+| Rotate the MFA key | `astra auth mfa-key-rotate` (new active key, re-encrypts every secret). Restart `astra-web` so it loads the new ring. Back up the new key ring, then `astra auth mfa-key-retire --kid <old>`, which is refused while a secret still uses that key. |
+| Lost or damaged key ring | Restore it from its separate backup. If it is lost for good, nothing can decrypt the TOTP secrets: run `astra auth reset-mfa` for every account (users re-enrol) after a fresh `mfa-key-init`. Recovery codes still let users in meanwhile. |
+| Renew the proxy secret | Write the new value as the first line of `/etc/astra/proxy.secret`, keep the old one as the second, restart `astra-web`, then update the proxy include and reload the proxy. Finally remove the old line and restart again. |
 
 ## Not implemented
 

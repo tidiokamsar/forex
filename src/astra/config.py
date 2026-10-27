@@ -92,6 +92,9 @@ class WebConfig:
 
     auth_database_path: Path = PROJECT_ROOT / "var" / "auth.sqlite3"
     secret_key_path: Path = PROJECT_ROOT / "var" / "web_secret.key"
+    # Key ring that encrypts the TOTP secrets (astra.auth.mfa_crypto). Keep it out of the database
+    # directory and of its backups: production uses /etc/astra/mfa.key (root:astra 0640).
+    mfa_key_path: Path = PROJECT_ROOT / "var" / "mfa.key"
     public_hosts: tuple[str, ...] = ()
     trusted_proxy: bool = False
     https: bool = False
@@ -118,6 +121,7 @@ class WebConfig:
         return cls(
             auth_database_path=Path(values.get("ASTRA_AUTH_DATABASE", str(PROJECT_ROOT / "var" / "auth.sqlite3"))),
             secret_key_path=Path(values.get("ASTRA_WEB_SECRET_FILE", str(PROJECT_ROOT / "var" / "web_secret.key"))),
+            mfa_key_path=Path(values.get("ASTRA_MFA_KEY_FILE", str(PROJECT_ROOT / "var" / "mfa.key"))),
             public_hosts=hosts,
             trusted_proxy=_flag(values.get("ASTRA_TRUSTED_PROXY", "")),
             proxy_secret_path=Path(values["ASTRA_PROXY_SECRET_FILE"]) if values.get("ASTRA_PROXY_SECRET_FILE") else None,
