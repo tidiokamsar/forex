@@ -2,7 +2,9 @@
 
 ASTRA is installed only on a host that has passed this qualification. A host is not considered clean because its visible services work.
 
-## A. The previously inspected server (102.211.199.132): not used
+## A. The previously inspected server (102.211.199.132): not used as it is
+
+Decision of 2026-10-27: the host is rebuilt (step 4 below), then qualified with section B. Only then does it receive ASTRA, under `https://astra.ageroute.gov.gn` (see [DEDICATED_SERVER_RUNBOOK.md](DEDICATED_SERVER_RUNBOOK.md)). The remediation is handled separately by the host's administrator.
 
 Findings from a read-only inspection on 2026-10-27; nothing was modified:
 - an intrusion on 2026-10-19 whose remediation is incomplete;
