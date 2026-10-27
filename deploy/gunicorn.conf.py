@@ -24,6 +24,8 @@ forwarder_headers = ""
 # Build the app once in the master: the CSRF key and the databases are created before workers fork
 # (no first-boot race between workers). Stores open one connection per operation, so forking is safe.
 preload_app = True
+# No runtime control socket (gunicornc): not needed, and the sandbox has no writable home for it.
+control_socket_disable = True
 # Access log to journald without cookies or query strings: method, path, status, size, duration.
 accesslog = "-"
 access_log_format = '%({x-forwarded-for}i)s "%(m)s %(U)s" %(s)s %(B)s %(M)sms'
