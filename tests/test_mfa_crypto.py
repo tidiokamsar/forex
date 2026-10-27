@@ -292,16 +292,27 @@ class ProxySecretRotationTests(MfaCase):
         path = Path(self.temp.name) / "proxy.secret"
         new, old = "n" * 40, PROXY_SECRET
         path.write_text(f"{new}\n{old}\n", encoding="ascii")
+        os.chmod(path, 0o640)  # as deployed (root:astra 0640); rewrites below keep this mode
         secrets = load_proxy_secret(path)
         app = create_app(self.config, self.web, auth=self.auth, secret_key=self.key, store=self.store, proxy_secret=secrets)
         for value, status in ((new, 200), (old, 200), ("x" * 40, 403), ("", 403)):
             client = self.client(app=app)
             self.assertEqual(client.get("/api/health", headers={"X-Astra-Proxy": value}).status_code, status, value[:4])
         path.write_text(f"{new}\n{old}\n{'z' * 40}\n", encoding="ascii")
-        with self.assertRaises(RuntimeError):
+        with self.assertRaisesRegex(RuntimeError, "one or two"):
             load_proxy_secret(path)  # at most two (current and previous)
         path.write_text("short\n", encoding="ascii")
-        with self.assertRaises(RuntimeError):
+        with self.assertRaisesRegex(RuntimeError, "one or two"):
+            load_proxy_secret(path)
+
+    @unittest.skipUnless(os.name == "posix", "file mode check is POSIX only")
+    def test_world_readable_proxy_secret_is_refused(self):
+        from astra.webapp import load_proxy_secret
+
+        path = Path(self.temp.name) / "proxy.secret"
+        path.write_text("n" * 40 + "\n", encoding="ascii")
+        os.chmod(path, 0o644)
+        with self.assertRaisesRegex(RuntimeError, "other users"):
             load_proxy_secret(path)
 
 
