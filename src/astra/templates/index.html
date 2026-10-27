@@ -1,30 +1,7 @@
-<!doctype html>
-<html lang="fr">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="description" content="Console locale de recherche quantitative ASTRA, en simulation.">
-    <title>ASTRA Forex Intelligence</title>
-    <link rel="stylesheet" href="/styles.css">
-    <script src="/app.js" defer></script>
-  </head>
-  <body>
-    <header class="topbar">
-      <div class="brand">
-        <span class="brand-mark" aria-hidden="true">A</span>
-        <div>
-          <p class="eyebrow">FOREX INTELLIGENCE</p>
-          <h1>ASTRA</h1>
-        </div>
-      </div>
-      <div class="mode-pill" aria-label="Mode actif : simulation">
-        <span class="mode-dot" aria-hidden="true"></span>
-        <span>SIMULATION</span>
-        <span class="lock-label">RÉEL VERROUILLÉ</span>
-      </div>
-    </header>
-
-    <main>
+{% extends "base.html" %}
+{% block title %}ASTRA Forex Intelligence{% endblock %}
+{% block head %}<script src="/static/app.js" defer></script>{% endblock %}
+{% block content %}
       <section class="intro" aria-labelledby="overview-title">
         <div>
           <p class="eyebrow">ESPACE DE RECHERCHE</p>
@@ -35,6 +12,7 @@
       </section>
 
       <section class="metric-grid" aria-label="Indicateurs du dernier backtest">
+        <p class="data-label" id="data-label" role="note">Données : <strong id="data-label-value">non chargées</strong> · aucune donnée de marché réelle n’est intégrée</p>
         <article class="metric-card"><span class="metric-label">Jeu de données</span><strong id="dataset-label">—</strong><small id="dataset-hash">Aucune exécution enregistrée</small></article>
         <article class="metric-card"><span class="metric-label">Observations</span><strong id="observations">—</strong><small>Barres acceptées par le contrôle qualité</small></article>
         <article class="metric-card"><span class="metric-label">Résultat net simulé</span><strong id="net-pnl">—</strong><small id="trade-count">Aucun trade simulé</small></article>
@@ -66,10 +44,10 @@
           <ul class="guard-list">
             <li><span class="check">✓</span><span><strong>Mode SIMULATION</strong><small>Aucune commande envoyée à un courtier</small></span></li>
             <li><span class="check">✓</span><span><strong>Risque indépendant</strong><small>Les signaux ne peuvent pas envoyer d’ordres</small></span></li>
-            <li><span class="check">✓</span><span><strong>Interface en lecture seule</strong><small>API locale, méthodes de modification désactivées</small></span></li>
+            <li><span class="check">✓</span><span><strong>Interface en lecture seule pour le trading</strong><small>Aucune route web ne modifie l’état d’exécution</small></span></li>
             <li><span class="lock">▣</span><span><strong>Mode RÉEL verrouillé</strong><small>Seul le courtier simulé interne peut exécuter des ordres ; le connecteur démo cTrader sert uniquement au contrôle en lecture seule</small></span></li>
           </ul>
-          <p class="footnote">Cette console est locale et n’inclut ni authentification ni TLS. Ne l’exposez pas sur un réseau.</p>
+          <p class="footnote">Accès authentifié côté serveur (session, rôle). Les rôles web ne donnent aucune permission d’exécution : le tableau de bord ne peut ni envoyer d’ordre, ni lever l’arrêt d’urgence, ni changer de mode.</p>
         </article>
       </section>
 
@@ -109,7 +87,4 @@
         </div>
       </section>
       <p class="disclaimer">Les chiffres d’exemple proviennent d’une simulation avec hypothèses documentées. Ils ne constituent ni un conseil financier, ni une garantie de performance.</p>
-    </main>
-    <footer><span>ASTRA Forex Intelligence · version 0.2.0</span><span>Recherche et simulation uniquement</span></footer>
-  </body>
-</html>
+    {% endblock %}

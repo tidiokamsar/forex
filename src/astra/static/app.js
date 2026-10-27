@@ -13,22 +13,37 @@ function formatDate(value) {
   return value ? new Date(value).toLocaleString("fr-FR", { timeZone: "UTC" }) : "—";
 }
 
+function requireSession(response) {
+  // The server is the security barrier; this only sends an expired session back to the login page.
+  if (response.status === 401) {
+    window.location.assign("/login");
+    throw new Error("session expirée");
+  }
+  return response;
+}
+
+const DATA_LABELS = {
+  SYNTHETIC: "SYNTHÉTIQUE", SIMULATED: "SIMULATION", HISTORICAL: "HISTORIQUE (déclarée)",
+  DELAYED: "DIFFÉRÉE (déclarée)", LIVE: "EN DIRECT (déclarée, non vérifiée)",
+};
+
 async function loadDashboard() {
   const state = document.getElementById("service-state");
   try {
-    const [healthResponse, summaryResponse, runsResponse] = await Promise.all([
-      fetch("/api/health", { cache: "no-store" }),
+    const [healthResponse, summaryResponse, runsResponse] = (await Promise.all([
+      fetch("/api/status", { cache: "no-store" }),
       fetch("/api/summary", { cache: "no-store" }),
       fetch("/api/runs", { cache: "no-store" }),
-    ]);
+    ])).map(requireSession);
     if (![healthResponse, summaryResponse, runsResponse].every((response) => response.ok)) {
       throw new Error("API indisponible");
     }
     const [health, summary, runsPayload] = await Promise.all([
       healthResponse.json(), summaryResponse.json(), runsResponse.json(),
     ]);
-    state.textContent = health.status === "ok" ? "● SERVICE LOCAL DISPONIBLE" : "SERVICE DÉGRADÉ";
+    state.textContent = health.status === "ok" ? "● SERVICE DISPONIBLE" : "SERVICE DÉGRADÉ";
     const latest = summary.latest_run;
+    setText("data-label-value", latest ? (DATA_LABELS[latest.source_type] || "INCONNUE") : "aucune exécution · SIMULATION");
     if (latest) {
       setText("dataset-label", `${latest.source_type} (déclarée) · ${latest.source_name}`);
       setText("dataset-hash", `Origine fournisseur non vérifiée · SHA-256 ${shortHash(latest.dataset_sha256)}`);
@@ -60,7 +75,7 @@ async function loadDashboard() {
       }));
     }
   } catch (_error) {
-    state.textContent = "API LOCALE INDISPONIBLE";
+    state.textContent = "API INDISPONIBLE";
     state.classList.add("is-error");
   }
 }
@@ -72,7 +87,8 @@ function cell(value) {
 }
 
 async function getJson(route) {
-  const response = await fetch(route, { cache: "no-store" });
+  const response = requireSession(await fetch(route, { cache: "no-store" }));
+  if (response.status === 403) throw new Error("forbidden");
   if (!response.ok) throw new Error(route);
   return response.json();
 }
@@ -118,8 +134,8 @@ async function loadOperations() {
         return item;
       }));
     }
-  } catch (_error) {
-    setText("entries-state", "INDISPONIBLE");
+  } catch (error) {
+    setText("entries-state", error.message === "forbidden" ? "RÉSERVÉ AU RÔLE OPERATOR" : "INDISPONIBLE");
   }
 }
 

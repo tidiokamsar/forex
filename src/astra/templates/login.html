@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Connexion · ASTRA{% endblock %}
+{% block content %}
+<section class="panel auth-panel" aria-labelledby="login-title">
+  <p class="eyebrow">ACCÈS RÉSERVÉ</p>
+  <h2 id="login-title">Connexion</h2>
+  {% if message %}<p class="form-message" role="alert">{{ message }}</p>{% endif %}
+  <form method="post" action="/login" class="auth-form" autocomplete="on">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label for="username">Identifiant</label>
+    <input id="username" name="username" type="text" autocomplete="username" required maxlength="64" autofocus>
+    <label for="password">Mot de passe</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required maxlength="256">
+    <button type="submit">Se connecter</button>
+  </form>
+  <p class="footnote">Aucune inscription publique. Les comptes sont créés par un administrateur.</p>
+</section>
+{% endblock %}

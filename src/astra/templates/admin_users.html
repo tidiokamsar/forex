@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Comptes · ASTRA{% endblock %}
+{% block content %}
+<section class="panel table-panel" aria-labelledby="users-title">
+  <div class="panel-heading"><div><p class="eyebrow">ADMINISTRATION</p><h2 id="users-title">Comptes</h2></div></div>
+  {% if message %}<p class="form-message" role="alert">{{ message }}</p>{% endif %}
+  <p class="footnote">Chaque action exige votre mot de passe. Les rôles web ne donnent aucune permission d'exécution de trading.</p>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th scope="col">Compte</th><th scope="col">Rôle</th><th scope="col">État</th><th scope="col">MFA</th><th scope="col">Actions</th></tr></thead>
+      <tbody>
+      {% for user in users %}
+        <tr>
+          <td>{{ user.username }}{% if user.username == me %} (vous){% endif %}</td>
+          <td>{{ user.role.value }}</td>
+          <td>{% if user.active %}actif{% else %}désactivé{% endif %}{% if user.must_change_password %} · changement requis{% endif %}</td>
+          <td>{% if user.mfa_enabled %}activée{% else %}non{% endif %}</td>
+          <td>
+            {% for action, text in [("disable" if user.active else "enable", "Désactiver" if user.active else "Réactiver"), ("revoke-sessions", "Révoquer les sessions"), ("reset-password", "Réinitialiser le mot de passe"), ("reset-mfa", "Réinitialiser la MFA")] %}
+            <form method="post" action="/admin/users/{{ user.username }}/{{ action }}" class="admin-form">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="password" name="admin_password" placeholder="Votre mot de passe" autocomplete="current-password" required maxlength="256">
+              <button type="submit">{{ text }}</button>
+            </form>
+            {% endfor %}
+            <form method="post" action="/admin/users/{{ user.username }}/role" class="admin-form">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <select name="role">{% for r in roles %}<option value="{{ r }}"{% if r == user.role.value %} selected{% endif %}>{{ r }}</option>{% endfor %}</select>
+              <input type="password" name="admin_password" placeholder="Votre mot de passe" autocomplete="current-password" required maxlength="256">
+              <button type="submit">Changer le rôle</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+<section class="panel auth-panel" aria-labelledby="new-user-title">
+  <h2 id="new-user-title">Créer un compte</h2>
+  <form method="post" action="/admin/users" class="auth-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label for="new-username">Identifiant</label>
+    <input id="new-username" name="username" type="text" required maxlength="64">
+    <label for="new-role">Rôle</label>
+    <select id="new-role" name="role">{% for r in roles %}<option value="{{ r }}">{{ r }}</option>{% endfor %}</select>
+    <label for="admin-password">Votre mot de passe</label>
+    <input id="admin-password" name="admin_password" type="password" autocomplete="current-password" required maxlength="256">
+    <button type="submit">Créer (mot de passe initial affiché une fois)</button>
+  </form>
+</section>
+{% endblock %}

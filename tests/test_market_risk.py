@@ -813,7 +813,8 @@ class NoOrderPathTests(unittest.TestCase):
         "astra.permits",
         "astra.service",
         "astra.engine",
-        "astra.web",
+        "astra.web",  # also matches astra.webapp (prefix match)
+        "astra.auth",
         "astra.cli",
         "astra.brokers.ctrader",
         "astra.brokers.simulated",

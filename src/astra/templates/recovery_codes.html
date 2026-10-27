@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Codes de récupération · ASTRA{% endblock %}
+{% block content %}
+<section class="panel auth-panel" aria-labelledby="codes-title">
+  <p class="eyebrow">AFFICHÉS UNE SEULE FOIS</p>
+  <h2 id="codes-title">Codes de récupération</h2>
+  <p>Conservez ces codes hors ligne. Chacun remplace une seule fois le code de l'application si vous la perdez. Ils ne seront plus jamais affichés.</p>
+  <ul class="code-list">{% for code in codes %}<li><code>{{ code }}</code></li>{% endfor %}</ul>
+  <a class="button" href="{{ next_url }}">J'ai conservé les codes, continuer</a>
+</section>
+{% endblock %}

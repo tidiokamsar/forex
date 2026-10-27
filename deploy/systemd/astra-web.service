@@ -1,0 +1,50 @@
+# ASTRA authenticated dashboard (read-only for trading). Starting it never starts a trading engine.
+# Install: see DEPLOYMENT.md, "Remote dashboard". Paths assume /opt/astra (code, venv) and /var/lib/astra (data).
+[Unit]
+Description=ASTRA dashboard (authenticated, SIMULATION only)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=astra
+Group=astra
+WorkingDirectory=/opt/astra/app
+EnvironmentFile=/etc/astra/web.env
+Environment=PYTHONPATH=/opt/astra/app/src
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/astra/venv/bin/gunicorn -c /opt/astra/app/deploy/gunicorn.conf.py "astra.webapp:create_app_from_env()"
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+# Sandboxing: no privilege, read-only system, writable data directory only, loopback network only.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/astra
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+[Install]
+WantedBy=multi-user.target

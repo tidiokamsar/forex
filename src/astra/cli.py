@@ -30,7 +30,6 @@ from .validation import (
     evaluate_holdout_once,
     evaluate_walk_forward,
 )
-from .web import serve
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SOURCE_TYPES = ("HISTORICAL", "DELAYED", "LIVE", "SIMULATED", "SYNTHETIC")
@@ -45,7 +44,29 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("status", help="Afficher le mode et les capacités locales")
     commands.add_parser("demo", help="Backtester le jeu synthétique inclus")
-    commands.add_parser("serve", help="Démarrer le tableau de bord local en lecture seule")
+    commands.add_parser("serve", help="Démarrer le tableau de bord authentifié (boucle locale, développement)")
+    auth_cmd = commands.add_parser("auth", help="Comptes du tableau de bord (à exécuter localement sur le serveur)")
+    auth_actions = auth_cmd.add_subparsers(dest="auth_action", required=True)
+    init_admin = auth_actions.add_parser("init-admin", help="Créer le premier administrateur (refusé si un compte existe)")
+    init_admin.add_argument("--username", required=True)
+    init_admin.add_argument("--generate", action="store_true",
+                            help="Générer le mot de passe (affiché une fois, à changer à la connexion) au lieu de le saisir")
+    add_user = auth_actions.add_parser("add-user", help="Créer un compte (mot de passe initial généré, affiché une fois)")
+    add_user.add_argument("--username", required=True)
+    add_user.add_argument("--role", required=True, choices=("READ_ONLY", "OPERATOR", "ADMIN"))
+    for name, text in (("disable", "Désactiver un compte et révoquer ses sessions"), ("enable", "Réactiver un compte"),
+                       ("revoke-sessions", "Révoquer toutes les sessions d'un compte"),
+                       ("reset-mfa", "Récupération : supprimer la MFA (réenrôlement à la connexion)"),
+                       ("reset-password", "Récupération : mot de passe temporaire affiché une fois")):
+        sub = auth_actions.add_parser(name, help=text)
+        sub.add_argument("--username", required=True)
+    set_role = auth_actions.add_parser("set-role", help="Changer le rôle web d'un compte (révoque ses sessions)")
+    set_role.add_argument("--username", required=True)
+    set_role.add_argument("--role", required=True, choices=("READ_ONLY", "OPERATOR", "ADMIN"))
+    auth_actions.add_parser("list", help="Lister les comptes")
+    auth_actions.add_parser("cleanup", help="Supprimer les sessions expirées ou révoquées depuis plus d'un jour")
+    events = auth_actions.add_parser("events", help="Journal d'audit de l'authentification")
+    events.add_argument("--limit", type=int, default=100)
     replay = commands.add_parser(
         "paper-replay",
         help="Rejouer des barres via Order Gateway et courtier simulé (aucun ordre externe)",
@@ -241,12 +262,16 @@ def _run(args: argparse.Namespace) -> int:
             return 0
 
         if args.command == "serve":
-            store = BacktestStore(config.database_path)
-            store.initialize()
-            ExecutionStore(config.database_path).initialize()
-            ModelRegistry(config.database_path).initialize()
-            serve(config, store)
+            from .config import WebConfig
+            from .webapp import serve_local
+
+            serve_local(config, WebConfig.from_env())
             return 0
+
+        if args.command == "auth":
+            from .auth.admin_cli import run as run_auth
+
+            return run_auth(args)
 
         if args.command == "ctrader-check":
             _write_json(ctrader_check(args.operator, config))
@@ -486,6 +511,9 @@ def _run(args: argparse.Namespace) -> int:
     except (BrokerUnavailable, BrokerTimeout, BrokerRequestError) as exc:
         _write_json({"status": "connector_error", "reason": str(exc), "external_orders": False}, sys.stderr)
         return 4
+    except ModuleNotFoundError as exc:
+        _write_json({"status": "error", "reason": f"{exc}; install requirements/web.txt for serve and auth"}, sys.stderr)
+        return 1
     except (OSError, ValueError) as exc:
         _write_json({"status": "error", "reason": str(exc)}, sys.stderr)
         return 1

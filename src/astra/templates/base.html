@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex, nofollow">
+    {% if csrf_token %}<meta name="csrf-token" content="{{ csrf_token }}">{% endif %}
+    <title>{% block title %}ASTRA Forex Intelligence{% endblock %}</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    {% block head %}{% endblock %}
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">A</span>
+        <div>
+          <p class="eyebrow">FOREX INTELLIGENCE</p>
+          <h1>ASTRA</h1>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <div class="mode-pill" aria-label="Mode actif : simulation">
+          <span class="mode-dot" aria-hidden="true"></span>
+          <span>SIMULATION</span>
+          <span class="lock-label">RÉEL VERROUILLÉ</span>
+        </div>
+        {% if username %}
+        <nav class="user-nav" aria-label="Compte">
+          <span class="user-badge">{{ username }} · {{ role }}</span>
+          <a href="/">Tableau de bord</a>
+          <a href="/account/password">Mot de passe</a>
+          {% if role == "ADMIN" %}<a href="/admin/users">Comptes</a>{% endif %}
+          <form method="post" action="/logout" class="inline-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit">Se déconnecter</button>
+          </form>
+        </nav>
+        {% endif %}
+      </div>
+    </header>
+    <main>{% block content %}{% endblock %}</main>
+    <footer><span>ASTRA Forex Intelligence · version 0.2.0</span><span>Recherche et simulation uniquement · aucun ordre réel</span></footer>
+  </body>
+</html>

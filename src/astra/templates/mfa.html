@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Vérification · ASTRA{% endblock %}
+{% block content %}
+<section class="panel auth-panel" aria-labelledby="mfa-title">
+  <p class="eyebrow">DEUXIÈME FACTEUR</p>
+  <h2 id="mfa-title">Code de vérification</h2>
+  {% if message %}<p class="form-message" role="alert">{{ message }}</p>{% endif %}
+  <form method="post" action="/login/mfa" class="auth-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label for="code">Code à 6 chiffres de l'application, ou code de récupération</label>
+    <input id="code" name="code" type="text" autocomplete="one-time-code" required maxlength="32" autofocus>
+    <button type="submit">Vérifier</button>
+  </form>
+  <form method="post" action="/logout" class="inline-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit" class="link-button">Annuler</button>
+  </form>
+</section>
+{% endblock %}

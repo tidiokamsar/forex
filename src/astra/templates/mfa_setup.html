@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Activer la MFA · ASTRA{% endblock %}
+{% block content %}
+<section class="panel auth-panel" aria-labelledby="enroll-title">
+  <p class="eyebrow">MFA OBLIGATOIRE POUR CE RÔLE</p>
+  <h2 id="enroll-title">Activer l'authentification à deux facteurs</h2>
+  {% if message %}<p class="form-message" role="alert">{{ message }}</p>{% endif %}
+  <ol class="steps">
+    <li>Dans une application d'authentification (TOTP), ajoutez un compte avec cette clé :
+      <code class="secret">{{ secret }}</code></li>
+    <li>Ou importez cette adresse : <code class="secret">{{ uri }}</code></li>
+    <li>Saisissez le code à 6 chiffres affiché pour confirmer.</li>
+  </ol>
+  <form method="post" action="/mfa/setup" class="auth-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label for="code">Code à 6 chiffres</label>
+    <input id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" required maxlength="8" autofocus>
+    <button type="submit">Activer</button>
+  </form>
+</section>
+{% endblock %}
