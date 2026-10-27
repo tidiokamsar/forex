@@ -1,0 +1,4 @@
+# Ruff for CI, pinned by version and wheel hash (installed with pip --require-hashes).
+# Linux x86_64 wheel for GitHub-hosted ubuntu runners; matches the local version used for the lots.
+ruff==0.16.1 \
+    --hash=sha256:39897739f112253ee4fdd2e8aa9a4f9ded99fb2be367d5f31dfa4ded6025584c

@@ -1,0 +1,207 @@
+# ASTRA continuous integration (Gate B).
+#
+# Runs the checks validated in the lots: Ruff, compileall, JavaScript syntax, secret scan (tree and
+# history), the targeted multi-venue tests and the full unittest suite. It builds and tests only;
+# it never deploys, never contacts a broker or exchange, uses no secret and has no write permission.
+# See docs/CI.md.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: ["**"]
+  # Manual runs. GitHub only offers this once the workflow file is on the default branch.
+  workflow_dispatch:
+
+# Least privilege: read the code, nothing else. Jobs that need more ask for it explicitly.
+permissions:
+  contents: read
+
+# One run per PR or branch at a time; a newer push cancels the older run of the same ref.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.14"
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONUNBUFFERED: "1"
+  # Documented Lot 4 residuals (reports/LOT_04_REPORT.md); changing it is a reviewed change.
+  EXPECTED_FAILURES: "15"
+  EXPECTED_FAILURE_MODULES: "test_lot4_"
+
+jobs:
+  quality:
+    name: quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out the analysed commit (full history for the secret scan)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Ruff (pinned version and hash)
+        run: python -m pip install --disable-pip-version-check --no-deps --require-hashes -r tools/ci/requirements-ruff.txt
+
+      - name: Record the run context
+        shell: bash
+        run: |
+          {
+            echo "## Run context"
+            echo "| Item | Value |"
+            echo "|---|---|"
+            echo "| Commit analysed | \`$(git rev-parse HEAD)\` |"
+            echo "| Event / ref | ${GITHUB_EVENT_NAME} / ${GITHUB_REF} |"
+            echo "| Workflow | \`${GITHUB_WORKFLOW_REF}\` at \`${GITHUB_WORKFLOW_SHA}\` |"
+            echo "| Runner | ${RUNNER_OS} ${ImageOS:-} ${ImageVersion:-} |"
+            echo "| Python | $(python --version 2>&1) |"
+            echo "| Ruff | $(python -m ruff --version) |"
+            echo "| Node | $(node --version) |"
+            echo "| Git | $(git --version) |"
+            echo ""
+            echo "## Checks"
+            echo "| Command | Exit code |"
+            echo "|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Ruff
+        shell: bash
+        run: |
+          set +e
+          python -m ruff check src tests tools
+          rc=$?
+          echo "| \`python -m ruff check src tests tools\` | $rc |" >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
+      - name: Compile all Python files
+        shell: bash
+        run: |
+          set +e
+          python -m compileall -q src tests tools
+          rc=$?
+          echo "| \`python -m compileall -q src tests tools\` | $rc |" >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
+      - name: JavaScript syntax
+        shell: bash
+        run: |
+          set +e
+          node --check src/astra/static/app.js
+          rc=$?
+          echo "| \`node --check src/astra/static/app.js\` | $rc |" >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
+      - name: Secret scan (tracked tree and history)
+        shell: bash
+        run: |
+          set +e
+          python tools/ci/secret_scan.py
+          rc=$?
+          echo "| \`python tools/ci/secret_scan.py\` | $rc |" >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
+      - name: Targeted multi-venue tests
+        shell: bash
+        working-directory: tests
+        env:
+          PYTHONPATH: ../src
+        run: |
+          set +e
+          python -m unittest test_multi_venue_security_review test_multi_venue_verification test_market_risk \
+            test_binance_spot test_venue_registry test_venues_contract test_markets
+          rc=$?
+          echo "| targeted multi-venue tests (7 modules) | $rc |" >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
+  # Skip the long suite on a branch push when an open pull request to main already runs it.
+  plan:
+    name: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      full_suite: ${{ steps.decide.outputs.full_suite }}
+    steps:
+      - name: Decide whether this run executes the full suite
+        id: decide
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          full=true
+          if [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            open=$(gh pr list --head "$BRANCH" --base main --state open --json number --jq 'length')
+            if [ "$open" != "0" ]; then
+              full=false
+              echo "An open pull request to main runs the full suite for this branch; skipped here." >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+          echo "full_suite=$full" >> "$GITHUB_OUTPUT"
+
+  full-suite:
+    name: full-suite
+    needs: [quality, plan]
+    if: needs.plan.outputs.full_suite == 'true'
+    runs-on: ubuntu-24.04
+    # The suite took about 23 to 35 minutes locally; the margin covers a slower runner, not a hang.
+    timeout-minutes: 75
+    steps:
+      - name: Check out the analysed commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Full unittest suite
+        shell: bash
+        working-directory: tests
+        env:
+          PYTHONPATH: ../src
+        run: |
+          set +e
+          echo "Commit $(git rev-parse HEAD), $(python --version 2>&1)"
+          python -m unittest discover -s . -v 2>&1 | tee ../full_suite.log
+          rc=${PIPESTATUS[0]}
+          {
+            echo "## Full suite"
+            echo "| Command | Exit code |"
+            echo "|---|---|"
+            echo "| \`python -m unittest discover -s . -v\` (in tests/, PYTHONPATH=../src) | $rc |"
+            echo ""
+            echo '```'
+            tail -n 3 ../full_suite.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
+      - name: Check expected failures against the documented residuals
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          python tools/ci/check_unittest_log.py full_suite.log \
+            --expected-failures "$EXPECTED_FAILURES" --expected-modules "$EXPECTED_FAILURE_MODULES" | tee check.txt
+          rc=${PIPESTATUS[0]}
+          {
+            echo "| \`check_unittest_log.py\` (exactly $EXPECTED_FAILURES expected failures, all in ${EXPECTED_FAILURE_MODULES}*) | $rc |"
+            echo '```'
+            cat check.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc

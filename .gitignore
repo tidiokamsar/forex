@@ -22,3 +22,13 @@ logs/
 
 # Agent worktrees and local tool state
 .claude/
+
+# Gate B hardening: other key, credential, database and log formats.
+*.pfx
+*.sqlite
+*.jsonl
+*.log
+id_rsa*
+id_ed25519*
+.netrc
+credentials*.json
