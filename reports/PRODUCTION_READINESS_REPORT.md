@@ -114,7 +114,7 @@ Ces gates ne nécessitent ni compte, ni secret, ni réseau financier. Le passage
 | Gate | Branche | Statut | Rapport |
 |---|---|---|---|
 | Gate B (CI et protection) | `feat/multi-venue` | Configurée et revue ; CI jamais exécutée (verrou de facturation) | `reports/GATE_B_REPORT.md` |
-| Gate Auth & Deployment (directive reçue le 27/10/2026) | `feat/auth-deploy` | en cours | `reports/AUTH_AND_DEPLOYMENT_REPORT.md` |
+| Gate Auth & Deployment (directive reçue le 27/10/2026) | `feat/auth-deploy` | Authentification, sessions, MFA, rôles et configurations de déploiement faits, testés hors ligne (994 tests) et revus (aucun constat critique, élevé ou moyen ouvert) ; publication bloquée (hôte non qualifié, pas de DNS, pas de sudo) | `reports/AUTH_AND_DEPLOYMENT_REPORT.md` |
 | P1 à P7 | à créer depuis `feat/multi-venue` | non commencées | à venir |
 
 Aucun ordre réel ou démo n'a été envoyé, aucun fonds n'a été transféré, aucun mode live n'a été activé. Aucune rentabilité n'est revendiquée.

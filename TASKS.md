@@ -107,7 +107,7 @@ Offline and research only; no venue contacted by code, no account, no key, no or
 
 | ID | Scope | Status | Evidence |
 |---|---|---|---|
-| AUTH-CORE | Accounts, Argon2id, server-side sessions, TOTP MFA, recovery codes, device-cookie throttling, append-only audit | DONE (offline tests); independent review found 2 medium, fixed | `src/astra/auth/`, `tests/test_webapp.py` |
+| AUTH-CORE | Accounts, Argon2id, server-side sessions, TOTP MFA, recovery codes, device-cookie throttling, proxy secret, append-only audit | DONE (offline tests, 61 web tests, 994 in the full suite on d738460); four independent review rounds, no critical/high/medium open | `src/astra/auth/`, `tests/test_webapp.py` |
 | AUTH-WEB | Flask app replacing the stdlib server: Host/Origin/CSRF, roles per route, headers, no trading mutation | DONE (offline tests) | `src/astra/webapp.py` |
 | AUTH-DEPLOY | gunicorn, hardened systemd, alert and certificate-check units, nginx and Apache examples, nftables loopback rule | Written and reviewed; NOT installed anywhere | `deploy/`, DEPLOYMENT.md |
 | AUTH-HOST | Deployment on 102.211.199.132 | BLOCKED: read-only inspection only (user decision); no sudo without password; Python 3.12 only; 80/443 and the IP belong to GLPI; partially remediated intrusion | `reports/AUTH_AND_DEPLOYMENT_REPORT.md` |
