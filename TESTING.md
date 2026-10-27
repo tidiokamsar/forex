@@ -16,7 +16,7 @@ The suite is standard-library `unittest`; there are no test dependencies. Ruff i
 
 ## Continuous integration
 
-The same checks run in GitHub Actions (`.github/workflows/ci.yml`): Ruff, compileall, `node --check`, the secret scan, the targeted multi-venue tests and the full suite, followed by a strict check of the expected failures. [docs/CI.md](docs/CI.md) lists the triggers, the required checks and the exact commands to reproduce a run locally. A CI run is offline like the local suite: it is not evidence about any broker, exchange or market.
+The same checks are defined to run in GitHub Actions (`.github/workflows/ci.yml`); as of Gate B no CI run has executed, because GitHub refuses to start jobs while the account is locked for a billing issue. The checks are: Ruff, compileall, `node --check`, the secret scan, the targeted multi-venue tests and the full suite, followed by a strict check of the expected failures. [docs/CI.md](docs/CI.md) lists the triggers, the required checks and the exact commands to reproduce a run locally. A CI run is offline like the local suite: it is not evidence about any broker, exchange or market.
 
 ## Evidence boundary
 

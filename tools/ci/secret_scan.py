@@ -39,10 +39,11 @@ ASSIGNMENT = re.compile(
     re.I,
 )
 # The same name with an unquoted value alone on a configuration line (YAML, INI, .env): `api_key: abc...`.
-# The value must be a bare token up to the end of the line, so code such as `token = make(x)` is not a hit.
+# The value must be a bare token up to the end of the line holding at least one digit and no attribute access,
+# so code such as `token = make(x)` or `secret = self.settings_value` is not a hit.
 CONFIG_ASSIGNMENT = re.compile(
     r"^\s*[\w.-]*(api[_-]?key|api[_-]?secret|secret|token|password|passwd|client_secret|access_token)\s*[=:]\s*"
-    r"([A-Za-z0-9+/=_~.-]{16,})\s*$",
+    r"(?![\w-]*\.[A-Za-z_])(?=\S*\d)([A-Za-z0-9+/=_~.-]{16,})\s*$",
     re.I,
 )
 # Credentials embedded in a URL: scheme, user, colon, a password of 6+ characters, an at sign.
@@ -122,16 +123,24 @@ def scan_tree(repo: str) -> list[str]:
 def scan_history(repo: str) -> list[str]:
     hits = []
     commit = path = ""
-    # --diff-merges=first-parent also shows lines introduced while resolving a merge.
-    log = git(repo, "log", "-p", "--no-color", "--no-ext-diff", "--diff-merges=first-parent", "--format=commit %H", "HEAD")
+    in_hunk = False
+    # --diff-merges=first-parent also shows lines introduced while resolving a merge; --no-renames shows a
+    # rename as a deletion plus an addition, so a file renamed into a forbidden name is seen as added.
+    log = git(repo, "log", "-p", "--no-color", "--no-ext-diff", "--no-renames", "--diff-merges=first-parent",
+              "--format=commit %H", "HEAD")
     for text in log.splitlines():
         if text.startswith("commit "):
-            commit = text[7:19]
-        elif text.startswith("+++ b/"):
-            path = text[6:]
-            if FORBIDDEN_PATH.search(path) and path not in ALLOWED_PATHS:
+            commit, in_hunk = text[7:19], False
+        elif text.startswith("diff --git "):
+            in_hunk = False
+        elif not in_hunk and text.startswith("+++ "):
+            # git appends a TAB to a path that contains a space.
+            path = text[6:].rstrip("	") if text.startswith("+++ b/") else ""
+            if path and FORBIDDEN_PATH.search(path) and path not in ALLOWED_PATHS:
                 hits.append(f"{commit} added sensitive file: {path}")
-        elif text.startswith("+") and not text.startswith("+++"):
+        elif text.startswith("@@"):
+            in_hunk = True
+        elif in_hunk and text.startswith("+"):
             hits.extend(f"{commit} {path}: {hit}" for hit in line_hits(text[1:]))
     return sorted(set(hits))
 

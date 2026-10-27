@@ -10,7 +10,7 @@ The workflow is [.github/workflows/ci.yml](../.github/workflows/ci.yml). It buil
 | Push to any branch | `quality (push)`, then `full-suite (push)` unless an open pull request to `main` already runs the suite for that branch (job `plan`) | Avoids running the 23 to 35 minute suite twice for the same commits. |
 | Manual (`workflow_dispatch`) | `quality (workflow_dispatch)`, `full-suite (workflow_dispatch)` | GitHub offers it only once the workflow file is on the default branch (`main`). |
 
-Only pull request runs report the required names `quality` and `full-suite`. A push run reports `... (push)`, so a push run, including a `full-suite (push)` skipped by `plan`, can never satisfy a required check (GitHub counts a skipped job as passing).
+Only pull request runs report the required names `quality` and `full-suite`. A push run reports `quality (push)` / `full-suite (push)`, and a job skipped before it starts (a failed `needs`, or `plan` deciding to skip) is listed under the unevaluated name expression, so neither can ever satisfy a required check (GitHub counts a skipped job as passing). In a pull request, a `full-suite` skipped because `quality` failed therefore leaves the required `full-suite` pending: the merge stays blocked.
 
 A newer push cancels the older run of the same branch or pull request (`concurrency`).
 
@@ -20,7 +20,7 @@ A newer push cancels the older run of the same branch or pull request (`concurre
 1. `python -m ruff check src tests tools` (Ruff 0.16.1, pinned by hash in `tools/ci/requirements-ruff.txt`).
 2. `python -m compileall -q src tests tools`.
 3. `node --check src/astra/static/app.js` (the dashboard script).
-4. `python tools/ci/secret_scan.py`: every tracked file, plus every line added in the history of the analysed commit. It fails on private keys, known token formats (AWS, GitHub, Slack, Google, JWT), credential-like literals, credentials in URLs, tracked key/database/log/env files, and a `.env.example` secret with a value. Environment-variable names and obviously fake fixtures are not hits. Values are never printed in full.
+4. `python tools/ci/secret_scan.py`: every tracked file, plus every line added in the history of the analysed commit. It fails on private key blocks (including PGP), known token formats (AWS, GitHub, Slack, Google, JWT, `sk-`/`sk-ant-`, Stripe `sk_live_`/`rk_live_`, Bearer), credential-like literals (quoted, or unquoted alone on a configuration line), credentials in URLs, tracked key/database/log/env files, and a `.env.example` secret with a value. Environment-variable names (upper case with an underscore) and obviously fake fixtures are not hits. The history scan also covers merge resolutions and renames, and stops with exit 2 on a shallow clone. Values are never printed in full.
 5. Targeted multi-venue tests: `test_multi_venue_security_review`, `test_multi_venue_verification`, `test_market_risk`, `test_binance_spot`, `test_venue_registry`, `test_venues_contract`, `test_markets`.
 
 `full-suite` (timeout 75 min, `PYTHON_COLORS=0` so the log has no colour codes):
