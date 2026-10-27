@@ -49,5 +49,5 @@ Backups: `python -m astra backup create` writes verified copies to `ASTRA_BACKUP
 ## Not provided
 
 - External supervision is **not provided or tested**: nothing restarts the service after a crash or starts it at boot, and no alert is sent when the heartbeat goes stale. Next step: choose and test a supervisor (for example Windows Task Scheduler or NSSM on Windows, systemd on Linux) and scheduled backups, then document the tested configuration here.
-- No service-manager unit, container image, hosting, authentication, TLS, encrypted backup or continuous integration pipeline exists in this repository; verification is run by hand (see [TESTING.md](TESTING.md)).
+- No service-manager unit, container image, hosting, authentication, TLS or encrypted backup exists in this repository. A continuous integration workflow (build and tests only, no deployment) is defined in `.github/workflows/ci.yml` (Gate B, see [docs/CI.md](docs/CI.md)); verification can also be run by hand (see [TESTING.md](TESTING.md)).
 - No frontend/backend split: the dashboard and the research and service code share one local process model. V5 section 5.13 (separate persistent service, secured web access) and gate H are not started.

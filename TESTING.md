@@ -14,6 +14,10 @@ python -m ruff check src tests
 
 The suite is standard-library `unittest`; there are no test dependencies. Ruff is a separately installed development tool configured in `pyproject.toml`; it is not a runtime or test dependency. It should cover configuration fail-closed behavior, data provenance/quality, signal timing, transaction costs, risk denials, persistence, and read-only API behavior.
 
+## Continuous integration
+
+The same checks run in GitHub Actions (`.github/workflows/ci.yml`): Ruff, compileall, `node --check`, the secret scan, the targeted multi-venue tests and the full suite, followed by a strict check of the expected failures. [docs/CI.md](docs/CI.md) lists the triggers, the required checks and the exact commands to reproduce a run locally. A CI run is offline like the local suite: it is not evidence about any broker, exchange or market.
+
 ## Evidence boundary
 
 Passing local tests prove only the functions exercised with local code and fixtures. Synthetic data is not market evidence. Execution tests run against the in-process `SimulatedBroker` with scripted faults: timeouts before and after acceptance, rejection, partial fills, disconnects, reversed event delivery, injected external positions and false environment reports. The cTrader adapter is tested against a scripted fake cTrader server (`tests/ctrader_fixture.py`, labelled as not recorded provider traffic) and the WebSocket client against a loopback WebSocket server; both are local and offline, and no test reaches the real cTrader service. The foundations tests are also local: `test_logs` (in-memory streams and a temporary log folder), `test_backup` (temporary SQLite files and the simulator), `test_ctrader_resilience` (the same fake cTrader server with scripted one-shot errors, injected sleep and clock) and `test_service` (simulator with the `SYNTHETIC` quote feed). There is no broker connection, external account test, demo execution, production database, deployment, supervised long-running service, performance claim, or restore drill against a real broker in this delivery. The dashboard was viewed once in a desktop browser pane; no device testing was done.

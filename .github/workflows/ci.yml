@@ -27,13 +27,18 @@ env:
   PYTHON_VERSION: "3.14"
   PYTHONDONTWRITEBYTECODE: "1"
   PYTHONUNBUFFERED: "1"
+  # Plain unittest output, so the log check never sees colour codes.
+  PYTHON_COLORS: "0"
   # Documented Lot 4 residuals (reports/LOT_04_REPORT.md); changing it is a reviewed change.
   EXPECTED_FAILURES: "15"
   EXPECTED_FAILURE_MODULES: "test_lot4_"
 
 jobs:
+  # Required checks on main are "quality" and "full-suite". Only pull_request runs carry those names; push
+  # and manual runs report "quality (push)" / "full-suite (push)", so a push run (including a skipped one)
+  # can never satisfy a required check on a pull request's commit.
   quality:
-    name: quality
+    name: ${{ github.event_name == 'pull_request' && 'quality' || format('quality ({0})', github.event_name) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -151,7 +156,7 @@ jobs:
           echo "full_suite=$full" >> "$GITHUB_OUTPUT"
 
   full-suite:
-    name: full-suite
+    name: ${{ github.event_name == 'pull_request' && 'full-suite' || format('full-suite ({0})', github.event_name) }}
     needs: [quality, plan]
     if: needs.plan.outputs.full_suite == 'true'
     runs-on: ubuntu-24.04

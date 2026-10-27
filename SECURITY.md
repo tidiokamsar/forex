@@ -25,6 +25,13 @@
 - Research attempt registry (`attempts`): every scored variant (selected, rejected, failed, interrupted) is appended to `research_attempt_events` with a hash chain (`prev_hash`, `row_hash`). Triggers refuse UPDATE, DELETE and unlinked INSERT; `astra attempts verify` detects edited, removed and reordered rows, missing triggers and a truncated tail. Promotion is refused with `attempt_log_tampered` if the chain does not verify and with `trial_count_understated` if the evidence's `variants_tested` is below the store-wide trial count.
 - Research integrity (lot 4): sealed plans, holdout signatures, finished holdout evaluations, model evaluations and experiments are append-only through SQLite triggers. Promotion re-derives holdout evidence from the market bars (`holdout_bars`), binds the report to its plan, the running code and the attempt log, and allows one version per holdout. A new holdout that reuses a sealed price path is refused (heuristic detector, see RESEARCH_PROTOCOL.md).
 
+## Repository and CI controls (Gate B)
+
+- `main` is protected on GitHub: changes only through a pull request, required checks `quality` and `full-suite` (from the CI workflow, GitHub Actions app) on a branch up to date with `main`, rules enforced for administrators, no force push, no deletion, conversations resolved before merge. No approval count is required: the repository has a single collaborator, who cannot approve their own pull request; independent review stays a project process (separate reviewer agents), not a GitHub rule.
+- GitHub secret scanning and push protection are enabled. Actions may use only GitHub-owned actions pinned to a full commit SHA; the default workflow token is read-only and cannot approve pull requests.
+- The CI workflow (`.github/workflows/ci.yml`, [docs/CI.md](docs/CI.md)) has `contents: read` only (plus `pull-requests: read` for one job), uses `pull_request` and never `pull_request_target`, receives no secret, does not persist the checkout token, and has no deploy, release or merge step. `tools/ci/secret_scan.py` scans the tracked tree and the full history of each analysed commit.
+- Not enabled: GitHub secret scanning for non-provider patterns (the setting did not take effect on this account), Dependabot security updates (the project has no third-party dependency; it would also open pull requests on its own).
+
 ## Known gaps
 
 - No user authentication, authorization, dashboard TLS, network access controls, secret store, external or human-signed order authorization, or multi-user isolation. (The internal HMAC execution permit proves only that the gateway's checks ran in this process; it is not a human signature.) The service must remain on loopback.

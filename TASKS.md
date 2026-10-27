@@ -94,3 +94,11 @@ Offline and research only; no venue contacted by code, no account, no key, no or
 | MV-CLOSE | Closing checks on 0d6f084: Ruff, compileall, secret scan, 260 targeted tests, full suite 937 tests OK (15 expected failures, all Lot 4) | DONE; awaiting the architect's checkpoint evaluation (lot NOT validated yet) | `reports/MULTI_VENUE_REPORT.md` section 7 |
 | MV-OPEN | Live read-only checks (cTrader, Binance), written eligibility confirmations, IBKR adapter, derivatives risk review, Ed25519 signing | TODO (human actions first) | `reports/MULTI_VENUE_REPORT.md` section 8 |
 
+## Gate B, repository protection and CI (branch `feat/multi-venue`)
+
+| ID | Scope | Status | Evidence |
+|---|---|---|---|
+| GB-AUDIT | Initial Git and GitHub audit; secrets audit of the tree and every commit | DONE: clean (env-var names, fake fixtures and placeholders only) | `reports/GATE_B_REPORT.md` |
+| GB-PROTECT | `main` branch protection, secret scanning, push protection, Actions restrictions | DONE (verified by API read-back) | `reports/GATE_B_REPORT.md` |
+| GB-CI | Workflow `ci.yml` (quality, plan, full-suite), `tools/ci/secret_scan.py`, `tools/ci/check_unittest_log.py`, `docs/CI.md` | Written and reviewed; NOT operational: no CI run has executed (GitHub account locked for a billing issue) | `.github/workflows/ci.yml`, `docs/CI.md` |
+| GB-RUN | A real, successful CI run on the final commit | BLOCKED (owner must clear the billing lock, then re-run) | GitHub Actions |
