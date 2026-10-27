@@ -57,30 +57,49 @@ The dashboard is the Flask application `astra.webapp` served by gunicorn on `127
 | Private (default) | `ASTRA_PUBLIC_HOSTS` empty, `ASTRA_HTTPS=0`, `ASTRA_TRUSTED_PROXY=0` | `http://127.0.0.1:8765` on the host, or through `ssh -L 8765:127.0.0.1:8765 <host>` | Until a qualified host and a valid certificate exist |
 | Public | `ASTRA_PUBLIC_HOSTS=<dedicated DNS name>`, `ASTRA_HTTPS=1`, `ASTRA_TRUSTED_PROXY=1` | `https://<name>` through the TLS reverse proxy only | After the go-live checklist below |
 
+**Prerequisite (blocking): a trustworthy host.**
+- A host with an open or only partially remediated intrusion is not acceptable. Root-level access there exposes the password hashes, the TOTP secrets, the CSRF key, the proxy secret and the TLS key, and captures what users type; no application or proxy setting mitigates that.
+- Before installing, record:
+  - forensic closure or a rebuild of the host;
+  - the list of every listening port with its owner (`ss -tlnp` as root);
+  - the host firewall policy.
+- A dedicated clean VM is preferred.
+
 **Installation on a Linux host (requires an administrator with sudo; not yet performed anywhere):**
-1. Create the `astra` system user; copy the reviewed commit to `/opt/astra/app` (root-owned).
-2. Create `/opt/astra/venv` with Python 3.14 (the version the suite is validated on), then install with `pip install --require-hashes -r requirements/web.txt -r requirements/server.txt`.
-3. Install `/etc/astra/web.env` (root:astra 0640), `deploy/systemd/astra-web.service`, `astra-alert@.service` and `astra-cert-check.{service,timer}`.
-4. Initialise the first administrator as the `astra` user: `sudo -u astra env $(cat /etc/astra/web.env | xargs) PYTHONPATH=/opt/astra/app/src /opt/astra/venv/bin/python -m astra auth init-admin --username <name>`.
-5. Enable `astra-web`. Check with `systemd-analyze security astra-web`, and verify that outbound traffic from the unit is refused and the journal shows no SIGSYS.
-6. Public mode only:
-   - load `deploy/nftables/astra-loopback.nft`, so only the proxy user can reach port 8765;
-   - configure the proxy: `deploy/apache/astra.conf.example` on a host whose Apache already owns ports 80 and 443, otherwise `deploy/nginx/astra.conf.example`;
-   - obtain the certificate for the dedicated name, with a renewal deploy hook that reloads the proxy;
-   - enable the certificate check timer.
+1. **Python.** Install Python 3.14 (the version the suite is validated on), or first run the whole suite on the host's Python and record the result. Python 3.12 is accepted by `pyproject.toml` but untested.
+2. **Releases.** Create the `astra` system user. Copy the reviewed commit to `/opt/astra/releases/<sha>` (root-owned), with its own venv: `python3.14 -m venv /opt/astra/releases/<sha>/venv`, then `pip install --require-hashes -r requirements/web.txt -r requirements/server.txt`. Point `/opt/astra/app` and `/opt/astra/venv` at that release with `ln -sfn`.
+3. **Configuration.**
+   - Install `/etc/astra/web.env` (root:astra 0640) and `/etc/astra/alert.env` (templates in `deploy/`).
+   - Public mode only: generate the proxy secret into `/etc/astra/proxy.secret` (root:astra 0640) and into the proxy's root-only include (`deploy/apache/astra-proxy-secret.conf.example`).
+   - Install the units: `astra-web`, `astra-nft`, `astra-alert@`, `astra-cert-check.{service,timer}`.
+4. **First administrator.** Create it in the service's own context, so the state directory and permissions are right: `sudo systemd-run --pipe --wait -p User=astra -p EnvironmentFile=/etc/astra/web.env -p StateDirectory=astra -p Environment=PYTHONPATH=/opt/astra/app/src /opt/astra/venv/bin/python -m astra auth init-admin --username <name>`. The password is typed twice, or with `--generate` shown once.
+5. **Start and verify the unit.**
+   - Enable `astra-web`, which also starts `astra-nft`.
+   - Check `systemd-analyze security astra-web`, that the journal shows no SIGSYS, and that outbound traffic from the unit is refused.
+   - Check that `sudo -u nobody curl -m 3 http://127.0.0.1:8765/api/health` is refused by the nftables rule.
+6. **Public mode only, with Apache already serving other sites:**
+   1. Enable only the `:80` virtual host of `deploy/apache/astra.conf.example`.
+   2. Run `certbot certonly --webroot -w /var/www/acme -d <name> --deploy-hook "systemctl reload apache2"`.
+   3. Enable the `:443` virtual host.
+   4. Before every reload, run `apache2ctl configtest` and `apache2ctl -S`. The ASTRA virtual host must not become the default `*:443` host of the other sites.
+   5. Enable `astra-cert-check.timer`.
 
 **Go-live checklist (all must be verified on the host and recorded in the report):**
-- `ss -tlnp`: only the proxy listens on 80/443, and 8765 listens on 127.0.0.1 only.
-- From outside: 8765 is unreachable, 80 only redirects and serves ACME challenges, and 443 serves the valid certificate.
-- Forged Host, `X-Forwarded-For` and `Forwarded` headers have no effect.
+- The trustworthy-host prerequisite above is met and recorded.
+- Ports:
+  - `ss -tlnp`: only the proxy listens on 80 and 443, and 8765 listens on 127.0.0.1 only.
+  - From outside: 8765 is unreachable, 80 only redirects and serves ACME challenges, and 443 serves the valid certificate.
+- Proxy protections:
+  - a local process other than the proxy user cannot reach 8765 (nftables);
+  - a request without the proxy secret gets 403;
+  - forged Host, `X-Forwarded-For` and `Forwarded` headers have no effect.
 - File modes:
   - `/opt/astra` root-owned;
-  - `/etc/astra/web.env` 0640;
+  - `/etc/astra/web.env` and `/etc/astra/proxy.secret` 0640;
   - `/var/lib/astra` 0700, with the databases and `web_secret.key` 0600;
-  - the TLS key 0600.
-- Renewal dry run passes, the reload hook fires and a test alert reaches the operator.
-- Restart drills: kill gunicorn, then reboot the host.
-- Restore drill of `auth.sqlite3` and `astra.sqlite3`.
+  - the proxy include and the TLS key 0600.
+- Alerts: a renewal dry run passes, the reload hook fires, and a test alert reaches the operator (journal only is not enough).
+- Drills: kill gunicorn, reboot the host (the nftables rule comes back before the app), and restore `auth.sqlite3` and `astra.sqlite3`.
 
 **Behaviour on incidents:**
 
@@ -92,12 +111,21 @@ The dashboard is the Flask application `astra.webapp` served by gunicorn on `127
 | Certificate expired or renewal failed | The check timer fails below the threshold and alerts. Browsers refuse the site; nothing falls back to HTTP. |
 | Storage full | SQLite writes fail, so logins and session refresh answer 503. Free space, then restart. |
 | Failed migration (schema change) | The stores create missing tables only; restore the previous backup and the previous code (rollback below) |
-| Backup restore | Restore `auth.sqlite3` with the service stopped. Sessions in the restored copy are only valid if they have not expired. Rotate `web_secret.key` to invalidate every CSRF token and device cookie if the backup leaked. |
+| Backup restore | Restore `auth.sqlite3` with the service stopped. Sessions in the restored copy are only valid if they have not expired. |
+| A copy of `auth.sqlite3` leaked | It holds the Argon2id hashes and the TOTP secrets.<br>1. Disable every account.<br>2. Rotate `web_secret.key`, which invalidates CSRF tokens and device cookies.<br>3. Reset the password and the MFA of every account (`astra auth reset-password`, `reset-mfa`), then re-enable them. |
 
 **Update, backup, rollback.**
-- **Update:** deploy a new reviewed commit to `/opt/astra/app` next to the previous one, switch, then restart `astra-web`.
-- **Rollback:** switch back to the previous directory and restart.
-- **Backup:** copy `auth.sqlite3` with `sqlite3 .backup` (it holds Argon2id hashes and TOTP secrets: keep the copy encrypted and access-restricted), and `astra.sqlite3` with `astra backup create`.
+- **Update:**
+  1. Back up first (below).
+  2. Install the new reviewed commit as a new release directory with its own venv.
+  3. Switch the `/opt/astra/app` and `/opt/astra/venv` symlinks.
+  4. Restart `astra-web`: a restart, not a reload, because the app is preloaded.
+- **Rollback:** point the symlinks back at the previous release and restart. If the new release changed a schema, restore the backup taken before the update.
+- **Backup:**
+  - `astra backup create` with `ASTRA_BACKUP_DIR=/var/lib/astra/backups`;
+  - `auth.sqlite3` with the SQLite online backup, for example `python -c "import sqlite3; s=sqlite3.connect('/var/lib/astra/auth.sqlite3'); d=sqlite3.connect('/var/lib/astra/backups/auth.sqlite3'); s.backup(d)"`, run as `astra`;
+  - schedule both from a systemd timer;
+  - copy them off the host encrypted: they are secrets.
 
 ## Not provided
 

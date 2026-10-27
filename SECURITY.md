@@ -51,10 +51,11 @@ The dashboard (`astra.webapp`, Flask) requires a server-side session for every r
   - The documented recovery path for a lost device or password is local: `astra auth reset-mfa` / `reset-password` on the server, by someone with shell access. There is no public reset endpoint.
 - **Throttling.**
   - Failed logins are counted per address, per (account, address) and, for unknown browsers, per account. The delay is progressive from the 5th failure (2 s, doubling) and capped at 15 minutes, and the counters decay after a quiet hour.
-  - A browser that already signed in successfully holds a signed `__Host-astra_device` cookie (OWASP "device cookie"). It is throttled on its own key, so an attacker failing from other addresses cannot lock the real user out.
-  - Admin re-authentication and password changes are throttled the same way.
+  - A browser that already signed in successfully holds a signed `__Host-astra_device` cookie (OWASP "device cookie"). The cookie carries an issue date checked on the server (90 days) and is bound to the current password hash, so any password change or reset invalidates it. Such a browser is throttled on its own key, so an attacker failing from other addresses cannot lock the real user out; a new browser, or one whose cookies were cleared, can still be slowed down.
+  - Admin re-authentication and password changes inside a signed-in session are throttled on keys of their own (per account, and per account and address), so failed logins from elsewhere cannot block them.
 - **Requests.**
   - Exact Host allowlist: the public name only in public mode, loopback names only in private (tunnel) mode.
+  - In public mode, every request must also carry the proxy secret (`X-Astra-Proxy`, compared in constant time; 403 otherwise). The proxy reads it from a root-only include, so a local process that reaches the loopback port directly cannot pass for the proxy even if it forges Host and Origin. A second barrier, the nftables rule in `deploy/`, admits only the proxy user to that port.
   - Every state-changing request needs an allowed `Origin` and a CSRF token: HMAC-bound to the session, or to the pre-login cookie for the login form.
   - The body is limited to 64 KiB.
   - Response headers: CSP without inline code, `nosniff`, `X-Frame-Options DENY`, `Referrer-Policy no-referrer`, `Cache-Control no-store`, COOP and CORP, plus HSTS in HTTPS mode.
@@ -64,10 +65,11 @@ The dashboard (`astra.webapp`, Flask) requires a server-side session for every r
   - OPERATOR: also orders, controls, reconciliations, audit.
   - ADMIN: also accounts and the authentication audit. Every account action requires the administrator's password again; the last active administrator cannot be disabled or demoted.
   - Web roles are not execution roles. No web route submits, cancels, releases the kill switch, clears a freeze, promotes a model or changes the mode, and `astra.auth` imports nothing from execution, brokers, risk or governance (tests enforce both).
-- **Audit.** `auth_events` is append-only (triggers refuse UPDATE and DELETE) and records actor, action, target, result, time and address, never a password, token, cookie, TOTP secret or code. Anonymous origin refusals are not recorded, so nobody can grow the table at will.
+- **Audit.** `auth_events` is append-only (triggers refuse UPDATE and DELETE) and records actor, action, target, result, time and address, never a password, token, cookie, TOTP secret or code. Anonymous Origin and CSRF refusals and repeated throttled attempts are not recorded. Failed logins still are, at a rate bounded by the throttle and the proxy limits, and the table has no retention policy yet.
 - **Residual risks.**
   - TOTP secrets are stored in clear in `auth.sqlite3` (mode 0600). A copy of that file or of its backups gives the second factor of every account, so treat those backups as secrets.
   - Concurrent guesses can slip a few attempts past a throttle window (at most one per worker thread).
+  - Whoever uses a generated or reset password first, within its 72 h validity, also enrols the TOTP device: deliver those passwords out of band and promptly.
   - The whole model assumes the host itself is trustworthy: on a compromised host, credentials typed into the dashboard can be captured whatever the application does.
 
 ## Known gaps

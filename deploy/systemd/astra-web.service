@@ -3,8 +3,9 @@
 # /var/lib/astra (StateDirectory, owned by astra, 0700).
 [Unit]
 Description=ASTRA dashboard (authenticated, SIMULATION only)
-After=network-online.target
+After=network-online.target astra-nft.service
 Wants=network-online.target
+Requires=astra-nft.service
 StartLimitIntervalSec=300
 StartLimitBurst=5
 # When the unit fails for good (including after the start limit), raise an alert.

@@ -1,8 +1,11 @@
 #!/usr/sbin/nft -f
 # Only the reverse proxy's user (and the ASTRA service itself, for its local checks) may connect to the
-# dashboard's loopback port. Any other local process (another web application, a shell user, malware)
-# is refused, so it cannot bypass the proxy's limits or forge forwarding headers (deployment review M1).
-# Adjust the proxy user: "www-data" for Debian/Ubuntu Apache or nginx. Test before persisting.
+# dashboard's loopback port. Any other local process is refused before reaching the application; the
+# proxy secret header (X-Astra-Proxy) is the second barrier if the proxy user is shared with another
+# application (for example PHP running as www-data). Loaded by astra-nft.service, required by astra-web.
+# Idempotent (nft >= 1.0.8): the table is replaced, never duplicated. Check with: nft -c -f <this file>.
+table inet astra_loopback
+destroy table inet astra_loopback
 table inet astra_loopback {
     chain output {
         type filter hook output priority filter; policy accept;

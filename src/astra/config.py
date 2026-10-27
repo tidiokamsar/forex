@@ -95,6 +95,9 @@ class WebConfig:
     public_hosts: tuple[str, ...] = ()
     trusted_proxy: bool = False
     https: bool = False
+    # Public mode: a secret the reverse proxy adds to every request (header X-Astra-Proxy). Another local
+    # process that connects to the loopback port directly cannot know it, so it cannot pass for the proxy.
+    proxy_secret_path: Path | None = None
 
     def __post_init__(self) -> None:
         for host in self.public_hosts:
@@ -105,6 +108,8 @@ class WebConfig:
         if self.public_hosts and not self.trusted_proxy:
             # Behind the proxy every client would share 127.0.0.1: one client could throttle everyone.
             raise ValueError("a public host requires ASTRA_TRUSTED_PROXY=1 (the local TLS proxy is the only client)")
+        if self.public_hosts and self.proxy_secret_path is None:
+            raise ValueError("a public host requires ASTRA_PROXY_SECRET_FILE (the secret the proxy adds to each request)")
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> WebConfig:
@@ -115,6 +120,7 @@ class WebConfig:
             secret_key_path=Path(values.get("ASTRA_WEB_SECRET_FILE", str(PROJECT_ROOT / "var" / "web_secret.key"))),
             public_hosts=hosts,
             trusted_proxy=_flag(values.get("ASTRA_TRUSTED_PROXY", "")),
+            proxy_secret_path=Path(values["ASTRA_PROXY_SECRET_FILE"]) if values.get("ASTRA_PROXY_SECRET_FILE") else None,
             https=_flag(values.get("ASTRA_HTTPS", "")),
         )
 

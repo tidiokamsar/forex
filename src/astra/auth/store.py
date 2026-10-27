@@ -317,6 +317,14 @@ class AuthStore:
             row = db.execute("SELECT * FROM users WHERE id = ?", (cursor.lastrowid,)).fetchone()
         return self._user(row)
 
+    def password_epoch(self, username: str) -> str:
+        """An opaque value that changes whenever the account's password changes or is reset (binds device cookies)."""
+
+        with self._connect() as db:
+            row = db.execute("SELECT password_hash FROM users WHERE username = ?", (normalize_username(username),)).fetchone()
+        # Argon2id hashes are salted, so every new password (even the same one) gives a new epoch.
+        return crypto.token_digest(row["password_hash"])[:32] if row else "none"
+
     def get_user(self, username: str) -> UserRecord | None:
         with self._connect() as db:
             row = db.execute("SELECT * FROM users WHERE username = ?", (normalize_username(username),)).fetchone()
@@ -497,7 +505,7 @@ class AuthStore:
         with self._write() as db:
             wait = self._throttle_wait(db, keys)
             if wait:
-                self._event(db, f"web:{label}", "login", "throttled", target=label, client_ip=client_ip)
+                # Not audited: repeated throttled attempts would only grow the append-only table.
                 return LoginResult("throttled", retry_after_seconds=wait)
             row = db.execute("SELECT * FROM users WHERE username = ?", (name,)).fetchone()
         # Password verification (about 0.1 s) runs outside the write transaction.
@@ -628,11 +636,10 @@ class AuthStore:
 
         if session.stage not in (SessionStage.FULL, SessionStage.PASSWORD_CHANGE):
             raise AuthError("session non autorisée à changer le mot de passe")
-        keys = self._keys(session.user.username, client_ip)[:2]
+        keys = self._session_keys(session, client_ip)
         with self._write() as db:
             wait = self._throttle_wait(db, keys)
             if wait:
-                self._event(db, f"web:{session.user.username}", "password.change", "throttled", client_ip=client_ip)
                 return LoginResult("throttled", retry_after_seconds=wait)
             row = db.execute("SELECT * FROM users WHERE id = ?", (session.user.id,)).fetchone()
         if not crypto.verify_password(row["password_hash"], current if isinstance(current, str) else ""):
@@ -653,21 +660,28 @@ class AuthStore:
             self._event(db, f"web:{row['username']}", "password.change", "ok", client_ip=client_ip)
         return LoginResult("ok", token=token, stage=SessionStage.FULL)
 
-    def confirm_password(self, session: SessionRecord, password: str, client_ip: str | None) -> bool:
-        """Step-up re-authentication of the session's own user; failures count against the account throttle."""
+    def _session_keys(self, session: SessionRecord, client_ip: str | None) -> list[str]:
+        # Re-authentication inside a FULL session (password plus MFA already passed) is throttled on keys of
+        # its own: failed logins from other addresses (account-wide key) cannot block it (re-review M-NEW).
+        return [f"stepup:{session.user.id}", f"stepupip:{session.user.id}|{client_ip or 'unknown'}"]
 
-        key = self._keys(session.user.username, client_ip)[:2]
+    def confirm_password(self, session: SessionRecord, password: str, client_ip: str | None) -> str:
+        """Step-up re-authentication of the session's own user: "ok", "invalid" or "throttled"."""
+
+        keys = self._session_keys(session, client_ip)
         with self._write() as db:
-            if self._throttle_wait(db, key):
-                self._event(db, f"web:{session.user.username}", "step_up", "throttled", client_ip=client_ip)
-                return False
+            if self._throttle_wait(db, keys):
+                return "throttled"
             row = db.execute("SELECT password_hash FROM users WHERE id = ? AND active = 1", (session.user.id,)).fetchone()
         ok = crypto.verify_password(row["password_hash"] if row else None, password if isinstance(password, str) else "")
-        if not ok:
-            with self._write() as db:
-                self._record_failure(db, key)
+        with self._write() as db:
+            if not ok:
+                self._record_failure(db, keys)
                 self._event(db, f"web:{session.user.username}", "step_up", "refused", client_ip=client_ip)
-        return ok
+                return "invalid"
+            for key in keys:
+                self._clear_throttle(db, key)
+        return "ok"
 
     def logout(self, session: SessionRecord, client_ip: str | None) -> None:
         with self._write() as db:

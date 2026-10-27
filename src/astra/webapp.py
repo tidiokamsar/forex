@@ -36,6 +36,7 @@ from .storage import BacktestStore
 
 SESSION_COOKIE = "__Host-astra_session"
 PRE_COOKIE = "__Host-astra_pre"
+PROXY_HEADER = "X-Astra-Proxy"
 DEVICE_COOKIE = "__Host-astra_device"
 DEVICE_COOKIE_SECONDS = 90 * 24 * 3600
 STATIC_DIR = Path(__file__).with_name("static")
@@ -74,13 +75,22 @@ def load_secret_key(path: Path) -> bytes:
     raise RuntimeError(f"cannot create {path}")
 
 
+def load_proxy_secret(path: Path) -> str:
+    value = Path(path).read_text(encoding="ascii").strip()
+    if len(value) < 32 or not value.isalnum():
+        raise RuntimeError(f"{path} must hold an alphanumeric secret of at least 32 characters")
+    return value
+
+
 def create_app(config: AppConfig, web: WebConfig, *, auth: AuthStore | None = None, secret_key: bytes | None = None,
-               store: BacktestStore | None = None) -> Flask:
+               store: BacktestStore | None = None, proxy_secret: str | None = None) -> Flask:
     app = Flask(__name__, static_folder=None, template_folder="templates")
     app.config.update(MAX_CONTENT_LENGTH=64 * 1024, MAX_FORM_MEMORY_SIZE=64 * 1024, MAX_FORM_PARTS=50,
                       TEMPLATES_AUTO_RELOAD=False)
     auth = auth or AuthStore(web.auth_database_path)
     key = secret_key or load_secret_key(web.secret_key_path)
+    if web.public_hosts and proxy_secret is None:
+        proxy_secret = load_proxy_secret(web.proxy_secret_path)
     backtests = store or BacktestStore(config.database_path)
     execution = ExecutionStore(backtests.path)
     models = ModelRegistry(backtests.path)
@@ -92,8 +102,9 @@ def create_app(config: AppConfig, web: WebConfig, *, auth: AuthStore | None = No
 
     local_hosts = {f"{config.host}:{config.port}", f"127.0.0.1:{config.port}", f"localhost:{config.port}"}
     if web.public_hosts:
-        # Public mode: only the proxied public name is accepted. A local process that connects to the
-        # loopback port directly (bypassing the proxy and its limits) gets 400 (deployment review M1).
+        # Public mode: only the proxied public name is accepted, and only with the proxy's secret header
+        # (checked in guard). The Host check alone does not stop a local process, which can forge Host;
+        # the secret does (deployment re-review M1).
         allowed_hosts = set(web.public_hosts)
         allowed_origins = {f"https://{h}" for h in web.public_hosts}
     else:
@@ -112,28 +123,36 @@ def create_app(config: AppConfig, web: WebConfig, *, auth: AuthStore | None = No
     def csrf_for_pre(pre: str) -> str:
         return crypto.keyed_digest(key, "pre:" + crypto.token_digest(pre))
 
+    def device_mac(name: str, nonce: str, issued: str) -> str:
+        # Bound to the password generation: a password change or reset invalidates every device cookie.
+        return crypto.keyed_digest(key, f"device|{name}|{nonce}|{issued}|{auth.password_epoch(name)}")
+
     def device_for(username: str) -> str | None:
-        """The device id if this browser holds a valid device cookie for ``username`` (signed with the server key)."""
+        """The device id if this browser holds a valid, unexpired device cookie for ``username``."""
 
         parts = (request.cookies.get(DEVICE_COOKIE) or "").split(".")
-        if len(parts) != 3 or not 16 <= len(parts[1]) <= 64:
+        if len(parts) != 4 or not 16 <= len(parts[1]) <= 64 or not parts[2].isdigit():
             return None
         name = username.strip().casefold() if isinstance(username, str) else ""
         if parts[0] != crypto.token_digest(name)[:16]:
             return None
-        expected = crypto.keyed_digest(key, f"device:{name}:{parts[1]}")
-        return parts[1] if crypto.constant_time_equal(parts[2], expected) else None
+        age = int(auth._now().timestamp()) - int(parts[2])
+        if not 0 <= age <= DEVICE_COOKIE_SECONDS:
+            return None
+        return parts[1] if crypto.constant_time_equal(parts[3], device_mac(name, parts[1], parts[2])) else None
 
     def new_device_cookie(username: str) -> str:
         name = username.strip().casefold()
         nonce = crypto.new_token()[:32]
-        mac = crypto.keyed_digest(key, f"device:{name}:{nonce}")
-        return f"{crypto.token_digest(name)[:16]}.{nonce}.{mac}"
+        issued = str(int(auth._now().timestamp()))
+        return f"{crypto.token_digest(name)[:16]}.{nonce}.{issued}.{device_mac(name, nonce, issued)}"
 
     # -- request guards ------------------------------------------------------------------------
 
     @app.before_request
     def guard() -> Response | None:
+        if proxy_secret is not None and not crypto.constant_time_equal(request.headers.get(PROXY_HEADER, ""), proxy_secret):
+            return _error(403, "proxy_required")
         host = (request.headers.get("Host") or "").lower()
         if host not in allowed_hosts:
             return _error(400, "invalid_host")
@@ -272,7 +291,7 @@ def create_app(config: AppConfig, web: WebConfig, *, auth: AuthStore | None = No
     @app.post("/login")
     def login_submit() -> Response:
         if not check_csrf(pre_login=True):
-            auth_record("web:anonymous", "login.csrf", "refused")
+            # Not audited: anonymous refusals must not let anyone grow the append-only audit table.
             return login_page("Session de connexion expirée, réessayez.", 403)
         if g.session is not None:
             auth.logout(g.session, client_ip())
@@ -466,14 +485,20 @@ def create_app(config: AppConfig, web: WebConfig, *, auth: AuthStore | None = No
     def admin_events() -> Response:
         return jsonify({"events": auth.events(limit=200)})
 
-    def step_up() -> bool:
+    def step_up() -> str:
         return auth.confirm_password(g.session, request.form.get("admin_password", ""), client_ip())
+
+    def step_up_refusal(result: str) -> Response:
+        if result == "throttled":
+            return admin_message("Trop de tentatives de confirmation : réessayez dans quelques minutes.", 429)
+        return admin_message("Mot de passe administrateur incorrect.", 401)
 
     @app.post("/admin/users")
     @require(WebRole.ADMIN, api=False)
     def admin_create() -> Response:
-        if not step_up():
-            return admin_message("Mot de passe administrateur incorrect.", 401)
+        result = step_up()
+        if result != "ok":
+            return step_up_refusal(result)
         temporary = crypto.new_token()[:24]
         try:
             auth.create_user(actor(), request.form.get("username", ""), WebRole(request.form.get("role", "READ_ONLY")),
@@ -488,8 +513,9 @@ def create_app(config: AppConfig, web: WebConfig, *, auth: AuthStore | None = No
     def admin_action(username: str, action: str) -> Response:
         if action not in {"disable", "enable", "revoke-sessions", "reset-password", "reset-mfa", "role"}:
             abort(404)
-        if not step_up():
-            return admin_message("Mot de passe administrateur incorrect.", 401)
+        result = step_up()
+        if result != "ok":
+            return step_up_refusal(result)
         try:
             if action == "disable":
                 auth.set_active(actor(), username, False)

@@ -30,6 +30,7 @@ from astra.webapp import PRE_COOKIE, SESSION_COOKIE, create_app
 from test_engine import synthetic_bars
 
 HOST = "astra.test"
+PROXY_SECRET = "p" * 40  # test value; the real one is generated on the host
 ORIGIN = f"https://{HOST}"
 PASSWORD = "test-Horse-Battery-9"
 READ_ONLY_ROUTES = ["/api/session", "/api/status", "/api/summary", "/api/runs", "/api/models", "/api/experiments"]
@@ -41,14 +42,20 @@ class HttpsClient(FlaskClient):
     """Sends every request to https://astra.test, the public name the app is configured for."""
 
     base = f"https://{HOST}"
+    proxy_header = True
 
     def open(self, *args, **kwargs):
         kwargs.setdefault("base_url", self.base)
+        if self.proxy_header:
+            headers = dict(kwargs.pop("headers", None) or {})
+            headers.setdefault("X-Astra-Proxy", PROXY_SECRET)
+            kwargs["headers"] = headers
         return super().open(*args, **kwargs)
 
 
 class LoopbackClient(HttpsClient):
     base = "http://127.0.0.1:8765"
+    proxy_header = False
 
 
 class Clock:
@@ -81,7 +88,8 @@ class WebAppCase(unittest.TestCase):
         self.auth = AuthStore(root / "auth.sqlite3", clock=self.clock)
         self.auth.initialize()
         self.web = WebConfig(auth_database_path=root / "auth.sqlite3", secret_key_path=root / "web_secret.key",
-                             public_hosts=self.public_hosts, trusted_proxy=self.trusted_proxy, https=bool(self.public_hosts))
+                             public_hosts=self.public_hosts, trusted_proxy=self.trusted_proxy, https=bool(self.public_hosts),
+                             proxy_secret_path=root / "proxy.secret" if self.public_hosts else None)
         self.config = AppConfig(database_path=self.db)
         self.key = b"k" * 32
         self.app = self.make_app()
@@ -90,7 +98,8 @@ class WebAppCase(unittest.TestCase):
         self.temp.cleanup()
 
     def make_app(self, auth=None):
-        return create_app(self.config, self.web, auth=auth or self.auth, secret_key=self.key, store=self.store)
+        return create_app(self.config, self.web, auth=auth or self.auth, secret_key=self.key, store=self.store,
+                          proxy_secret=PROXY_SECRET if self.public_hosts else None)
 
     def client(self, ip="203.0.113.10", app=None):
         app = app or self.app
@@ -226,6 +235,34 @@ class AuthenticationTests(WebAppCase):
         intruder = self.client("198.18.2.1")
         intruder.set_cookie("__Host-astra_device", device[:-1] + ("0" if device[-1] != "0" else "1"), domain=HOST)
         self.assertEqual(self.login(intruder, "alice").status_code, 429)
+
+    def test_login_attacks_cannot_block_step_up_or_password_change(self):
+        # Re-review M-NEW: failed logins from rotating addresses must not block a signed-in user's
+        # re-authentication (admin step-up) or password change.
+        boss = self.session_client("boss", WebRole.ADMIN)
+        self.add_user("carol", WebRole.READ_ONLY)
+        for i in range(10):
+            self.login(self.client(f"198.18.3.{i}"), "boss", "Wrong-Password-123")
+        token = self.page_csrf(boss)
+        disabled = self.post(boss, "/admin/users/carol/disable", {"admin_password": PASSWORD, "csrf_token": token})
+        self.assertEqual(disabled.status_code, 303)
+        self.assertFalse(self.auth.get_user("carol").active)
+        page = boss.get("/account/password")
+        changed = self.post(boss, "/account/password", {"current_password": PASSWORD, "new_password": "Brand-New-Pass-42",
+                                                        "confirm_password": "Brand-New-Pass-42", "csrf_token": self.csrf(page)})
+        self.assertEqual(changed.status_code, 303)
+
+    def test_device_cookie_dies_with_a_password_reset(self):
+        client = self.client("203.0.113.5")
+        self.add_user("alice", WebRole.READ_ONLY)
+        self.login(client, "alice")
+        device = client.get_cookie("__Host-astra_device", domain=HOST).value
+        self.auth.reset_password("cli:root", "alice")
+        for i in range(6):
+            self.login(self.client(f"198.18.4.{i}"), "alice", "Wrong-Password-123")
+        stale = self.client("203.0.113.5")
+        stale.set_cookie("__Host-astra_device", device, domain=HOST)
+        self.assertEqual(self.login(stale, "alice", "Wrong-Password-123").status_code, 429)
 
     def test_temporary_password_expires(self):
         self.add_user("alice", WebRole.READ_ONLY, must_change=True)
@@ -496,6 +533,13 @@ class PermissionTests(WebAppCase):
                                  origin=origin)
             self.assertEqual(response.status_code, 403, origin)
 
+    def test_requests_without_the_proxy_secret_are_refused(self):
+        # A local process that reaches 127.0.0.1:8765 directly can forge Host and Origin, not the secret.
+        for value in ("", "wrong", PROXY_SECRET[:-1], PROXY_SECRET + "x"):
+            response = self.client().get("/api/health", headers={"X-Astra-Proxy": value})
+            self.assertEqual(response.status_code, 403, value)
+        self.assertEqual(self.client().get("/api/health").status_code, 200)
+
     def test_forged_host_header_is_refused(self):
         # In public mode the loopback names are refused too: a local process cannot bypass the proxy.
         for host in ("evil.example", "astra.test.evil.example", "astra.test:8443", "astra.test@evil.example",
@@ -672,13 +716,16 @@ class AuthCliTests(unittest.TestCase):
             self.assertIn("Secure", cookie)
             self.assertEqual(len((root / "k.key").read_bytes()), 32)
 
-    def test_public_host_requires_https_and_a_trusted_proxy(self):
+    def test_public_host_requires_https_a_trusted_proxy_and_a_proxy_secret(self):
+        secret = Path("unused.secret")
         with self.assertRaises(ValueError):
-            WebConfig(public_hosts=("astra.example",), https=False, trusted_proxy=True)
+            WebConfig(public_hosts=("astra.example",), https=False, trusted_proxy=True, proxy_secret_path=secret)
         with self.assertRaises(ValueError):
-            WebConfig(public_hosts=("astra.example",), https=True, trusted_proxy=False)
+            WebConfig(public_hosts=("astra.example",), https=True, trusted_proxy=False, proxy_secret_path=secret)
         with self.assertRaises(ValueError):
-            WebConfig(public_hosts=("*.example",), https=True, trusted_proxy=True)
+            WebConfig(public_hosts=("astra.example",), https=True, trusted_proxy=True)
+        with self.assertRaises(ValueError):
+            WebConfig(public_hosts=("*.example",), https=True, trusted_proxy=True, proxy_secret_path=Path("x"))
 
 
 class PrivateModeTests(WebAppCase):
