@@ -295,17 +295,18 @@ class Engine:
     def _open(self, rec: Recorder, ts: datetime, symbol: str, side: str, reference: float, atr: float) -> None:
         direction = 1 if side == "LONG" else -1
         label = "ACHAT" if direction == 1 else "VENTE"
-        refusal = None
+        refusal = code = None
         equity = self.equity()
         if self.state["drawdown_halt"]:
-            refusal = f"drawdown maximal atteint ({self.risk.max_drawdown_pct} %) : entrées arrêtées pour cette simulation"
+            code, refusal = "drawdown", (f"drawdown maximal atteint ({self.risk.max_drawdown_pct} %) : entrées arrêtées"
+                                         " pour cette simulation")
         elif self.state["daily_halt"]:
-            refusal = f"limite de perte journalière atteinte ({self.risk.daily_loss_limit_pct} %)"
+            code, refusal = "daily", f"limite de perte journalière atteinte ({self.risk.daily_loss_limit_pct} %)"
         elif len(self.state["positions"]) >= self.risk.max_positions:
-            refusal = f"nombre maximal de positions simultanées atteint ({self.risk.max_positions})"
+            code, refusal = "positions", f"nombre maximal de positions simultanées atteint ({self.risk.max_positions})"
         stop_distance = self.risk.stop_atr_multiple * atr
         if refusal is None and (not math.isfinite(stop_distance) or stop_distance <= 0):
-            refusal = "distance de stop nulle (ATR nul) : pas de stop possible"
+            code, refusal = "stop", "distance de stop nulle (ATR nul) : pas de stop possible"
         units = 0.0
         if refusal is None:
             risk_usd = equity * self.risk.risk_per_trade_pct / 100
@@ -314,14 +315,17 @@ class Engine:
             capped = min(raw_units, self.risk.max_position_units)
             units = math.floor(capped / UNIT_STEP) * UNIT_STEP
             if units < MIN_UNITS:
+                code = "size"
                 refusal = f"taille calculée {raw_units:.0f} unités < minimum {MIN_UNITS} (capital ou stop trop petit)"
             elif self._used_margin() + _notional_usd(symbol, units, reference) / self.risk.leverage > equity:
+                code = "margin"
                 refusal = f"marge insuffisante au levier 1:{self.risk.leverage:g}"
         if refusal:
             refusals = self.state.setdefault("last_refusal", {})
-            if refusals.get(symbol) != refusal:
+            key = f"{code}:{side}"
+            if refusals.get(symbol) != key:
                 self._order(rec, ts, symbol, "ENTREE", label, units, "REFUSE", reference, None, refusal)
-                refusals[symbol] = refusal
+                refusals[symbol] = key
             return
         self.state.setdefault("last_refusal", {}).pop(symbol, None)
         entry_fill = reference + direction * _cost_per_side(symbol, self.costs)
@@ -343,6 +347,7 @@ class Engine:
             if s["daily_halt"]:
                 rec.events.append({"ts": _iso(ts), "kind": "LIMITE_JOURNALIERE_LEVEE", "message": "nouveau jour UTC"})
             s["day"], s["day_start_equity"], s["daily_halt"] = day, self.equity(), False
+            s["last_refusal"] = {}  # a refusal on a new day is recorded again
         opening = candle.open if candle.open is not None else candle.close
         # 1. the order decided at the previous close fills now
         target = s["pending"].pop(symbol, None)
@@ -397,6 +402,8 @@ class Engine:
                                 "reason": decision.reason})
             s["last_decision"][symbol] = decision.action
         wanted = {BUY: "LONG", SELL: "SHORT", FLAT: "FLAT"}[decision.action]
+        if wanted == "FLAT":
+            s.setdefault("last_refusal", {}).pop(symbol, None)
         current = s["positions"].get(symbol, {}).get("side", "FLAT")
         if wanted != current:
             s["pending"][symbol] = {"side": wanted, "label": decision.action}
@@ -578,7 +585,7 @@ class LabStore:
     def create_session(self, request: dict[str, Any], actor: str) -> int:
         engine = Engine(request["strategy"], request["risk"], request["costs"])
         params = {"strategy": asdict(request["strategy"]), "risk": asdict(request["risk"]),
-                  "costs": asdict(request["costs"])}
+                  "costs": asdict(request["costs"]), "nature": request.get("nature", "UNKNOWN")}
         now = _iso(_now())
         with self._connect() as db:
             cursor = db.execute(
@@ -628,6 +635,7 @@ class LabStore:
         row["symbols"] = json.loads(row.pop("symbols_json"))
         row["last_processed"] = json.loads(row.pop("last_processed_json"))
         row["params"] = params
+        row["nature"] = params.get("nature", "UNKNOWN")
         initial = params["risk"]["initial_capital"]
         row["account"] = {"cash": round(state["cash"], 2), "equity": round(state["equity"], 2),
                           "initial_capital": initial, "net_pnl": round(state["equity"] - initial, 2),
@@ -668,8 +676,14 @@ class LabStore:
             symbols = json.loads(row["symbols_json"])
             newest = [candles_store.candles(sym, row["timeframe"], row["source"], limit=1, newest=True) for sym in symbols]
             if not all(newest):
-                return {"processed": 0, "waiting": "une paire n'a encore aucune bougie"}
+                note = "en attente : " + ", ".join(s for s, f in zip(symbols, newest, strict=True) if not f) + " sans bougie"
+                db.execute("UPDATE sim_sessions SET last_error = ? WHERE id = ?", (note, session_id))
+                return {"processed": 0, "waiting": note}
             watermark = min(found[0].timestamp for found in newest)
+            lagging = [s for s, f in zip(symbols, newest, strict=True) if f[0].timestamp == watermark]
+            ahead = any(f[0].timestamp > watermark for f in newest)
+            waiting_note = (f"en attente de données récentes pour {', '.join(lagging)} (dernière bougie {_iso(watermark)}) :"
+                            " les autres paires attendent" if ahead else None)
             work: list[tuple[datetime, Candle, list[Candle]]] = []
             for symbol in symbols:
                 since = _parse_iso(last[symbol]) if symbol in last else None
@@ -691,8 +705,8 @@ class LabStore:
                 self._append(db, session_id, kind, getattr(rec, kind))
             # Equity points: every candle of a live step, a sample of a long catch-up (the account state is exact).
             self._append(db, session_id, "equity", [{"ts": ts, "equity": value} for ts, value in downsample(rec.equity, 200)])
-            db.execute("UPDATE sim_sessions SET state_json = ?, last_processed_json = ?, updated_at = ?, last_error = NULL"
-                       " WHERE id = ?", (_dumps(engine.state), _dumps(last), _iso(_now()), session_id))
+            db.execute("UPDATE sim_sessions SET state_json = ?, last_processed_json = ?, updated_at = ?, last_error = ?"
+                       " WHERE id = ?", (_dumps(engine.state), _dumps(last), _iso(_now()), waiting_note, session_id))
             return {"processed": len(work[:max_bars]), "orders": len(rec.orders), "trades": len(rec.trades)}
 
     def running_sessions(self) -> list[int]:
@@ -815,7 +829,8 @@ def simulation_request(raw: dict[str, Any], candles_store: CandleStore) -> dict[
         raise SimulationError(f"aucune donnée {timeframe} de la source {source!r} pour : {', '.join(missing)}")
     start = _period(raw.get("start"), "début") or _iso(_now())
     name = str(raw.get("name") or "").strip()[:80] or f"Simulation {', '.join(symbols)} {timeframe}"
-    return {"name": name, "symbols": symbols, "timeframe": timeframe, "source": source, "start": start,
+    nature = (candles_store.source(source) or {}).get("nature") or "UNKNOWN"
+    return {"name": name, "nature": nature, "symbols": symbols, "timeframe": timeframe, "source": source, "start": start,
             "strategy": _build(StrategyParams, raw.get("strategy_params")), "risk": _build(RiskParams, raw.get("risk")),
             "costs": _build(CostParams, raw.get("costs"))}
 

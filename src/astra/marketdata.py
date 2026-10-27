@@ -347,18 +347,10 @@ def parse_csv(raw: bytes, symbol: str, timeframe: str, source: str, *, timezone:
     if len(candles) >= 3:
         spacing = Counter(int((b.timestamp - a.timestamp).total_seconds()) for a, b in itertools.pairwise(candles))
         usual = spacing.most_common(1)[0][0]
-        if usual != step:
+        intervals = sum(spacing.values())
+        if spacing[step] < max(spacing.values()) and spacing[step] < 0.3 * intervals:
             raise MarketDataError(f"l'écart habituel entre bougies est de {usual // 60} min, pas {step // 60} min : "
                                   f"ce fichier n'est pas en {timeframe} (vérifiez l'unité de temps choisie)")
-    if timeframe == "H4" and candles:
-        # Providers align H4 bars on different hours; one phase per file, the others are refused.
-        phase = Counter(int(c.timestamp.timestamp()) % step for c in candles).most_common(1)[0][0]
-        kept = [c for c in candles if int(c.timestamp.timestamp()) % step == phase]
-        for c in candles:
-            if int(c.timestamp.timestamp()) % step != phase:
-                report.rejected += 1
-                report.add_issue("MISALIGNED_TIMESTAMP", None, f"{_iso(c.timestamp)} hors de la grille H4 du fichier")
-        candles = kept
     if timeframe == "D1":
         kept, days = [], set()
         for c in candles:

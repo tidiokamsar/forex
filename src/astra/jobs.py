@@ -200,9 +200,11 @@ class Worker:
             return result
         if job["kind"] == "backtest":
             backtest_id = int(params["backtest_id"])
-            self.lab.set_backtest_status(backtest_id, "RUNNING")
-            stored = self.lab.backtest(backtest_id, item_limit=0)
             try:
+                self.lab.set_backtest_status(backtest_id, "RUNNING")
+                stored = self.lab.backtest(backtest_id, item_limit=0)
+                if stored is None:
+                    raise SimulationError(f"backtest {backtest_id} introuvable")
                 result = run_backtest(self.candles, stored["params"])
                 self.lab.save_backtest_result(backtest_id, result)
             except (SimulationError, MarketDataError) as exc:

@@ -318,7 +318,7 @@ async function showSession(id) {
     ["Capital (marqué au marché)", money(a.equity)], ["Solde réalisé", money(a.cash)], ["Résultat net", money(a.net_pnl)],
     ["Limites", limitsText(a)], ["Source", `${s.source} · ${s.timeframe}`],
     ["Dernières bougies traitées", Object.entries(s.last_processed).map(([k, v]) => `${k} ${when(v)}`).join(" · ") || "aucune"],
-    ["Erreur", s.last_error || "aucune"]].map(([k, v]) => {
+    ["Données", NATURE[s.nature] || s.nature || "inconnue"], ["Remarque", s.last_error || "aucune"]].map(([k, v]) => {
     const c = el("article", null, "metric-card"); c.append(el("span", k, "metric-label"), el("strong", v)); return c;
   }));
   lineChart($("sim-equity"), (s.equity || []).map((p) => ({ x: Date.parse(p.ts), y: p.equity })), "Capital de la simulation");

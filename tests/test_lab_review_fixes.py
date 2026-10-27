@@ -45,10 +45,17 @@ class ImportReviewTests(unittest.TestCase):
         candles, _ = parse_csv(rows(hourly), "EURUSD", "H1", "p")
         self.assertEqual(len(candles), 30)
 
-    def test_m2_h4_phase_and_one_daily_bar_per_trading_day(self):
-        h4 = [T0 + timedelta(hours=4 * i) for i in range(10)] + [T0 + timedelta(hours=41)]  # 17:00, other phase
-        candles, report = parse_csv(rows(h4), "EURUSD", "H4", "p")
-        self.assertEqual((len(candles), report.rejected), (10, 1))
+    def test_m2_h4_phases_follow_the_provider_and_one_daily_bar_per_trading_day(self):
+        # A provider aligned on the New York close moves its H4 grid by one hour with US DST: both are kept.
+        winter = [datetime(2026, 1, 5, 2, tzinfo=UTC) + timedelta(hours=4 * i) for i in range(12)]
+        summer = [datetime(2026, 7, 6, 1, tzinfo=UTC) + timedelta(hours=4 * i) for i in range(12)]
+        candles, report = parse_csv(rows(winter + summer), "EURUSD", "H4", "p")
+        self.assertEqual((len(candles), report.rejected), (24, 0))
+        _, misaligned = parse_csv(rows([T0 + timedelta(minutes=30)]), "EURUSD", "H4", "p")
+        self.assertEqual(misaligned.rejected, 1)  # still on a whole hour or refused
+        short = [datetime(2026, 1, 9, tzinfo=UTC), datetime(2026, 1, 12, tzinfo=UTC), datetime(2026, 1, 13, tzinfo=UTC)]
+        candles, _ = parse_csv(rows(short), "EURUSD", "D1", "p")  # Fri, Mon, Tue: tied intervals, still D1
+        self.assertEqual(len(candles), 3)
         daily = [T0 + timedelta(days=i) for i in range(5)] + [T0 + timedelta(days=2, hours=3)]
         candles, report = parse_csv(rows(daily), "EURUSD", "D1", "p")
         self.assertEqual((len(candles), report.rejected), (5, 1))
@@ -118,6 +125,17 @@ class EngineReviewTests(unittest.TestCase):
             engine.process(c, [c], rec)
         self.assertEqual(len([o for o in rec.orders if o["status"] == "REFUSE"]), 1)
 
+    def test_l9_a_refusal_after_a_flat_period_or_a_new_day_is_recorded_again(self):
+        engine = Engine(StrategyParams(), RiskParams(), CostParams())
+        engine.state["drawdown_halt"] = True
+        rec = Recorder()
+        for i in (0, 30):  # two different UTC days
+            engine.state["pending"]["EURUSD"] = {"side": "LONG", "label": BUY}
+            engine.state["pending_atr"] = {"EURUSD": 0.005}
+            c = candle(i, 1.1)
+            engine.process(c, [c], rec)
+        self.assertEqual(len([o for o in rec.orders if o["status"] == "REFUSE"]), 2)
+
 
 class StepAndWorkerReviewTests(unittest.TestCase):
     def setUp(self):
@@ -143,6 +161,9 @@ class StepAndWorkerReviewTests(unittest.TestCase):
         self.lab.step_session(session_id, self.candles)
         last = self.lab.session(session_id)["last_processed"]
         self.assertEqual(last["EURUSD"], last["GBPUSD"])  # EURUSD waits for GBPUSD at candle 39
+        session = self.lab.session(session_id)
+        self.assertIn("GBPUSD", session["last_error"])  # the wait is shown, not silent
+        self.assertEqual(session["nature"], "UNKNOWN")  # candles stored directly, without a registered source
         self.candles.store([candle(i, 1.3, symbol="GBPUSD") for i in range(40, 60)], "HISTORICAL", None)
         self.assertEqual(self.lab.step_session(session_id, self.candles)["processed"], 40)
 
