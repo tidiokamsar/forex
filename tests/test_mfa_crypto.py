@@ -422,7 +422,9 @@ class ReviewFixTests(MfaCase):
     def test_lock_file_symlink_is_refused(self):
         key_file = Path(self.temp.name) / "mfa.key"
         target = Path(self.temp.name) / "planted"
-        os.symlink(target, Path(self.temp.name) / ".mfa.key.lock")
+        lock = Path(self.temp.name) / ".mfa.key.lock"
+        lock.unlink(missing_ok=True)  # left by the key ring setup
+        os.symlink(target, lock)
         before = key_file.read_bytes()
         with self.assertRaises(MfaKeyError):
             mfa_crypto.add_active_key(key_file)
