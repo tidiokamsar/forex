@@ -91,6 +91,18 @@ def build_parser() -> argparse.ArgumentParser:
     agent_actions = agent_cmd.add_subparsers(dest="agent_action", required=True)
     agent_actions.add_parser("run", help="Boucle continue (ASTRA_AGENT_URL, ASTRA_AGENT_TOKEN_FILE)")
     agent_actions.add_parser("once", help="Un seul cycle, puis sortie")
+    mt5_cmd = commands.add_parser("mt5", help="Compte DEMO MetaTrader 5 en lecture (Windows, terminal MT5 connecté)")
+    mt5_actions = mt5_cmd.add_subparsers(dest="mt5_action", required=True)
+    mt5_actions.add_parser("check", help="Vérifier le compte DEMO du terminal (aucun ordre, aucun mot de passe)")
+    mt5_export = mt5_actions.add_parser("export", help="Écrire les bougies closes des paires en CSV (heures UTC)")
+    mt5_export.add_argument("--timeframe", default="H1")
+    mt5_export.add_argument("--count", type=int, default=20_000)
+    mt5_export.add_argument("--out", required=True, help="Dossier de sortie (un fichier par paire)")
+    mt5_export.add_argument("--terminal", default=None, help="Chemin de terminal64.exe")
+    mt5_test = mt5_actions.add_parser("test-order", help="Ordre DEMO contrôlé : 0,01 lot EURUSD avec stop, refermé aussitôt")
+    mt5_test.add_argument("--login", type=int, required=True, help="Compte DEMO attendu (tout autre compte est refusé)")
+    mt5_bridge = mt5_actions.add_parser("bridge", help="Recopier les comptes ASTRA auto sur le compte DEMO (ASTRA_MT5_*)")
+    mt5_bridge.add_argument("bridge_action", choices=("run", "once"))
     replay = commands.add_parser(
         "paper-replay",
         help="Rejouer des barres via Order Gateway et courtier simulé (aucun ordre externe)",
@@ -351,6 +363,59 @@ def _demo_command(args: argparse.Namespace, config: AppConfig) -> int:
     return 0
 
 
+def _mt5(args: argparse.Namespace) -> int:
+    from .brokers import mt5_demo
+
+    if args.mt5_action == "bridge":
+        from .mt5_bridge import run_from_env
+
+        return run_from_env(once=args.bridge_action == "once")
+    if args.mt5_action == "test-order":
+        return _mt5_test_order(args.login)
+    try:
+        with mt5_demo.Mt5DemoFeed(getattr(args, "terminal", None) or mt5_demo.DEFAULT_TERMINAL) as feed:
+            if args.mt5_action == "check":
+                _write_json({"account": feed.account})
+                return 0
+            out = Path(args.out)
+            out.mkdir(parents=True, exist_ok=True)
+            written = []
+            for symbol in mt5_demo.PAIRS:
+                candles = feed.candles(symbol, args.timeframe, args.count)
+                path = out / f"{feed.account['source']}_{symbol}_{args.timeframe}.csv"
+                path.write_bytes(mt5_demo.to_csv(candles))
+                written.append({"symbol": symbol, "candles": len(candles), "file": str(path),
+                                "first": candles[0].timestamp.isoformat() if candles else None,
+                                "last": candles[-1].timestamp.isoformat() if candles else None})
+            _write_json({"account": feed.account, "timeframe": args.timeframe, "files": written})
+            return 0
+    except mt5_demo.Mt5DemoError as exc:
+        _write_json({"status": "error", "reason": str(exc)})
+        return 2
+
+
+def _mt5_test_order(login: int) -> int:
+    """One controlled DEMO order: the smallest EURUSD buy with a 30-pip stop, closed at once."""
+
+    from .brokers.mt5_demo import Mt5DemoError
+    from .brokers.mt5_demo_orders import Mt5DemoTrader
+
+    try:
+        with Mt5DemoTrader(expected_login=login) as trader:
+            info = trader.mt5.symbol_info("EURUSD")
+            tick = trader.mt5.symbol_info_tick("EURUSD")
+            sl = round(tick.ask - 0.0030, info.digits)
+            opened = trader.open("EURUSD", "LONG", info.volume_min, sl)
+            mine = [p for p in trader.positions() if p.astra and p.symbol == "EURUSD"]
+            closed = [trader.close(p) for p in mine]
+            _write_json({"account": trader.account, "opened": opened, "closed": closed,
+                         "astra_positions_left": len([p for p in trader.positions() if p.astra])})
+            return 0
+    except Mt5DemoError as exc:
+        _write_json({"status": "error", "reason": str(exc)})
+        return 2
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     # Logs go to stderr (and optionally a rotating file); stdout stays JSON output.
@@ -398,6 +463,9 @@ def _run(args: argparse.Namespace) -> int:
             from .agent import run_from_env
 
             return run_from_env(once=args.agent_action == "once")
+
+        if args.command == "mt5":
+            return _mt5(args)
 
         if args.command == "ctrader-check":
             _write_json(ctrader_check(args.operator, config))
