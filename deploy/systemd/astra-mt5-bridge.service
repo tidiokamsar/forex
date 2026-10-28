@@ -1,0 +1,61 @@
+# ASTRA MT5 DEMO bridge on the server: MT5 terminal and Windows Python under Wine, on a virtual screen.
+# Mirrors ASTRA's managed paper accounts onto ONE MT5 DEMO account (src/astra/mt5_bridge.py). Orders only if
+# the account is DEMO, the expected login and an allowed server; LIVE stays locked on the ASTRA server.
+# Secrets come from systemd credentials only: the account password (astra-set-mt5-demo-password) and a read
+# agent token (astra auth agent-create --scopes read). Host-specific values go in a drop-in, not in Git:
+#   [Service]
+#   Environment=ASTRA_MT5_URL=https://<dashboard>
+#   Environment=ASTRA_MT5_LOGIN=<demo account number>
+# To stop every order at once: touch /var/lib/astra-mt5/bridge/STOP
+[Unit]
+Description=ASTRA MT5 DEMO bridge (Wine, DEMO account only)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/astra/mt5-demo.cred
+ConditionPathExists=/etc/astra/mt5-bridge.token
+StartLimitIntervalSec=900
+StartLimitBurst=5
+OnFailure=astra-alert@%n.service
+
+[Service]
+Type=simple
+User=astra-mt5
+Group=astra-mt5
+WorkingDirectory=/var/lib/astra-mt5
+Environment=HOME=/var/lib/astra-mt5
+Environment=WINEPREFIX=/var/lib/astra-mt5/.wine
+Environment=WINEDEBUG=-all
+Environment=PYTHONPATH=Z:\opt\astra\app\src
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=ASTRA_MT5_SERVER=MetaQuotes-Demo
+Environment=ASTRA_MT5_DIR=/var/lib/astra-mt5/bridge
+Environment=ASTRA_MT5_TERMINAL=C:\Program Files\MetaTrader 5\terminal64.exe
+LoadCredential=mt5-password:/etc/astra/mt5-demo.cred
+LoadCredential=mt5-bridge-token:/etc/astra/mt5-bridge.token
+ExecStartPre=+/usr/bin/install -d -o astra-mt5 -g astra-mt5 -m 0700 /var/lib/astra-mt5/bridge
+ExecStart=/usr/bin/xvfb-run -a -s "-screen 0 1280x800x24 -nolisten tcp" /usr/bin/wine64-stable C:\Python314\python.exe -m astra mt5 bridge run
+ExecStopPost=-/usr/bin/runuser -u astra-mt5 -- env WINEPREFIX=/var/lib/astra-mt5/.wine /usr/lib/x86_64-linux-gnu/wine/wineserver -k
+# Exit code 2 = halted on purpose (server not in SIMULATION, token refused, account refused): no restart loop.
+Restart=on-failure
+RestartPreventExitStatus=2
+RestartSec=60
+UMask=0077
+MemoryMax=2G
+TasksMax=256
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/astra-mt5
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

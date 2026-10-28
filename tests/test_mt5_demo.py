@@ -28,7 +28,8 @@ class FakeMt5:
             {"time": server_seconds("2026-07-15 10:00"), "open": 1.1, "high": 1.2, "low": 1.0, "close": 1.15, "tick_volume": 7},
         ]
 
-    def initialize(self, path=None, timeout=None):
+    def initialize(self, path=None, timeout=None, **signin):
+        self.signin = signin
         return True
 
     def last_error(self):
@@ -68,6 +69,14 @@ class Mt5DemoTests(unittest.TestCase):
         account = mt5_demo.Mt5DemoFeed(module=FakeMt5()).connect()
         self.assertEqual((account["environment"], account["source"]), ("DEMO", "MT5_METAQUOTES_DEMO"))
         self.assertFalse(account["algo_trading_enabled"])
+
+    def test_unattended_sign_in_checks_the_server_first_and_never_returns_the_password(self):
+        with self.assertRaises(mt5_demo.Mt5DemoError):
+            mt5_demo.Mt5DemoFeed(module=FakeMt5(), credentials=(114765880, "pw-123", "Broker-Live"))
+        fake = FakeMt5()
+        account = mt5_demo.Mt5DemoFeed(module=fake, credentials=(114765880, "pw-123", "MetaQuotes-Demo")).connect()
+        self.assertEqual(fake.signin, {"login": 114765880, "password": "pw-123", "server": "MetaQuotes-Demo"})
+        self.assertNotIn("pw-123", repr(account))
 
     def test_closed_bars_only_and_server_clock_converted_to_utc(self):
         fake = FakeMt5()

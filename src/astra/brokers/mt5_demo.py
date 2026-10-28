@@ -1,8 +1,10 @@
 """MetaTrader 5 DEMO data feed: account check and closed candles from the MT5 terminal running on Windows.
 
-ASTRA never logs in to MT5 and never holds the account password: the account holder signs in once in the
-desktop terminal (password saved there), and the official ``MetaTrader5`` package (MetaQuotes Ltd., Windows
-only) attaches to that running terminal. This module reads only; it has no order function.
+On a desktop, ASTRA never holds the account password: the account holder signs in once in the terminal
+(password saved there), and the official ``MetaTrader5`` package (MetaQuotes Ltd., Windows only) attaches to
+that running terminal. On the server (terminal under Wine, no one at the screen), the password deposited by the
+account holder (deploy/astra-set-mt5-demo-password) is handed to the bridge by systemd and passed to
+``initialize`` only. This module reads only; it has no order function.
 
 Guards, checked on every connection:
 - the account must report ``ACCOUNT_TRADE_MODE_DEMO`` and its server must be in ``ALLOWED_SERVERS``,
@@ -56,11 +58,17 @@ class Mt5DemoFeed:
     """Read-only access to one DEMO account of a running MT5 terminal."""
 
     def __init__(self, terminal_path: str = DEFAULT_TERMINAL, module: ModuleType | None = None,
-                 timeout_ms: int = 20_000) -> None:
+                 timeout_ms: int = 20_000, credentials: tuple[int, str, str] | None = None) -> None:
+        """``credentials`` (login, password, server) signs the terminal in, for an unattended terminal (server);
+        without it the terminal must already be signed in by the account holder."""
+
         self.mt5 = module or _load()
         self.terminal_path = terminal_path
         self.timeout_ms = timeout_ms
         self.account: dict[str, Any] | None = None
+        if credentials is not None and credentials[2] not in ALLOWED_SERVERS:
+            raise Mt5DemoError(f"serveur {credentials[2]!r} non vérifié (autorisés : {', '.join(sorted(ALLOWED_SERVERS))})")
+        self._credentials = credentials  # never logged nor returned
 
     def __enter__(self) -> Mt5DemoFeed:
         self.connect()
@@ -71,7 +79,11 @@ class Mt5DemoFeed:
 
     def connect(self) -> dict[str, Any]:
         mt5 = self.mt5
-        if not mt5.initialize(path=self.terminal_path, timeout=self.timeout_ms):
+        signin = {}
+        if self._credentials is not None:
+            login, password, server = self._credentials
+            signin = {"login": int(login), "password": password, "server": server}
+        if not mt5.initialize(path=self.terminal_path, timeout=self.timeout_ms, **signin):
             raise Mt5DemoError(f"terminal MT5 injoignable : {mt5.last_error()}")
         info = mt5.account_info()
         if info is None:

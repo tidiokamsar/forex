@@ -158,16 +158,33 @@ class Bridge:
             sleep(interval)
 
 
+def _native(path: str) -> str:
+    """A Linux path seen from Windows Python under Wine (systemd credentials live in /run/credentials)."""
+
+    return "Z:" + path.replace("/", "\\") if os.name == "nt" and path.startswith("/") else path
+
+
 def run_from_env(once: bool = False) -> int:
     url = os.environ.get("ASTRA_MT5_URL", "").strip()
     token_file = os.environ.get("ASTRA_MT5_TOKEN_FILE", "").strip()
+    credentials_dir = os.environ.get("CREDENTIALS_DIRECTORY", "").strip()  # systemd LoadCredential (server)
+    if credentials_dir and not token_file:
+        token_file = f"{credentials_dir}/mt5-bridge-token"
     login = os.environ.get("ASTRA_MT5_LOGIN", "").strip()
     if not (url and token_file and login.isdigit()):
         print("astra-mt5-bridge: ASTRA_MT5_URL, ASTRA_MT5_TOKEN_FILE et ASTRA_MT5_LOGIN sont obligatoires", file=sys.stderr)
         return 2
-    token = Path(token_file).read_text(encoding="utf-8").strip()
+    token = Path(_native(token_file)).read_text(encoding="utf-8").strip()
     client = AstraClient(http_transport(url, token))
-    trader = Mt5DemoTrader(os.environ.get("ASTRA_MT5_TERMINAL") or DEFAULT_TERMINAL, expected_login=int(login))
-    workdir = Path(os.environ.get("ASTRA_MT5_DIR") or "var/mt5-bridge")
+    credentials = None
+    password_file = os.environ.get("ASTRA_MT5_PASSWORD_FILE", "").strip()
+    if credentials_dir and not password_file:
+        password_file = f"{credentials_dir}/mt5-password"
+    if password_file:  # unattended terminal (server): sign in with the deposited password
+        password = Path(_native(password_file)).read_text(encoding="utf-8")  # written without a newline
+        credentials = (int(login), password, os.environ.get("ASTRA_MT5_SERVER") or "MetaQuotes-Demo")
+    trader = Mt5DemoTrader(os.environ.get("ASTRA_MT5_TERMINAL") or DEFAULT_TERMINAL, expected_login=int(login),
+                           credentials=credentials)
+    workdir = Path(_native(os.environ.get("ASTRA_MT5_DIR") or "var/mt5-bridge"))
     interval = max(60, int(os.environ.get("ASTRA_MT5_INTERVAL_SECONDS") or DEFAULT_INTERVAL_SECONDS))
     return Bridge(client, trader, workdir).run(interval, once=once)
