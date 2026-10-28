@@ -292,7 +292,9 @@ class ImportAndDocHonestyTests(unittest.TestCase):
             with self.subTest(venue=venue["venue_id"]):
                 self.assertFalse(held & {"READ_ONLY_CONNECTED", "PAPER_TESTED", "DEMO_VALIDATED",
                                          "LIVE_REVIEW_REQUIRED"})
-                self.assertTrue(held & {"UNVERIFIED", "ELIGIBILITY_UNKNOWN", "BLOCKED"})
+                # binance_spot_demo holds REGION_ELIGIBILITY_VERIFIED from the account holder's statement of
+                # 2026-10-28; eligibility is not a connection, and no venue may claim one yet.
+                self.assertTrue(held & {"UNVERIFIED", "ELIGIBILITY_UNKNOWN", "BLOCKED", "REGION_ELIGIBILITY_VERIFIED"})
         self.assertFalse(venue_registry.TRADING_ENABLED_IN_THIS_LOT)
 
     def test_docs_never_call_a_venue_integrated(self):

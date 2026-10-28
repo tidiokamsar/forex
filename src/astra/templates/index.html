@@ -7,6 +7,7 @@
         <a href="#donnees" class="tab" data-tab="donnees">Données</a>
         <a href="#backtests" class="tab" data-tab="backtests">Backtests</a>
         <a href="#simulation" class="tab" data-tab="simulation">Simulation</a>
+        <a href="#apprentissage" class="tab" data-tab="apprentissage">Apprentissage</a>
         <a href="#demo" class="tab" data-tab="demo">Compte DEMO</a>
         <a href="#journaux" class="tab" data-tab="journaux">Journaux</a>
       </nav>
@@ -233,6 +234,17 @@
         <h3>Signaux</h3><div class="table-scroll"><table><thead><tr><th>Date</th><th>Paire</th><th>Décision</th><th>Prix</th><th>Justification</th></tr></thead><tbody id="sim-signals"></tbody></table></div>
         <h3>Événements</h3><ul id="sim-events" class="plain-list"></ul>
       </section>
+      </div>
+
+      <!-- ===================== APPRENTISSAGE ===================== -->
+      <div class="view" id="view-apprentissage" hidden>
+      <section class="intro"><div><p class="eyebrow">AMÉLIORATION CONTINUE</p><h2>Apprentissage</h2>
+        <p class="muted" id="learn-method">Chaque jour et pour chaque paire, ASTRA essaie de nouvelles versions de la stratégie, les évalue hors échantillon avec les coûts, et ne remplace la version en service (le champion) que si toutes les conditions fixées à l’avance sont remplies.</p></div></section>
+      <section class="panel table-panel"><div class="panel-heading"><div><p class="eyebrow">CHAMPIONS</p><h2>Version en service et compte simulé par paire</h2></div></div>
+        <div class="table-scroll"><table><thead><tr><th>Paire</th><th>Version</th><th>Paramètres</th><th>Origine</th><th>Essais cumulés</th><th>Dernière évaluation</th><th>Compte simulé</th><th>Transactions</th></tr></thead><tbody id="learn-pairs"></tbody></table></div></section>
+      <section class="panel table-panel"><div class="panel-heading"><div><p class="eyebrow">ÉVALUATIONS</p><h2>Dernières évaluations</h2></div></div>
+        <div class="table-scroll"><table><thead><tr><th>Date UTC</th><th>Paire</th><th>Candidats</th><th>Score champion</th><th>Meilleur score</th><th>Contrôle final (meilleur / champion)</th><th>Décision</th><th>Motif</th></tr></thead><tbody id="learn-runs"></tbody></table></div>
+        <p class="footnote" id="learn-warning">Amélioration mesurée sur l’historique : aucune garantie de résultat futur. Le nombre d’essais est conservé, car essayer beaucoup de versions augmente le risque de résultats flatteurs par hasard.</p></section>
       </div>
 
       <!-- ===================== COMPTE DEMO ===================== -->

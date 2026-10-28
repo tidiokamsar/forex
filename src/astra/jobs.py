@@ -20,12 +20,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import marketdata
+from . import learning, marketdata
 from .marketdata import CandleStore, MarketDataError
 from .papertrade import LabStore, SimulationError, run_backtest
 
 LOG = logging.getLogger("astra.worker")
-JOB_KINDS = ("import_csv", "ingest_ecb", "backtest")
+JOB_KINDS = ("import_csv", "ingest_ecb", "backtest", "learn")
+LEARN_INTERVAL = timedelta(hours=20)  # one learning run per pair and day at most
 ECB_INTERVAL = timedelta(hours=6)
 POLL_SECONDS = 5.0
 
@@ -164,6 +165,8 @@ class Worker:
         self.candles = CandleStore(self.database)
         self.lab = LabStore(self.database)
         self.jobs = JobStore(self.database)
+        self.learning = learning.LearningStore(self.database)
+        self.learning_enabled = True
         self.ecb_fetch = ecb_fetch
         self.ecb_enabled = ecb_enabled
         self.clock = clock
@@ -173,6 +176,7 @@ class Worker:
         self.candles.initialize()
         self.lab.initialize()
         self.jobs.initialize()
+        self.learning.initialize()
         recovered = self.jobs.recover()
         self.lab.fail_interrupted_backtests()
         if recovered:
@@ -197,6 +201,12 @@ class Worker:
                                            **kwargs)
             if result["status"] == "FAILED":
                 raise MarketDataError(result["error"] or "BCE indisponible")
+            return result
+        if job["kind"] == "learn":
+            symbol = str(params["symbol"])
+            result = learning.learn(self.candles, self.learning, symbol)
+            if result["decision"] == "PROMOTED":
+                result["applied_to_simulation"] = learning.apply_champion(self.learning, self.lab, symbol)
             return result
         if job["kind"] == "backtest":
             backtest_id = int(params["backtest_id"])
@@ -230,11 +240,28 @@ class Worker:
             return
         self.jobs.enqueue("ingest_ecb", {"scheduled": True}, "worker:planification", dedupe_key="ingest_ecb")
 
+    def maybe_schedule_learning(self) -> None:
+        """Continuous improvement: managed paper accounts exist, and each pair is re-evaluated once a day."""
+
+        if not self.learning_enabled:
+            return
+        learning.ensure_managed_sessions(self.candles, self.learning, self.lab)
+        available = {c["symbol"] for c in self.candles.coverage()
+                     if c["timeframe"] == learning.TIMEFRAME and c["source"] == learning.SOURCE}
+        for symbol in sorted(available):
+            last = self.learning.last_run_at(symbol)
+            if last is None or self.clock() - last >= LEARN_INTERVAL:
+                self.jobs.enqueue("learn", {"symbol": symbol}, "worker:apprentissage", dedupe_key=f"learn:{symbol}")
+
     def tick(self) -> dict[str, Any]:
         """One loop: schedule, run at most one job, advance every running simulation."""
 
         summary: dict[str, Any] = {"job": None, "sessions": {}}
         self.maybe_schedule_ecb()
+        try:
+            self.maybe_schedule_learning()
+        except Exception as exc:  # noqa: BLE001 - learning must never stop data, backtests or simulations
+            LOG.error("learning schedule failed: %s", exc)
         job = self.jobs.claim()
         if job:
             self.jobs.set_state("heartbeat", {"pid_time": _iso(self.clock()), "running_job": job["id"]})

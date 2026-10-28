@@ -16,7 +16,7 @@ from typing import Any
 
 from flask import Flask, Response, jsonify, request
 
-from . import marketdata
+from . import learning, marketdata
 from .auth import WebRole
 from .jobs import JobStore, worker_health
 from .marketdata import CandleStore, MarketDataError
@@ -28,7 +28,8 @@ UPLOAD_LIMIT = marketdata.MAX_IMPORT_BYTES + 64 * 1024
 def register_lab_routes(app: Flask, *, database: Path, import_dir: Path, require: Callable, actor: Callable[[], str],
                         error: Callable[[int, str], Response]) -> None:
     candles, lab, jobs = CandleStore(database), LabStore(database), JobStore(database)
-    for store in (candles, lab, jobs):
+    learn_store = learning.LearningStore(database)
+    for store in (candles, lab, jobs, learn_store):
         store.initialize()
 
     def answer(producer: Callable[[], Any], status: int = 200) -> Response:
@@ -124,6 +125,11 @@ def register_lab_routes(app: Flask, *, database: Path, import_dir: Path, require
     def sim_session(session_id: int) -> Response:
         item = lab.session(session_id)
         return jsonify(item) if item else error(404, "not_found")
+
+    @app.get("/api/learn/overview")
+    @require(WebRole.READ_ONLY)
+    def learn_overview() -> Response:
+        return answer(lambda: learning.overview(learn_store, lab))
 
     @app.get("/api/system/jobs")
     @require(WebRole.READ_ONLY)

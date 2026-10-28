@@ -77,7 +77,8 @@ class WorkerTests(unittest.TestCase):
         worker.tick()
         self.assertEqual(worker.jobs.jobs()[0]["status"], "DONE")
         worker.tick()
-        self.assertEqual(len(worker.jobs.jobs()), 2)  # fresh data: no new request for 6 hours
+        ingests = [j for j in worker.jobs.jobs() if j["kind"] == "ingest_ecb"]  # learning jobs follow the new data
+        self.assertEqual(len(ingests), 2)  # fresh data: no new request for 6 hours
         self.assertEqual(self.calls, 1)
 
     def test_interrupted_job_is_marked_failed_after_a_restart(self):
@@ -212,3 +213,13 @@ class DemoRouteTests(WebAppCase):
         kinds = [r["kind"] for r in DemoStore(self.db).requests()]
         self.assertEqual(sorted(kinds), ["controlled_test", "resume"])
         self.assertEqual(operator.get("/api/demo/overview").get_json()["orders"], [])
+
+
+class LearningRouteTests(WebAppCase):
+    def test_learning_overview_is_read_only(self):
+        self.assertEqual(self.client().get("/api/learn/overview").status_code, 401)
+        viewer = self.session_client("viewer", WebRole.READ_ONLY)
+        overview = viewer.get("/api/learn/overview").get_json()
+        self.assertEqual(len(overview["pairs"]), 7)
+        self.assertEqual(overview["pairs"][0]["champion"]["version"], 1)
+        self.assertIn("aucune garantie", overview["method"]["warning"])

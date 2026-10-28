@@ -624,6 +624,26 @@ class LabStore:
             self._append(db, session_id, "events", [{"ts": now, "kind": status, "message": f"simulation {label} par {actor}"}])
         return {"id": session_id, "status": status, "changed": True}
 
+    def update_session_strategy(self, session_id: int, strategy: dict[str, Any], stop_atr_multiple: float,
+                                note: str) -> bool:
+        """New strategy parameters for a running paper account, from its next candle (positions are kept)."""
+
+        validated = asdict(_build(StrategyParams, strategy))
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT params_json FROM sim_sessions WHERE id = ?", (session_id,)).fetchone()
+            if row is None:
+                return False
+            params = json.loads(row["params_json"])
+            risk = asdict(_build(RiskParams, {**params["risk"], "stop_atr_multiple": stop_atr_multiple}))
+            if params["strategy"] == validated and params["risk"] == risk:
+                return False
+            params["strategy"], params["risk"] = validated, risk
+            db.execute("UPDATE sim_sessions SET params_json = ?, updated_at = ? WHERE id = ?",
+                       (_dumps(params), _iso(_now()), session_id))
+            self._append(db, session_id, "events", [{"ts": _iso(_now()), "kind": "NOUVEAU_CHAMPION", "message": note}])
+            return True
+
     def sessions(self) -> list[dict[str, Any]]:
         with self._connect() as db:
             rows = db.execute("SELECT * FROM sim_sessions ORDER BY id DESC").fetchall()
@@ -772,7 +792,9 @@ def run_backtest(candles_store: CandleStore, request: dict[str, Any]) -> dict[st
     sym, tf, src = request["symbol"], request["timeframe"], request["source"]
     period = candles_store.candles(sym, tf, src, start=start, end=end)
     if len(period) < 2:
-        raise SimulationError(f"pas assez de bougies {sym} {tf} ({src}) sur la période : {len(period)}")
+        days = math.ceil(TIMEFRAMES[tf] * (strategy.warmup + 30) / 86400)
+        raise SimulationError(f"pas assez de bougies {sym} {tf} ({src}) sur la période : {len(period)}. Choisissez une période "
+                              f"plus longue (au moins {days} jours en {tf}) ou laissez les dates vides pour tout l'historique")
     warm = candles_store.candles(sym, tf, src, end=period[0].timestamp, limit=strategy.warmup + 1, newest=True)
     warm = [c for c in warm if c.timestamp < period[0].timestamp]
     engine, rec = Engine(strategy, risk, costs), Recorder()

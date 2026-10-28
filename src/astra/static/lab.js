@@ -114,7 +114,7 @@ function lineChart(container, points, label) {
 // -- tabs ------------------------------------------------------------------------------------------
 function showTab() {
   const name = (window.location.hash || "#apercu").slice(1);
-  const known = ["apercu", "donnees", "backtests", "simulation", "demo", "journaux"];
+  const known = ["apercu", "donnees", "backtests", "simulation", "apprentissage", "demo", "journaux"];
   const active = known.includes(name) ? name : "apercu";
   for (const view of known) $(`view-${view}`).hidden = view !== active;
   for (const tab of document.querySelectorAll(".tab")) tab.classList.toggle("is-active", tab.dataset.tab === active);
@@ -356,6 +356,31 @@ function renderJobs(payload) {
   $("worker-state").textContent = `Worker : ${payload.worker.label}`;
 }
 
+// -- learning -----------------------------------------------------------------------------------------
+function paramsText(p) {
+  if (!p) return "—";
+  const s = p.strategy || {};
+  return `SMA ${s.fast}/${s.slow} · ATR ${s.atr_window} · stop ${p.stop_atr_multiple} ATR · ATR min ${num((s.min_atr_pct || 0) * 100)} %`;
+}
+
+function renderLearning(d) {
+  fill("learn-pairs", d.pairs.map((p) => row([p.symbol, `v${p.champion.version}`, paramsText(p.champion.params), p.champion.reason,
+    num(p.trials), when(p.last_run_at),
+    p.session ? `${money(p.session.account.equity)} (${p.session.account.net_pnl >= 0 ? "+" : ""}${money(p.session.account.net_pnl)})` : "—",
+    p.session ? num(p.session.trades_total) : "—"])), "Aucune paire avec des données BCE.", 8);
+  fill("learn-runs", d.runs.map((r) => {
+    const ev = r.evidence || {};
+    const champ = ev.champion_selection || {};
+    const best = (ev.best || {}).selection || {};
+    const check = ev.final_check_best ? `${money(ev.final_check_best.net_pnl)} / ${money((ev.final_check_champion || {}).net_pnl)}` : "—";
+    const decision = r.status === "FAILED" ? `échec : ${r.error}` : (r.decision === "PROMOTED" ? "NOUVEAU CHAMPION" : "champion conservé");
+    return row([when(r.started_at), r.symbol, num((r.candidates || []).length), champ.score == null ? "—" : num(champ.score),
+      best.score == null ? "—" : num(best.score), check, decision, ev.reason || "—"]);
+  }), "Aucune évaluation encore : la première a lieu dans les minutes qui suivent le démarrage du worker.", 8);
+  const m = d.method;
+  $("learn-warning").textContent = `Méthode : ${m.selection} ; ${m.candidates_per_run} candidats par évaluation ; contrôle final sur les ${m.final_check_days} derniers jours ; gain minimal ${m.min_score_gain} point ; drawdown maximal ${m.max_drawdown_pct} % ; au moins ${m.min_trades} transactions. ${m.warning}.`;
+}
+
 // -- DEMO account -----------------------------------------------------------------------------------
 function renderDemo(d) {
   const st = d.status;
@@ -420,9 +445,10 @@ async function refreshBacktests() { return renderBacktests((await api("/api/lab/
 async function refreshSessions() { renderSessions(await api("/api/sim/sessions")); }
 async function refreshJobs() { renderJobs(await api("/api/system/jobs")); }
 async function refreshDemo() { renderDemo(await api("/api/demo/overview")); }
+async function refreshLearning() { renderLearning(await api("/api/learn/overview")); }
 
 async function refreshAll() {
-  const results = await Promise.allSettled([refreshData(), refreshBacktests(), refreshSessions(), refreshJobs(), refreshDemo()]);
+  const results = await Promise.allSettled([refreshData(), refreshBacktests(), refreshSessions(), refreshJobs(), refreshDemo(), refreshLearning()]);
   if (selectedSession) showSession(selectedSession).catch(() => {});
   return results[1].status === "fulfilled" && results[1].value;
 }
