@@ -47,11 +47,13 @@ from .papertrade import (
 LEARNING_VERSION = "1.0.0"
 SOURCE, TIMEFRAME = "ECB_EXR", "D1"
 FINAL_CHECK_DAYS = 365
-CANDIDATES_PER_RUN = 16
+CANDIDATES_PER_RUN = 24  # about eight per strategy family
 MIN_TRADES = 20
 MIN_SCORE_GAIN = 0.5
 MAX_DRAWDOWN_PCT = 15.0
 SPACE = {
+    "family": ("sma_trend", "momentum", "mean_reversion"),
+    "z_entry": (0.75, 1.0, 1.5, 2.0),  # mean_reversion only
     "fast": (5, 10, 15, 20, 30, 40),
     "slow": (20, 30, 50, 80, 120, 160),
     "atr_window": (10, 14, 20),
@@ -238,15 +240,20 @@ def evaluate(candles: CandleStore, symbol: str, params: dict[str, Any], windows:
 def candidates(seed: int, champion: dict[str, Any], count: int = CANDIDATES_PER_RUN) -> list[dict[str, Any]]:
     rng = random.Random(seed)
     found: list[dict[str, Any]] = []
-    seen = {json.dumps(champion, sort_keys=True)}
+    # Champions stored before the strategy families have no family field: compare them with every field filled.
+    normalized = {"strategy": asdict(_build(StrategyParams, champion["strategy"])),
+                  "stop_atr_multiple": champion["stop_atr_multiple"]}
+    seen = {json.dumps(normalized, sort_keys=True)}
     attempts = 0
     while len(found) < count and attempts < 1000:
         attempts += 1
         fast, slow = rng.choice(SPACE["fast"]), rng.choice(SPACE["slow"])
         if fast >= slow:
             continue
+        family = rng.choice(SPACE["family"])
         strategy = {"fast": fast, "slow": slow, "atr_window": rng.choice(SPACE["atr_window"]),
-                    "min_atr_pct": rng.choice(SPACE["min_atr_pct"]), "max_atr_pct": 0.03}
+                    "min_atr_pct": rng.choice(SPACE["min_atr_pct"]), "max_atr_pct": 0.03, "family": family,
+                    "z_entry": rng.choice(SPACE["z_entry"]) if family == "mean_reversion" else 1.0}
         params = {"strategy": strategy, "stop_atr_multiple": rng.choice(SPACE["stop_atr_multiple"])}
         key = json.dumps(params, sort_keys=True)
         if key not in seen:

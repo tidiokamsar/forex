@@ -9,7 +9,7 @@ from _support import workspace_tempdir
 from astra import learning
 from astra.jobs import Worker
 from astra.marketdata import KIND_REFERENCE, Candle, CandleStore
-from astra.papertrade import LabStore
+from astra.papertrade import BUY, FLAT, SELL, LabStore
 
 
 def daily_series(symbol="EURUSD", years=6, start=datetime(2019, 1, 1, 13, 15, tzinfo=UTC)):
@@ -105,6 +105,46 @@ class UnitTests(LearningCase):
         self.assertIn("NOUVEAU_CHAMPION", [e["kind"] for e in after["events"]])
         self.assertEqual(self.store.rollback("EURUSD"), 3)
         self.assertEqual(self.store.champion("EURUSD")["params"], learning.default_params())
+
+
+class FamilyTests(unittest.TestCase):
+    @staticmethod
+    def series(closes):
+        start = datetime(2024, 1, 1, tzinfo=UTC)
+        return [Candle("EURUSD", "D1", start + timedelta(days=i), None, None, None, c, None, "ECB_EXR", KIND_REFERENCE)
+                for i, c in enumerate(closes)]
+
+    def decide(self, closes, **strategy):
+        from astra.papertrade import StrategyParams, _build, decide
+
+        params = _build(StrategyParams, {"fast": 3, "slow": 10, "atr_window": 3, "min_atr_pct": 0.0, **strategy})
+        return decide(self.series(closes), params)
+
+    def test_momentum_follows_the_move_over_the_slow_window(self):
+        rising = [1.10 + 0.001 * i for i in range(12)]
+        self.assertEqual(self.decide(rising, family="momentum").action, BUY)
+        self.assertEqual(self.decide(rising[::-1], family="momentum").action, SELL)
+
+    def test_mean_reversion_fades_a_stretched_price_and_stays_flat_near_the_mean(self):
+        flat = [1.10, 1.101] * 5
+        self.assertEqual(self.decide([*flat, 1.13], family="mean_reversion", z_entry=1.5).action, SELL)
+        self.assertEqual(self.decide([*flat, 1.07], family="mean_reversion", z_entry=1.5).action, BUY)
+        self.assertEqual(self.decide([*flat, 1.1005], family="mean_reversion").action, FLAT)
+
+    def test_old_parameters_keep_the_sma_trend_and_unknown_families_are_refused(self):
+        from astra.papertrade import SimulationError, StrategyParams, _build
+
+        self.assertEqual(_build(StrategyParams, {"fast": 20, "slow": 50}).family, "sma_trend")
+        for bad in ({"family": "martingale"}, {"family": 3}, {"z_entry": 9}):
+            with self.assertRaises(SimulationError):
+                _build(StrategyParams, bad)
+
+    def test_candidates_cover_every_family(self):
+        pool = learning.candidates(7, learning.default_params())
+        self.assertEqual({c["strategy"]["family"] for c in pool}, set(learning.SPACE["family"]))
+        legacy = {"strategy": {"fast": 20, "slow": 50, "atr_window": 14, "min_atr_pct": 0.0002, "max_atr_pct": 0.03},
+                  "stop_atr_multiple": 2.0}  # a champion stored before the families
+        self.assertNotIn(learning.default_params(), learning.candidates(7, legacy))
 
 
 class WorkerTests(LearningCase):

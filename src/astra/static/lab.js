@@ -360,7 +360,8 @@ function renderJobs(payload) {
 function paramsText(p) {
   if (!p) return "—";
   const s = p.strategy || {};
-  return `SMA ${s.fast}/${s.slow} · ATR ${s.atr_window} · stop ${p.stop_atr_multiple} ATR · ATR min ${num((s.min_atr_pct || 0) * 100)} %`;
+  const family = { momentum: "Momentum", mean_reversion: `Retour à la moyenne (z ${s.z_entry})` }[s.family] || "Tendance SMA";
+  return `${family} · ${s.fast}/${s.slow} · ATR ${s.atr_window} · stop ${p.stop_atr_multiple} ATR · ATR min ${num((s.min_atr_pct || 0) * 100)} %`;
 }
 
 function renderLearning(d) {
@@ -485,7 +486,8 @@ function wireForms() {
     if (!symbol) { status("backtest-status", "Aucune série disponible : importez des données d'abord.", true); return; }
     const pct = (name) => (numberValue(f, name) == null ? undefined : numberValue(f, name) / 100);
     const body = { symbol, timeframe, source, start: f.elements.start.value || null, end: f.elements.end.value || null,
-      strategy_params: { fast: numberValue(f, "fast"), slow: numberValue(f, "slow"), min_atr_pct: pct("min_atr_pct"), max_atr_pct: pct("max_atr_pct") },
+      strategy_params: { family: f.elements.family.value, z_entry: numberValue(f, "z_entry"), fast: numberValue(f, "fast"),
+        slow: numberValue(f, "slow"), min_atr_pct: pct("min_atr_pct"), max_atr_pct: pct("max_atr_pct") },
       risk: { initial_capital: numberValue(f, "initial_capital"), risk_per_trade_pct: numberValue(f, "risk_per_trade_pct"),
         stop_atr_multiple: numberValue(f, "stop_atr_multiple"), daily_loss_limit_pct: numberValue(f, "daily_loss_limit_pct"),
         max_drawdown_pct: numberValue(f, "max_drawdown_pct"), max_position_units: numberValue(f, "max_position_units") },

@@ -34,7 +34,12 @@ from .marketdata import KIND_REFERENCE, PAIRS, TIMEFRAMES, Candle, CandleStore, 
 
 ENGINE_VERSION = "1.0.0"
 STRATEGY_NAME = "sma_atr_trend"
-STRATEGY_VERSION = "1.0.0"
+STRATEGY_VERSION = "1.1.0"  # 1.1.0: momentum and mean-reversion families next to the SMA trend
+FAMILIES = {
+    "sma_trend": "tendance SMA",
+    "momentum": "momentum",
+    "mean_reversion": "retour à la moyenne",
+}
 BUY, SELL, FLAT = "ACHAT", "VENTE", "AUCUNE_POSITION"
 MIN_UNITS, UNIT_STEP = 1000, 1000
 MAX_EQUITY_POINTS = 600
@@ -60,15 +65,25 @@ def _now() -> datetime:
 
 @dataclass(frozen=True, slots=True)
 class StrategyParams:
-    """Experimental reference strategy: moving-average trend with a volatility filter (not proven)."""
+    """Experimental reference strategies with a volatility filter (none proven).
+
+    ``family`` picks the rule: ``sma_trend`` (fast SMA against slow SMA), ``momentum`` (close against the first
+    close of the slow window, confirmed by the fast SMA) or ``mean_reversion`` (z-score of the close against the
+    slow SMA, entry beyond ``z_entry``)."""
 
     fast: int = 20
     slow: int = 50
     atr_window: int = 14
     min_atr_pct: float = 0.0002   # ATR / price below this: market too quiet, no position
     max_atr_pct: float = 0.03     # ATR / price above this: too volatile, no position
+    family: str = "sma_trend"
+    z_entry: float = 1.0          # mean_reversion only
 
     def validate(self) -> None:
+        if self.family not in FAMILIES:
+            raise SimulationError(f"famille de stratégie inconnue (valeurs : {', '.join(FAMILIES)})")
+        if not 0.25 <= self.z_entry <= 4:
+            raise SimulationError("seuil d'écart (z) entre 0,25 et 4")
         if not (2 <= self.fast < self.slow <= 400):
             raise SimulationError("moyennes mobiles : 2 ≤ rapide < lente ≤ 400")
         if not 2 <= self.atr_window <= 200:
@@ -136,6 +151,11 @@ def _build(cls: type, values: dict[str, Any] | None) -> Any:
     typed: dict[str, Any] = {}
     for name, value in values.items():
         default = defaults[name]
+        if isinstance(default, str):
+            if not isinstance(value, str):
+                raise SimulationError(f"valeur invalide pour {name}")
+            typed[name] = value.strip()
+            continue
         try:
             typed[name] = int(value) if isinstance(default, int) and not isinstance(default, bool) else float(value)
         except (TypeError, ValueError, OverflowError) as exc:
@@ -175,17 +195,18 @@ def decide(history: Sequence[Candle], params: StrategyParams) -> Decision | None
     atr = sum(ranges) / len(ranges)
     price = history[-1].close
     atr_pct = atr / price
-    trend_up, trend_down = fast > slow, fast < slow
     vol_ok = params.min_atr_pct <= atr_pct <= params.max_atr_pct
-    conditions = {"moyenne_rapide_au_dessus": trend_up, "moyenne_rapide_au_dessous": trend_down,
-                  "volatilite_dans_la_plage": vol_ok}
     indicators = {"sma_rapide": round(fast, 6), "sma_lente": round(slow, 6), "atr": round(atr, 6),
                   "atr_pct": round(atr_pct * 100, 4)}
+    if params.family == "momentum":
+        return _momentum(params, closes, fast, price, vol_ok, indicators, atr_pct)
+    if params.family == "mean_reversion":
+        return _mean_reversion(params, closes, slow, price, vol_ok, indicators, atr_pct)
+    trend_up, trend_down = fast > slow, fast < slow
+    conditions = {"moyenne_rapide_au_dessus": trend_up, "moyenne_rapide_au_dessous": trend_down,
+                  "volatilite_dans_la_plage": vol_ok}
     if not vol_ok:
-        side = "trop faible" if atr_pct < params.min_atr_pct else "trop forte"
-        return Decision(FLAT, price, indicators, conditions,
-                        f"volatilité {side} (ATR {atr_pct * 100:.3f} % du prix, plage {params.min_atr_pct * 100:.3f}"
-                        f" à {params.max_atr_pct * 100:.3f} %)")
+        return _quiet_or_wild(params, price, indicators, conditions, atr_pct)
     if trend_up:
         return Decision(BUY, price, indicators, conditions,
                         f"SMA{params.fast} {fast:.5f} > SMA{params.slow} {slow:.5f} et volatilité dans la plage")
@@ -195,13 +216,62 @@ def decide(history: Sequence[Candle], params: StrategyParams) -> Decision | None
     return Decision(FLAT, price, indicators, conditions, "moyennes égales : pas de tendance")
 
 
+def _quiet_or_wild(params: StrategyParams, price: float, indicators: dict[str, float | None],
+                   conditions: dict[str, bool], atr_pct: float) -> Decision:
+    side = "trop faible" if atr_pct < params.min_atr_pct else "trop forte"
+    return Decision(FLAT, price, indicators, conditions,
+                    f"volatilité {side} (ATR {atr_pct * 100:.3f} % du prix, plage {params.min_atr_pct * 100:.3f}"
+                    f" à {params.max_atr_pct * 100:.3f} %)")
+
+
+def _momentum(params: StrategyParams, closes: list[float], fast: float, price: float, vol_ok: bool,
+              indicators: dict[str, float | None], atr_pct: float) -> Decision:
+    """Time-series momentum: the close against the first close of the slow window, confirmed by the fast SMA."""
+
+    change = price / closes[0] - 1
+    up, down = change > 0 and price > fast, change < 0 and price < fast
+    indicators = {**indicators, "variation_pct": round(change * 100, 4)}
+    conditions = {"hausse_sur_la_periode": up, "baisse_sur_la_periode": down, "volatilite_dans_la_plage": vol_ok}
+    if not vol_ok:
+        return _quiet_or_wild(params, price, indicators, conditions, atr_pct)
+    if up:
+        return Decision(BUY, price, indicators, conditions,
+                        f"+{change * 100:.2f} % sur {params.slow} bougies et cours au-dessus de la SMA{params.fast}")
+    if down:
+        return Decision(SELL, price, indicators, conditions,
+                        f"{change * 100:.2f} % sur {params.slow} bougies et cours au-dessous de la SMA{params.fast}")
+    return Decision(FLAT, price, indicators, conditions, "momentum non confirmé par la moyenne rapide")
+
+
+def _mean_reversion(params: StrategyParams, closes: list[float], mean: float, price: float, vol_ok: bool,
+                    indicators: dict[str, float | None], atr_pct: float) -> Decision:
+    """Mean reversion: buy far below the slow SMA, sell far above it, no position near it."""
+
+    std = (sum((c - mean) ** 2 for c in closes) / len(closes)) ** 0.5
+    z = (price - mean) / std if std > 0 else 0.0
+    low, high = z < -params.z_entry, z > params.z_entry
+    indicators = {**indicators, "ecart_z": round(z, 4)}
+    conditions = {"tres_sous_la_moyenne": low, "tres_au_dessus_de_la_moyenne": high, "volatilite_dans_la_plage": vol_ok}
+    if not vol_ok:
+        return _quiet_or_wild(params, price, indicators, conditions, atr_pct)
+    if low:
+        return Decision(BUY, price, indicators, conditions,
+                        f"cours à {z:.2f} écarts-types sous la SMA{params.slow} (seuil {params.z_entry})")
+    if high:
+        return Decision(SELL, price, indicators, conditions,
+                        f"cours à {z:.2f} écarts-types au-dessus de la SMA{params.slow} (seuil {params.z_entry})")
+    return Decision(FLAT, price, indicators, conditions, f"écart {z:.2f} dans la plage ±{params.z_entry} : pas de position")
+
+
 STRATEGIES = {
     STRATEGY_NAME: {
         "version": STRATEGY_VERSION,
-        "label": "Tendance SMA + filtre ATR (expérimentale, non validée)",
-        "description": ("ACHAT si la moyenne rapide est au-dessus de la lente, VENTE si elle est au-dessous, AUCUNE "
-                        "POSITION si la volatilité (ATR/prix) sort de la plage. Stratégie de référence pour tester la "
-                        "chaîne : aucune performance n'est démontrée."),
+        "label": "Tendance SMA, momentum ou retour à la moyenne + filtre ATR (expérimentales, non validées)",
+        "description": ("Trois familles. Tendance SMA : ACHAT si la moyenne rapide est au-dessus de la lente, VENTE "
+                        "au-dessous. Momentum : ACHAT si le cours a monté sur la période lente et reste au-dessus de "
+                        "la moyenne rapide, VENTE à l'inverse. Retour à la moyenne : ACHAT si le cours est à plus de "
+                        "z écarts-types sous la moyenne lente, VENTE au-dessus. AUCUNE POSITION si la volatilité "
+                        "(ATR/prix) sort de la plage. Aucune performance n'est démontrée."),
         "params": asdict(StrategyParams()),
     },
 }
