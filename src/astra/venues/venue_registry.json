@@ -187,7 +187,7 @@
         {
           "status": "BLOCKED",
           "since": "2026-10-26",
-          "note": "Blocked: no official API (decisive), no verified licence for the non-EEA entity, binary or digital options products."
+          "note": "Blocked: no official API (decisive), no verified licence for the non-EEA entity, binary or digital options products. On 2026-10-28 the IQ Option in-app support chat told the account holder that IQ Option provides no API and no API key, and that any IQ Option API is unofficial and unsupported (screenshot shared by the account holder)."
         }
       ],
       "tests_passed": [],
