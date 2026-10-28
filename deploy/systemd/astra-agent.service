@@ -1,0 +1,64 @@
+# ASTRA agent: works 24 h a day with the dashboard API, SIMULATION only, through an agent token
+# (astra auth agent-create). TEMPLATE, NOT INSTALLED: installing it and issuing its token need the
+# architect's approval (reports/AGENT_REPORT.md).
+# The agent runs as a throwaway user with no access to /var/lib/astra: it reaches ASTRA only over HTTPS,
+# through the proxy, like a browser. Its token (/etc/astra/agent.token, root 0600) is handed to this unit
+# only, through systemd credentials; it is never in the environment, the journal or the repository.
+[Unit]
+Description=ASTRA agent (SIMULATION only, agent token, no orders)
+After=network-online.target astra-web.service
+Wants=network-online.target
+ConditionPathExists=/etc/astra/agent.token
+StartLimitIntervalSec=600
+StartLimitBurst=10
+OnFailure=astra-alert@%n.service
+
+[Service]
+Type=simple
+DynamicUser=yes
+WorkingDirectory=/opt/astra/app
+Environment=PYTHONPATH=/opt/astra/app/src
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=ASTRA_AGENT_URL=https://astra.example.org
+Environment=ASTRA_AGENT_DIR=/var/lib/astra-agent
+Environment=ASTRA_AGENT_INTERVAL_SECONDS=300
+LoadCredential=agent-token:/etc/astra/agent.token
+ExecStart=/opt/astra/venv/bin/python -m astra agent run
+# Exit code 2 = halted on purpose (not SIMULATION, or token refused): do not restart in a loop.
+Restart=on-failure
+RestartPreventExitStatus=2
+RestartSec=30
+UMask=0077
+MemoryMax=256M
+TasksMax=16
+StateDirectory=astra-agent
+StateDirectoryMode=0700
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

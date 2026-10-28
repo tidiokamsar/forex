@@ -154,6 +154,20 @@ The dashboard tabs Données, Backtests, Simulation and Journaux record requests;
 | Logs | `journalctl -u astra-worker`; dashboard Journaux (job queue, worker heartbeat, sources). A worker silent for more than 60 s shows as « silencieux ». |
 | Backups | `astra-backup.timer`, daily 02:30 UTC: verified online backups of `astra.sqlite3` and `auth.sqlite3` in `/var/lib/astra/backups/{astra,auth}` (14 kept). Copy them off the host; back up `/etc/astra/mfa.key` separately. Restore: stop `astra-worker` and `astra-web`, then `python -m astra backup restore <file> --operator <name> --reason "<why>"` (see above). |
 
+## ASTRA agent (SIMULATION, agent token; not deployed)
+
+The agent (`python -m astra agent run`, template unit `deploy/systemd/astra-agent.service`) works around the clock through the dashboard API with an agent token (SECURITY.md, "Agent tokens"). Installing the unit and issuing its token need the architect's approval.
+
+| Task | How |
+|---|---|
+| Issue a token | On the server, as for `init-admin`: `astra auth agent-create --agent astra-agent --owner <account> --scopes read,lab --days 30`. The token is printed once on stderr: write it to `/etc/astra/agent.token` (root 0600) and nowhere else. |
+| Renew | Issue a second token (two may be active), replace the file, restart the unit, then `astra auth agent-revoke --id <old id>`. |
+| Revoke | `astra auth agent-revoke --agent astra-agent` (or `--owner <account>`); the agent's next request gets 401 and it stops (exit 2, not restarted). |
+| Inspect | `astra auth agent-list` (state, expiry, last use and address, never the token); `astra auth events` (`agent.*` actions). |
+| Configuration | `ASTRA_AGENT_URL` (https only, http to loopback for tests), `ASTRA_AGENT_TOKEN_FILE` or the systemd credential `agent-token`, `ASTRA_AGENT_DIR` (state, journal, summaries), `ASTRA_AGENT_INTERVAL_SECONDS` (60 at least, 300 by default). |
+| What it does | Each cycle: halts unless `/api/status` reports SIMULATION with LIVE locked; observes only with the kill switch, freezes, unreadable controls or a `read` token; asks for ECB ingestion when the rates are late (6 h apart at most); queues backtests over covered series (20 per day, 3 waiting at most); keeps at most 3 paper simulations on its best finished backtests (at least 20 trades, profit factor 1.1, drawdown 15 % at most, positive net result; `AgentPolicy`) on up-to-date sources, and stops those past their drawdown stop or 5 % loss. Its ranking is in-sample and indicative; it never promotes a model. |
+| Reading its work | `ASTRA_AGENT_DIR/journal-<day>.jsonl` (every decision) and `summary-<day>.md` (rewritten each cycle); in the dashboard, backtests and simulations show the actor `agent:<name>`. |
+
 ## Not implemented
 
 Alert delivery without a configured recipient (the journal entry is written; set `ASTRA_ALERT_TO`), a metrics endpoint beyond `/api/health`, log shipping, encrypted off-host backup copies, drift monitoring, shadow-mode signal comparison, a live quote feed (no provider with credentials is configured), and any connection of the simulation to a real broker. Supervision exists through systemd (`Restart=`, `OnFailure=` alert unit) for `astra-web` and `astra-worker`.

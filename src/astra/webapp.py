@@ -12,6 +12,9 @@ Security model (SECURITY.md, "Web authentication"):
 - A failure of the session store answers 503: it never grants anonymous access.
 - Web roles are not execution roles: this module reads trading state and never calls anything
   that submits, cancels or releases (no kill switch release, no order, no mode change).
+- Machine access: an agent token (``astra.auth.agent_tokens``) in ``Authorization: Bearer`` replaces the
+  session for the API endpoints listed in ``AGENT_ENDPOINTS`` only, never together with a session cookie.
+  It needs no CSRF token (nothing is sent implicitly) but still the Origin check for state changes.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ from typing import Any
 from flask import Flask, Response, abort, g, jsonify, make_response, redirect, render_template, request, send_file
 
 from .auth import AuthError, AuthStore, AuthUnavailable, WebRole, crypto
+from .auth.agent_tokens import AgentTokens
 from .auth.mfa_crypto import load_cipher
 from .auth.store import SessionRecord, SessionStage
 from .config import AppConfig, WebConfig
@@ -50,6 +54,15 @@ PRIVATE_STATIC = {"app.js": "text/javascript; charset=utf-8", "lab.js": "text/ja
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
        "object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+# Agent tokens (astra.auth.agent_tokens) reach only these endpoints, by scope. Any other route, including
+# every page, /api/session, /api/demo/*, /api/admin/*, /api/audit, /api/orders and the CSV upload, refuses
+# a token whatever its scope; a new route stays closed to agents until it is listed here.
+AGENT_ENDPOINTS = {
+    "read": frozenset({"agent_whoami", "status", "summary", "runs", "model_versions", "experiments", "controls",
+                       "market_overview", "market_quality", "market_candles", "lab_catalog", "lab_backtests",
+                       "lab_backtest", "sim_sessions", "sim_session", "learn_overview", "system_jobs"}),
+    "lab": frozenset({"market_ingest", "lab_backtest_create", "sim_create", "sim_action"}),
+}
 
 
 def load_secret_key(path: Path) -> bytes:
@@ -119,6 +132,10 @@ def create_app(config: AppConfig, web: WebConfig, *, auth: AuthStore | None = No
     backtests = store or BacktestStore(config.database_path)
     execution = ExecutionStore(backtests.path)
     models = ModelRegistry(backtests.path)
+    agent_tokens = AgentTokens(auth)
+    with contextlib.suppress(AuthUnavailable):
+        # A broken account store must not stop startup: every request then answers 503 (fail closed).
+        agent_tokens.initialize()
 
     if web.trusted_proxy:
         from werkzeug.middleware.proxy_fix import ProxyFix
@@ -191,7 +208,28 @@ def create_app(config: AppConfig, web: WebConfig, *, auth: AuthStore | None = No
                 # Not audited: anonymous refusals must not let anyone grow the append-only audit table.
                 return _error(403, "origin_refused")
         g.session = None
+        g.agent = None
         token = request.cookies.get(SESSION_COOKIE)
+        authorization = request.headers.get("Authorization")
+        if authorization is not None:
+            # Machine access: a bearer agent token, never combined with a browser session.
+            scheme, _, bearer = authorization.partition(" ")
+            if token or scheme != "Bearer" or not bearer:
+                return _error(400, "invalid_credentials")
+            if not request.path.startswith("/api/"):
+                return _error(403, "forbidden")  # no page, login form or script for a token
+            try:
+                result = agent_tokens.authenticate(bearer.strip(), client_ip())
+            except AuthUnavailable:
+                return _error(503, "auth_unavailable")
+            if result.status == "throttled":
+                response = _error(429, "too_many_attempts")
+                response.headers["Retry-After"] = str(result.retry_after_seconds)
+                return response
+            if result.status != "ok":
+                return _error(401, "invalid_token")
+            g.agent = result.principal
+            return None
         if token:
             try:
                 g.session = auth.resolve(token, client_ip())
@@ -241,7 +279,17 @@ def create_app(config: AppConfig, web: WebConfig, *, auth: AuthStore | None = No
             auth.record(actor, action, result, target=target, client_ip=client_ip(), detail=detail)
 
     def actor() -> str:
+        if g.get("agent") is not None:
+            return g.agent.actor
         return f"web:{g.session.user.username}" if g.session else "web:anonymous"
+
+    def agent_allowed(role: WebRole, api: bool) -> bool:
+        agent = g.agent
+        endpoint = request.endpoint or ""
+        in_scope = any(endpoint in AGENT_ENDPOINTS.get(scope, ()) for scope in agent.scopes)
+        if endpoint == "sim_action" and (request.view_args or {}).get("action") != "stop":
+            in_scope = False  # an agent may stop a simulation, never restart one a person or a risk stop halted
+        return api and in_scope and agent.owner_role.allows(role)
 
     def check_csrf(pre_login: bool = False) -> bool:
         """Session-bound token; the login form always carries the pre-login cookie token instead."""
@@ -256,6 +304,16 @@ def create_app(config: AppConfig, web: WebConfig, *, auth: AuthStore | None = No
         def decorator(view: Callable) -> Callable:
             @wraps(view)
             def wrapper(*args: Any, **kwargs: Any) -> Any:
+                if g.agent is not None:
+                    # No CSRF token for a bearer: CSRF abuses credentials a browser sends by itself, which an
+                    # Authorization header is not. Origin is still checked in guard for state changes.
+                    detail = f"id={g.agent.token_id},owner={g.agent.owner},{request.method} {request.path}"
+                    if not agent_allowed(role, api):
+                        auth_record(actor(), "agent.access", "forbidden", detail=detail)
+                        return _error(403, "forbidden")
+                    if request.method in UNSAFE_METHODS:
+                        auth_record(actor(), "agent.request", "ok", detail=detail)
+                    return view(*args, **kwargs)
                 session = g.session
                 if session is None or session.stage is not SessionStage.FULL:
                     if api:
@@ -436,6 +494,13 @@ def create_app(config: AppConfig, web: WebConfig, *, auth: AuthStore | None = No
         return jsonify({"username": session.user.username, "role": session.user.role.value,
                         "expires_at": session.absolute_expires_at.isoformat(), "idle_seconds": auth.policy.idle_seconds,
                         "mode": "SIMULATION", "live_locked": True})
+
+    @app.get("/api/agent/whoami")
+    @require(WebRole.READ_ONLY)
+    def agent_whoami() -> Response:
+        if g.agent is None:
+            return _error(404, "not_found")  # an agent route: browser sessions use /api/session
+        return jsonify({**g.agent.to_public(), "mode": "SIMULATION", "live_locked": True})
 
     def storage_json(producer: Callable[[], dict[str, Any]]) -> Response:
         try:
@@ -651,6 +716,7 @@ def create_app_from_env() -> Flask:
     else:
         logging.getLogger("astra.web").warning("no MFA key ring at %s: TOTP sign-in answers 503", web.mfa_key_path)
     auth.initialize()
+    AgentTokens(auth).initialize()
     store = BacktestStore(config.database_path)
     store.initialize()
     ExecutionStore(config.database_path).initialize()

@@ -533,7 +533,8 @@ class PermissionTests(WebAppCase):
         known = set(READ_ONLY_ROUTES + OPERATOR_ROUTES + ADMIN_ROUTES + LAB_READ_ROUTES + LAB_REQUEST_ROUTES
                     + DEMO_READ_ROUTES + DEMO_REQUEST_ROUTES) | {
             "/", "/login", "/logout", "/login/mfa", "/mfa/setup", "/account/password", "/api/health",
-            "/static/<name>", "/admin/users", "/admin/users/<username>/<action>"}
+            "/static/<name>", "/admin/users", "/admin/users/<username>/<action>",
+            "/api/agent/whoami"}  # agent tokens only: permission tests in test_agent.py
         self.assertEqual(app_routes, known, "a new route needs explicit permission tests")
 
     def test_health_is_public_and_reveals_nothing(self):

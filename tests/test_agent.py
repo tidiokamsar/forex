@@ -1,0 +1,364 @@
+"""Agent tokens (machine access) and the ASTRA agent, in SIMULATION only.
+
+Every protection has a negative test: scope, owner role, expiry, revocation, owner changes, address list,
+cookie plus bearer, throttling, routes closed to every token, and the agent's own guards (SIMULATION only,
+kill switch, route allowlist, halting on a refused token). Offline: Flask test client and temporary SQLite.
+"""
+
+import json
+import unittest
+from datetime import UTC, datetime
+from pathlib import Path
+
+from _support import workspace_tempdir
+from astra.agent import Agent, AgentHalt, AgentPolicy, AstraClient
+from astra.auth import AuthError, WebRole
+from astra.auth.agent_tokens import AgentTokens
+from astra.execution import ExecutionStore
+from astra.jobs import JobStore, Worker
+from astra.webapp import AGENT_ENDPOINTS, SESSION_COOKIE
+from test_labweb import CSV
+from test_webapp import ORIGIN, LoopbackClient, WebAppCase
+
+EXPECTED_AGENT_ENDPOINTS = {
+    "read": {"agent_whoami", "status", "summary", "runs", "model_versions", "experiments", "controls",
+             "market_overview", "market_quality", "market_candles", "lab_catalog", "lab_backtests", "lab_backtest",
+             "sim_sessions", "sim_session", "learn_overview", "system_jobs"},
+    "lab": {"market_ingest", "lab_backtest_create", "sim_create", "sim_action"},
+}
+
+
+class AgentTokenCase(WebAppCase):
+    def setUp(self):
+        super().setUp()
+        self.tokens = AgentTokens(self.auth)
+        self.tokens.initialize()
+        self.session_client("owner", WebRole.OPERATOR)  # creates the account and enrols its TOTP
+
+    def issue(self, scopes=("read", "lab"), owner="owner", **kwargs):
+        token, _info = self.tokens.issue("cli:test", "bot", owner, list(scopes), **kwargs)
+        return token
+
+    def bearer(self, token, path, method="GET", origin=ORIGIN, ip="203.0.113.10", **kwargs):
+        headers = {"Authorization": f"Bearer {token}"}
+        if origin:
+            headers["Origin"] = origin
+        return self.client(ip).open(path, method=method, headers=headers, **kwargs)
+
+    def events(self, action):
+        return [e for e in self.auth.events(limit=500) if e["action"] == action]
+
+
+class AgentTokenTests(AgentTokenCase):
+    def test_server_allowlist_is_exactly_the_reviewed_one(self):
+        # A new route must be added here on purpose before any token can reach it.
+        self.assertEqual({k: set(v) for k, v in AGENT_ENDPOINTS.items()}, EXPECTED_AGENT_ENDPOINTS)
+        endpoints = {rule.endpoint for rule in self.app.url_map.iter_rules()}
+        self.assertLessEqual(set().union(*AGENT_ENDPOINTS.values()), endpoints)
+
+    def test_read_token_reads_and_identifies_itself(self):
+        token = self.issue(scopes=("read",))
+        response = self.bearer(token, "/api/agent/whoami")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual((body["agent"], body["owner"], body["scopes"], body["mode"]), ("bot", "owner", ["read"], "SIMULATION"))
+        self.assertEqual(self.bearer(token, "/api/status").get_json()["mode"], "SIMULATION")
+        self.assertEqual(self.bearer(token, "/api/controls").status_code, 200)
+
+    def test_whoami_needs_a_token(self):
+        self.assertEqual(self.client().get("/api/agent/whoami").status_code, 401)
+        browser = self.session_client("reader", WebRole.READ_ONLY)
+        self.assertEqual(browser.get("/api/agent/whoami").status_code, 404)
+
+    def test_token_is_stored_only_as_a_digest(self):
+        token = self.issue()
+        self.assertNotIn(token.encode(), Path(self.web.auth_database_path).read_bytes())
+        self.assertNotIn(token, json.dumps(self.tokens.list()))
+        self.assertNotIn(token, json.dumps(self.auth.events(limit=500)))
+
+    def test_read_scope_cannot_request_lab_work(self):
+        token = self.issue(scopes=("read",))
+        response = self.bearer(token, "/api/lab/backtests", method="POST", json={})
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.events("agent.access")[0]["result"], "forbidden")
+
+    def test_lab_request_is_attributed_to_the_agent_and_audited(self):
+        token = self.issue()
+        self.assertEqual(self.bearer(token, "/api/market/ingest", method="POST", origin=None).status_code, 403)
+        response = self.bearer(token, "/api/market/ingest", method="POST")
+        self.assertEqual(response.status_code, 202, response.get_data(as_text=True))
+        job = JobStore(self.db).jobs()[0]
+        self.assertEqual((job["id"], job["actor"]), (response.get_json()["job"]["id"], "agent:bot"))
+        event = self.events("agent.request")[0]
+        self.assertEqual((event["actor"], event["result"]), ("agent:bot", "ok"))
+        self.assertIn("owner=owner", event["detail"])
+
+    def test_routes_closed_to_every_token(self):
+        token = self.issue()
+        for method, path in [("GET", "/api/audit"), ("GET", "/api/orders"), ("GET", "/api/reconciliations"),
+                             ("GET", "/api/admin/users"), ("GET", "/api/admin/auth-events"), ("GET", "/api/session"),
+                             ("GET", "/api/demo/overview"), ("POST", "/api/demo/pause"),
+                             ("POST", "/api/demo/controlled-test"), ("POST", "/api/market/import")]:
+            with self.subTest(path=path):
+                self.assertEqual(self.bearer(token, path, method=method).status_code, 403)
+        for path in ["/", "/admin/users", "/login", "/static/app.js"]:
+            with self.subTest(path=path):
+                self.assertEqual(self.bearer(token, path).status_code, 403)
+
+    def test_agent_can_stop_but_never_restart_a_simulation(self):
+        token = self.issue()
+        self.assertEqual(self.bearer(token, "/api/sim/sessions/1/start", method="POST").status_code, 403)
+        self.assertNotEqual(self.bearer(token, "/api/sim/sessions/1/stop", method="POST").status_code, 403)
+
+    def test_cookie_and_bearer_together_are_refused(self):
+        token = self.issue()
+        client = self.client()
+        client.set_cookie(SESSION_COOKIE, "x" * 43, domain="astra.test")
+        response = client.get("/api/status", headers={"Authorization": f"Bearer {token}"})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.bearer("Basic abc", "/api/status").status_code, 401)
+
+    def test_expired_revoked_and_unknown_tokens_are_refused(self):
+        token = self.issue(days=1)
+        self.clock.advance(86400 + 1)
+        self.assertEqual(self.bearer(token, "/api/status").status_code, 401)
+        self.assertIn("reason=expired", self.events("agent.auth")[0]["detail"])
+        fresh = self.issue()
+        self.assertEqual(self.tokens.revoke("cli:test", name="bot"), 2)  # the expired one is revoked too
+        self.assertEqual(self.bearer(fresh, "/api/status").status_code, 401)
+        self.assertEqual(self.bearer("astra_agt_" + "A" * 43, "/api/status").status_code, 401)
+
+    def test_owner_changes_end_the_token(self):
+        token = self.issue()
+        self.auth.reset_password("cli:test", "owner")
+        self.assertEqual(self.bearer(token, "/api/status").status_code, 401)
+        self.assertEqual(self.tokens.list()[0]["state"], "revoked")
+
+    def test_disabled_owner_ends_the_token(self):
+        token = self.issue()
+        self.auth.set_active("cli:test", "owner", False)
+        self.assertEqual(self.bearer(token, "/api/status").status_code, 401)
+
+    def test_demoted_owner_loses_lab_routes(self):
+        token = self.issue()
+        self.auth.set_role("cli:test", "owner", WebRole.READ_ONLY)
+        self.assertEqual(self.bearer(token, "/api/status").status_code, 200)
+        self.assertEqual(self.bearer(token, "/api/market/ingest", method="POST").status_code, 403)
+
+    def test_address_list(self):
+        token = self.issue(networks=["198.51.100.0/24"])
+        self.assertEqual(self.bearer(token, "/api/status").status_code, 401)
+        self.assertEqual(self.bearer(token, "/api/status", ip="198.51.100.7").status_code, 200)
+
+    def test_invalid_tokens_are_throttled_per_address(self):
+        statuses = [self.bearer("astra_agt_" + "B" * 43, "/api/status").status_code for _ in range(7)]
+        self.assertEqual(statuses[:5], [401] * 5)
+        self.assertEqual(statuses[-1], 429)
+        self.assertEqual(self.bearer(self.issue(), "/api/status", ip="198.51.100.9").status_code, 200)
+
+    def test_issue_refusals(self):
+        self.add_user("viewer", WebRole.READ_ONLY)
+        with self.assertRaises(AuthError):
+            self.tokens.issue("cli:test", "bot", "viewer", ["lab"])
+        self.add_user("newop", WebRole.OPERATOR)  # MFA not enrolled yet
+        with self.assertRaises(AuthError):
+            self.tokens.issue("cli:test", "bot", "newop", ["read"])
+        for kwargs in ({"days": 91}, {"days": 0}, {"networks": ["not-an-ip"]}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(AuthError):
+                self.tokens.issue("cli:test", "bot", "owner", ["read"], **kwargs)
+        for scopes in (["admin"], ["live"], ["demo"], []):
+            with self.subTest(scopes=scopes), self.assertRaises(AuthError):
+                self.tokens.issue("cli:test", "bot", "owner", scopes)
+        self.issue()
+        self.issue()
+        with self.assertRaises(AuthError):  # at most two active tokens per agent
+            self.issue()
+
+
+def flask_transport(case, token):
+    def send(method, path, body):
+        response = case.bearer(token, path, method=method, json=body if method == "POST" else None)
+        return response.status_code, response.get_json(silent=True)
+
+    return send
+
+
+class AgentIntegrationTests(AgentTokenCase):
+    """The agent against the real application, with a CSV series imported by the real worker."""
+
+    def setUp(self):
+        super().setUp()
+        root = Path(self.temp.name)
+        self.worker = Worker(self.db, root / "imports", ecb_fetch=lambda url, timeout: (_ for _ in ()).throw(OSError()))
+        self.worker.initialize()
+        self.worker.ecb_enabled = False
+        (root / "imports").mkdir(exist_ok=True)
+        path = root / "imports" / "series.csv"
+        path.write_bytes(CSV)
+        self.worker.jobs.enqueue("import_csv", {"path": str(path), "symbol": "EURUSD", "timeframe": "H1",
+                                                "source": "fixture"}, "test", dedupe_key="series")
+        self.worker.tick()
+        self.workdir = root / "agent"
+
+    def agent(self, token, **policy):
+        policy = {"min_candles": 50, "variants": ((5, 10), (10, 20), (20, 40), (30, 60)), **policy}
+        return Agent(AstraClient(flask_transport(self, token)), self.workdir, AgentPolicy(**policy),
+                     clock=lambda: datetime(2026, 10, 27, 12, 0, tzinfo=UTC))
+
+    def test_one_cycle_requests_backtests_within_budget_and_reports(self):
+        agent = self.agent(self.issue())
+        self.assertEqual(agent.run(once=True), 0)
+        backtests = self.bearer(self.issue_second(), "/api/lab/backtests").get_json()["backtests"]
+        self.assertEqual(len(backtests), 3)  # max_pending_backtests
+        self.assertTrue(all(b["actor"] == "agent:bot" for b in backtests))
+        summary = (self.workdir / "summary-2026-10-27.md").read_text(encoding="utf-8")
+        self.assertIn("mode SIMULATION", summary)
+        journal = (self.workdir / "journal-2026-10-27.jsonl").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(sum(json.loads(line)["kind"] == "backtest_requested" for line in journal), 3)
+        for _ in range(5):  # the worker runs a backtest (after any learning job); the agent tops the queue up
+            self.worker.tick()
+        agent.run(once=True)
+        self.assertEqual(agent.state.backtests_today, 4)
+
+    def issue_second(self):
+        token, _ = self.tokens.issue("cli:test", "reader", "owner", ["read"])
+        return token
+
+    def test_kill_switch_means_observe_only(self):
+        ExecutionStore(self.db).set_control("kill_switch", {"active": True}, actor="test", audit_type="KILL_SWITCH",
+                                            details={})
+        agent = self.agent(self.issue())
+        agent.run(once=True)
+        self.assertEqual(self.events("agent.request"), [])
+        self.assertIn("observe_only", agent.state.day_log)
+
+    def test_read_only_token_never_writes(self):
+        agent = self.agent(self.issue(scopes=("read",)))
+        agent.run(once=True)
+        self.assertEqual(self.events("agent.request"), [])
+
+    def test_revoked_token_halts_the_agent(self):
+        token = self.issue()
+        self.tokens.revoke("cli:test", name="bot")
+        self.assertEqual(self.agent(token).run(once=True), 2)
+
+
+class AgentOverHttpTests(AgentTokenCase):
+    """The real HTTP transport (urllib) against the application served on loopback (private mode)."""
+
+    public_hosts = ()
+    trusted_proxy = False
+    client_class = LoopbackClient
+
+    def post(self, client, path, data=None, origin="http://127.0.0.1:8765", **kwargs):
+        return super().post(client, path, data, origin=origin, **kwargs)
+
+    def test_agent_cycle_over_http(self):
+        import socket
+        import threading
+
+        from werkzeug.serving import make_server
+
+        from astra.agent import http_transport
+        from astra.config import AppConfig
+
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        self.config = AppConfig(database_path=self.db, port=port)
+        server = make_server("127.0.0.1", port, self.make_app(), threaded=True)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            token = self.issue()
+            transport = http_transport(f"http://127.0.0.1:{port}", token)
+            self.assertEqual(transport("GET", "/api/agent/whoami", None)[1]["agent"], "bot")
+            self.assertEqual(transport("POST", "/api/market/ingest", {})[0], 202)
+            self.assertEqual(transport("GET", "/api/audit", None)[0], 403)
+            workdir = Path(self.temp.name) / "agent-http"
+            self.assertEqual(Agent(AstraClient(transport), workdir).run(once=True), 0)
+            self.assertTrue(list(workdir.glob("summary-*.md")))
+            self.assertEqual(http_transport(f"http://127.0.0.1:{port}", "astra_agt_bad" + "x" * 30)(
+                "GET", "/api/status", None)[0], 401)
+        finally:
+            server.shutdown()
+            thread.join(5)
+
+    def test_transport_refuses_plain_http_off_loopback(self):
+        from astra.agent import http_transport
+
+        with self.assertRaises(ValueError):
+            http_transport("http://astra.example.org", "t")
+
+
+class FakeApi:
+    """A scripted dashboard for the agent's decision logic."""
+
+    def __init__(self, mode="SIMULATION"):
+        self.mode = mode
+        self.posts = []
+        self.backtests = [{"id": 7, "status": "DONE", "symbol": "EURUSD", "timeframe": "D1", "source": "ECB_EXR",
+                           "metrics": {"trade_count": 40, "profit_factor": 1.6, "max_drawdown_pct": 6.0, "net_pnl": 900}}]
+        self.sessions = [{"id": 3, "name": "old", "status": "RUNNING", "actor": "agent:bot",
+                          "account": {"initial_capital": 10000, "net_pnl": -800, "drawdown_halt": False}}]
+
+    def __call__(self, method, path, body):
+        if method == "POST":
+            self.posts.append((path, body))
+            return 201, {"session_id": 11} if path == "/api/sim/sessions" else {"id": 3, "status": "STOPPED"}
+        routes = {
+            "/api/agent/whoami": {"agent": "bot", "owner": "owner", "scopes": ["read", "lab"], "mode": "SIMULATION"},
+            "/api/status": {"mode": self.mode, "live_locked": True},
+            "/api/controls": {"entries_allowed": True},
+            "/api/market/overview": {"sources": [{"name": "ECB_EXR", "freshness": {"state": "UP_TO_DATE"}}],
+                                     "coverage": [], "worker": {"state": "OK"}},
+            "/api/lab/backtests": {"backtests": self.backtests},
+            "/api/lab/backtests/7": {"params": {"strategy_params": {"fast": 20, "slow": 50}, "risk": {}, "costs": {}}},
+            "/api/sim/sessions": {"sessions": self.sessions},
+        }
+        return 200, routes[path]
+
+
+class AgentDecisionTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = workspace_tempdir()
+        self.workdir = Path(self.temp.name)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def agent(self, api):
+        agent = Agent(AstraClient(api), self.workdir, clock=lambda: datetime(2026, 10, 27, tzinfo=UTC))
+        agent.state.submitted["EURUSD|D1|ECB_EXR|20|50"] = 7  # the agent's own backtest
+        return agent
+
+    def test_stops_a_losing_session_and_starts_the_best_backtest(self):
+        api = FakeApi()
+        self.agent(api).run(once=True)
+        self.assertEqual(api.posts[0], ("/api/sim/sessions/3/stop", {}))
+        path, body = api.posts[1]
+        self.assertEqual((path, body["symbols"], body["source"]), ("/api/sim/sessions", ["EURUSD"], "ECB_EXR"))
+        self.assertEqual(body["strategy_params"], {"fast": 20, "slow": 50})
+
+    def test_halts_unless_simulation(self):
+        for mode in ("DEMO", "LIVE"):
+            api = FakeApi(mode=mode)
+            with self.subTest(mode=mode):
+                self.assertEqual(self.agent(api).run(once=True), 2)
+                self.assertEqual(api.posts, [])
+
+    def test_client_refuses_routes_outside_its_allowlist(self):
+        client = AstraClient(FakeApi())
+        for method, path in [("POST", "/api/demo/pause"), ("POST", "/api/sim/sessions/3/start"),
+                             ("GET", "/api/audit"), ("POST", "/api/admin/users"), ("GET", "/api/orders")]:
+            with self.subTest(path=path), self.assertRaises(PermissionError):
+                client._call(method, path)
+
+    def test_refused_token_raises_halt(self):
+        client = AstraClient(lambda method, path, body: (401, {"error": "invalid_token"}))
+        with self.assertRaises(AgentHalt):
+            client.get("/api/status")
+
+
+if __name__ == "__main__":
+    unittest.main()

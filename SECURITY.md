@@ -77,6 +77,19 @@ The dashboard (`astra.webapp`, Flask) requires a server-side session for every r
   - Whoever uses a generated or reset password first, within its 72 h validity, also enrols the TOTP device: deliver those passwords out of band and promptly.
   - The whole model assumes the host itself is trustworthy: on a compromised host, credentials typed into the dashboard can be captured whatever the application does.
 
+## Agent tokens (machine access, branch `feat/auth-deploy`, not deployed)
+
+An agent never signs in with a person's password or TOTP codes: that would store both factors on one machine, give a compromised agent the whole account, and make the audit unable to tell the agent from the person. It uses a token of its own (`astra.auth.agent_tokens`), sent as `Authorization: Bearer`:
+
+- Issued only locally on the server (`astra auth agent-create --agent <name> --owner <account> --scopes read[,lab] --days N [--allow-ip CIDR]`), shown once, stored as a SHA-256 digest in `auth.sqlite3`. At most two active tokens per agent.
+- Expires (30 days by default, 90 at most) and is never extended. Revoked by `astra auth agent-revoke --id|--agent|--owner` with immediate effect, and automatically when the owner is disabled, has a temporary password, or changes or resets their password. A demoted owner keeps only the routes their new role allows. After an MFA reset for a suspected compromise, also run `agent-revoke --owner`.
+- The owner must exist, be active and, for OPERATOR or ADMIN, have enrolled TOTP. Scope `read` needs READ_ONLY; scope `lab` needs OPERATOR.
+- Routes: `webapp.AGENT_ENDPOINTS` lists every endpoint a scope reaches (`read`: status, summary, runs, models, experiments, controls, market data, lab and simulation reads, learning, jobs, `/api/agent/whoami`; `lab`: ECB ingestion, backtest requests, simulation create and stop; never restart). `read` includes `/api/controls`, an OPERATOR route, so the agent can see the kill switch; for a READ_ONLY owner it stays refused. Pages, `/login`, `/api/session`, `/api/demo/*`, `/api/admin/*`, `/api/audit`, `/api/orders`, `/api/reconciliations` and the CSV upload refuse every token (403). A test fails if the list changes without review.
+- A token together with a session cookie, or a non-Bearer `Authorization`, answers 400. Invalid tokens answer 401 and are throttled per address (same progressive delay as sign-in, then 429); they are not audited. Refused use of a known token (`agent.auth`), out-of-scope access (`agent.access`) and every state-changing agent request (`agent.request`) are audited; lab jobs and simulations record the actor `agent:<name>`.
+- No CSRF token for a bearer (CSRF abuses credentials a browser sends by itself); the Origin check still applies to state changes, and in public mode the proxy secret too.
+- Throttling and `--allow-ip` use the client address, so public mode needs `ASTRA_TRUSTED_PROXY=1` (already required): otherwise every caller has the proxy's address. A caller sharing the agent's address and sending bad tokens can delay it (429). A valid token is not rate limited, so a stolen or looping one can grow `auth_events` with `agent.access` and `agent.request` rows, as a stolen session can.
+- Residual: the token is a long-lived secret; whoever holds it can read research data and queue backtests and paper simulations until it is revoked or expires. It cannot reach orders, DEMO, LIVE, the kill switch, the mode, accounts or the audit.
+
 ## Known gaps
 
 - The dashboard has authentication, sessions, roles and MFA (section above), and TLS is provided by the reverse proxy configuration in `deploy/`. These remain missing: authentication for the CLI and the execution path, a secret store, external or human-signed order authorization, and multi-user isolation of the trading data. (The internal HMAC execution permit proves only that the gateway's checks ran in this process; it is not a human signature.) The application itself listens on loopback only.

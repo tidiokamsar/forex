@@ -18,6 +18,7 @@ import sys
 
 from ..config import WebConfig
 from . import mfa_crypto
+from .agent_tokens import AgentTokens
 from .store import AuthError, AuthStore, WebRole
 
 
@@ -136,6 +137,20 @@ def _run(args: argparse.Namespace) -> int:
         return 0
     elif action == "events":
         print(json.dumps({"events": store.events(limit=args.limit)}, ensure_ascii=False, indent=2))
+        return 0
+    elif action.startswith("agent-"):
+        tokens = AgentTokens(store)
+        tokens.initialize()
+        if action == "agent-create":
+            token, info = tokens.issue(actor, args.agent, args.owner, args.scopes.split(","), days=args.days,
+                                       networks=args.allow_ip)
+            print(json.dumps({"created": info}, ensure_ascii=False))
+            # Shown once; store it in the agent's token file (0640, outside Git), never in a log or a ticket.
+            print(f"Jeton d'agent (affiché une seule fois) : {token}", file=sys.stderr)
+        elif action == "agent-revoke":
+            print(json.dumps({"revoked": tokens.revoke(actor, token_id=args.id, name=args.agent, owner=args.owner)}))
+        else:
+            print(json.dumps({"tokens": tokens.list()}, ensure_ascii=False, indent=2))
         return 0
     print(json.dumps({"ok": True, "action": action, "username": getattr(args, "username", None)}, ensure_ascii=False))
     return 0

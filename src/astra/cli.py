@@ -74,6 +74,23 @@ def build_parser() -> argparse.ArgumentParser:
     auth_actions.add_parser("cleanup", help="Supprimer les sessions expirées ou révoquées depuis plus d'un jour")
     events = auth_actions.add_parser("events", help="Journal d'audit de l'authentification")
     events.add_argument("--limit", type=int, default=100)
+    agent_create = auth_actions.add_parser(
+        "agent-create", help="Jeton d'agent (accès machine délégué, portées limitées, affiché une fois)")
+    agent_create.add_argument("--agent", required=True, help="Nom de l'agent, inscrit au journal (agent:<nom>)")
+    agent_create.add_argument("--owner", required=True, help="Compte humain pour lequel l'agent agit")
+    agent_create.add_argument("--scopes", default="read", help="read et/ou lab, séparées par des virgules")
+    agent_create.add_argument("--days", type=int, default=30, help="Durée de validité (1 à 90 jours)")
+    agent_create.add_argument("--allow-ip", action="append", default=[], help="Adresse ou réseau autorisé (répétable)")
+    agent_revoke = auth_actions.add_parser("agent-revoke", help="Révoquer des jetons d'agent (effet immédiat)")
+    which = agent_revoke.add_mutually_exclusive_group(required=True)
+    which.add_argument("--id", type=int)
+    which.add_argument("--agent")
+    which.add_argument("--owner")
+    auth_actions.add_parser("agent-list", help="Lister les jetons d'agent (jamais leur valeur)")
+    agent_cmd = commands.add_parser("agent", help="Agent ASTRA 24 h/24 en SIMULATION, via un jeton d'agent")
+    agent_actions = agent_cmd.add_subparsers(dest="agent_action", required=True)
+    agent_actions.add_parser("run", help="Boucle continue (ASTRA_AGENT_URL, ASTRA_AGENT_TOKEN_FILE)")
+    agent_actions.add_parser("once", help="Un seul cycle, puis sortie")
     replay = commands.add_parser(
         "paper-replay",
         help="Rejouer des barres via Order Gateway et courtier simulé (aucun ordre externe)",
@@ -376,6 +393,11 @@ def _run(args: argparse.Namespace) -> int:
             from .auth.admin_cli import run as run_auth
 
             return run_auth(args)
+
+        if args.command == "agent":
+            from .agent import run_from_env
+
+            return run_from_env(once=args.agent_action == "once")
 
         if args.command == "ctrader-check":
             _write_json(ctrader_check(args.operator, config))
