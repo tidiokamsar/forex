@@ -93,9 +93,14 @@ class DemoStore:
                                 (kind, actor, _now(), "QUEUED"))
             return {"id": int(cursor.lastrowid), "status": "QUEUED", "duplicate": False}
 
-    def next_request(self) -> dict[str, Any] | None:
+    def next_request(self, max_age_seconds: float = 600.0) -> dict[str, Any] | None:
+        """The oldest waiting request; one older than ``max_age_seconds`` is expired, never run late."""
+
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            limit = datetime.fromtimestamp(datetime.now(UTC).timestamp() - max_age_seconds, UTC).isoformat()
+            db.execute("UPDATE demo_requests SET status = 'FAILED', processed_at = ?, result_json = ? WHERE status = 'QUEUED'"
+                       " AND created_at < ?", (_now(), json.dumps({"error": "demande expirée (plus de 10 minutes)"}), limit))
             row = db.execute("SELECT * FROM demo_requests WHERE status = 'QUEUED' ORDER BY id LIMIT 1").fetchone()
             if row is None:
                 return None

@@ -104,7 +104,7 @@ def floor_step(value: Decimal, step: Decimal) -> Decimal:
 def entry_checks(*, policy: SpotDemoPolicy, spec: CryptoSpotSpec, bid: float, ask: float, data_age: float,
                  ledger: SpotLedger, equity: float, day_start_equity: float, peak_equity: float,
                  open_symbols: int, free_quote: float, stop_price: float | None, direction_long: bool,
-                 requested_units: float | None) -> tuple[tuple[str, ...], Decimal]:
+                 requested_units: float | None, max_clock_skew: float = 5.0) -> tuple[tuple[str, ...], Decimal]:
     """Reasons to refuse a spot BUY entry, or () and the approved quantity (on the provider's step)."""
 
     reasons: list[str] = []
@@ -112,7 +112,7 @@ def entry_checks(*, policy: SpotDemoPolicy, spec: CryptoSpotSpec, bid: float, as
         return ("spot_short_refused",), Decimal(0)
     if not spec.is_trading:
         reasons.append("instrument_not_trading")
-    if data_age < -1 or data_age > policy.max_data_age_seconds:
+    if data_age < -max_clock_skew or data_age > policy.max_data_age_seconds:
         reasons.append("data_stale_or_unknown")
     spread = (ask - bid) / ask if ask > 0 else math.inf
     if spread > policy.max_spread_fraction:

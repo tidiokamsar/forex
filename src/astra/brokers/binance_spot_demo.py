@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import http.client
 import json
 import math
 import urllib.error
@@ -65,6 +66,7 @@ DEMO_DOCS_URL = "https://github.com/binance/binance-spot-api-docs/blob/master/de
 DEMO_BASE_URL = "https://demo-api.binance.com"
 CLIENT_ID_PREFIX = "ASTRA-"
 RECV_WINDOW_MS = 5000
+MAX_HISTORY_PAGES = 50
 REQUEST_TIMEOUT_SECONDS = 10.0
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 ALLOWED_CALLS = frozenset({
@@ -182,7 +184,7 @@ class BinanceSpotDemoAdapter(BrokerAdapter):
         url = f"{self._base.url}{path}" + (f"?{query}" if query else "")
         try:
             status, response_headers, body = self._transport(method, url, headers, None, REQUEST_TIMEOUT_SECONDS)
-        except (TimeoutError, urllib.error.URLError, OSError) as exc:
+        except (TimeoutError, urllib.error.URLError, OSError, http.client.HTTPException) as exc:
             self._state = ConnectionState.DEGRADED
             self.last_error = f"{type(exc).__name__}"
             if method == "POST":
@@ -206,6 +208,8 @@ class BinanceSpotDemoAdapter(BrokerAdapter):
             if method == "POST":
                 raise BrokerTimeout("Binance DEMO order answer unreadable: outcome unknown") from exc
             raise BrokerUnavailable("Binance DEMO answer is not JSON") from exc
+        if status < 400 and self._account_confirmed and self._state is ConnectionState.DEGRADED:
+            self._state = ConnectionState.CONNECTED
         if status >= 400:
             code = str(payload.get("code")) if isinstance(payload, dict) else f"http_{status}"
             message = self._scrub(str(payload.get("msg", ""))) if isinstance(payload, dict) else ""
@@ -273,7 +277,7 @@ class BinanceSpotDemoAdapter(BrokerAdapter):
         free, locked = snapshot.balances.get("USDT", (Decimal(0), Decimal(0)))
         verified = self._account_confirmed and (not self._base.loopback or self._trust_loopback)
         return AccountSnapshot(
-            account_ref_masked=f"{VENUE_ID}:{self._key.reveal()[:4]}****",
+            account_ref_masked=f"{VENUE_ID}:{hashlib.sha256(self._key.reveal().encode()).hexdigest()[:10]}",
             environment_reported=BrokerEnvironment.DEMO if verified else BrokerEnvironment.UNKNOWN,
             environment_source=EnvironmentSource.PROVIDER_API if verified else EnvironmentSource.UNVERIFIED,
             currency="USDT", balance=float(free + locked), equity=float(free + locked), margin_used=0.0,
@@ -300,7 +304,11 @@ class BinanceSpotDemoAdapter(BrokerAdapter):
         base_fee = Decimal(0)
         symbol = str(data.get("symbol", ""))
         base_asset = self._rules[symbol].base_asset if symbol in self._rules else None
-        for fill in data.get("fills", []) or []:
+        fills = data.get("fills")
+        if fills is None and data.get("side") == "BUY" and executed > 0 and symbol in self._instruments:
+            fills = [{"commission": t.get("commission", "0"), "commissionAsset": t.get("commissionAsset")}
+                     for t in self.trades(symbol, int(data["orderId"]))]
+        for fill in fills or []:
             if base_asset and fill.get("commissionAsset") == base_asset:
                 base_fee += Decimal(str(fill.get("commission", "0")))
         filled = executed - base_fee if data.get("side") == "BUY" else executed
@@ -328,13 +336,30 @@ class BinanceSpotDemoAdapter(BrokerAdapter):
             raise BrokerUnavailable("order not visible yet: it may still arrive within the receive window")
         return None
 
-    def astra_history(self, symbol: str, limit: int = 500) -> list[dict[str, Any]]:
-        orders = self._call("GET", "/api/v3/allOrders", [("symbol", self._require_instrument(symbol)),
-                                                         ("limit", str(int(limit)))])
+    def _pages(self, path: str, symbol: str, cursor_param: str, cursor_field: str) -> list[dict[str, Any]]:
+        """Every record from the first one, 1 000 per page in ascending order (documented maximum)."""
+
+        records: list[dict[str, Any]] = []
+        cursor = 0
+        for _ in range(MAX_HISTORY_PAGES):
+            page = self._call("GET", path, [("symbol", symbol), (cursor_param, str(cursor)), ("limit", "1000")])
+            if not isinstance(page, list):
+                raise BrokerUnavailable(f"{path}: unexpected answer")
+            records.extend(page)
+            if len(page) < 1000:
+                return records
+            cursor = int(page[-1][cursor_field]) + 1
+        raise BrokerUnavailable(f"{path}: more than {MAX_HISTORY_PAGES * 1000} records, history not proven complete")
+
+    def astra_history(self, symbol: str) -> list[dict[str, Any]]:
+        orders = self._pages("/api/v3/allOrders", self._require_instrument(symbol), "orderId", "orderId")
         return [o for o in orders if str(o.get("clientOrderId", "")).startswith(CLIENT_ID_PREFIX)]
 
-    def trades(self, symbol: str, limit: int = 500) -> list[dict[str, Any]]:
-        return self._call("GET", "/api/v3/myTrades", [("symbol", self._require_instrument(symbol)), ("limit", str(int(limit)))])
+    def trades(self, symbol: str, order_id: int | None = None) -> list[dict[str, Any]]:
+        symbol = self._require_instrument(symbol)
+        if order_id is not None:
+            return self._call("GET", "/api/v3/myTrades", [("symbol", symbol), ("orderId", str(int(order_id)))])
+        return self._pages("/api/v3/myTrades", symbol, "fromId", "id")
 
     def ledger(self, symbol: str) -> SpotLedger:
         """ASTRA's own fills in one symbol (client ids ASTRA-...), net of fees, from the provider's history."""
@@ -386,13 +411,14 @@ class BinanceSpotDemoAdapter(BrokerAdapter):
             return "demo_account_not_confirmed"
         if self._state is not ConnectionState.CONNECTED:
             return "demo_connection_not_healthy"
-        try:
-            if not self._demo_allowed():
-                return "venue_demo_gate_closed"
-            if self._paused():
-                return "demo_execution_paused"
-        except Exception:  # noqa: BLE001 - an unreadable switch means stop
-            return "demo_switch_unreadable"
+        if not request.reduce_only:  # closing ASTRA's own position stays possible while paused
+            try:
+                if not self._demo_allowed():
+                    return "venue_demo_gate_closed"
+                if self._paused():
+                    return "demo_execution_paused"
+            except Exception:  # noqa: BLE001 - an unreadable switch means stop
+                return "demo_switch_unreadable"
         if request.instrument.upper() not in self._instruments:
             return "instrument_not_allowed"
         if request.order_type != "MARKET":

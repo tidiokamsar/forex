@@ -15,7 +15,7 @@ import threading
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from decimal import ROUND_UP, Decimal
+from decimal import ROUND_DOWN, ROUND_UP, Decimal
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +40,12 @@ def registry_allows_demo() -> bool:
     return can_trade_demo(load_registry().get(VENUE_ID))
 
 
+def registry_allows_demo_auto() -> bool:
+    from .venues.registry import can_trade_demo_auto, load_registry
+
+    return can_trade_demo_auto(load_registry().get(VENUE_ID))
+
+
 def read_credentials_file(path: Path) -> dict[str, str]:
     values = {}
     for line in path.read_text(encoding="ascii").splitlines():
@@ -51,7 +57,8 @@ def read_credentials_file(path: Path) -> dict[str, str]:
 
 class DemoRuntime:
     def __init__(self, database: str | Path, adapter: BinanceSpotDemoAdapter, *, clock: Callable[[], datetime] | None = None,
-                 policy: SpotDemoPolicy | None = None, gate: Callable[[], bool] = registry_allows_demo) -> None:
+                 policy: SpotDemoPolicy | None = None, gate: Callable[[], bool] = registry_allows_demo,
+                 auto_gate: Callable[[], bool] | None = None) -> None:
         self.clock = clock or (lambda: datetime.now(UTC))
         self.adapter = adapter
         self.executions = ExecutionStore(database)
@@ -60,6 +67,7 @@ class DemoRuntime:
         self.demo.initialize()
         self.policy = policy or SpotDemoPolicy()
         self.gate = gate
+        self.auto_gate = auto_gate or registry_allows_demo_auto
         self.instrument = adapter.capabilities().instruments[0]
         self._gateway: OrderGateway | None = None
         self.stop = threading.Event()
@@ -71,7 +79,8 @@ class DemoRuntime:
         if self._gateway is None:
             step = float(self.adapter.spot_specs()[self.instrument].step_size)
             self._gateway = OrderGateway(store=self.executions, broker=self.adapter, configured_mode=RunMode.DEMO,
-                                         spot_policy=self.policy, position_tolerance_units=step,
+                                         spot_policy=self.policy, spot_auto_allowed=self.auto_gate,
+                                         position_tolerance_units=step,
                                          account_ref=self.adapter.account_snapshot().account_ref_masked, clock=self.clock)
         return self._gateway
 
@@ -142,9 +151,7 @@ class DemoRuntime:
                 raise RuntimeError("état incohérent avant le test : aucune entrée")
             spec = self.adapter.spot_specs()[self.instrument]
             quote = self.adapter.quote(self.instrument)
-            minimum = spec.min_notional * Decimal("1.2") / Decimal(repr(quote.ask))
-            quantity = (minimum / spec.step_size).to_integral_value(rounding=ROUND_UP) * spec.step_size
-            quantity = max(quantity, spec.min_qty)
+            quantity = self._test_quantity(spec, Decimal(repr(quote.bid)), Decimal(repr(quote.ask)))
             stop = math.floor(quote.ask * 0.98 / float(spec.tick_size)) * float(spec.tick_size)
             buy = self._submit(actor, "ENTRY", Direction.LONG, float(quantity), stop)
             step("buy", **buy)
@@ -166,6 +173,20 @@ class DemoRuntime:
         self.check()
         log_event(_LOG, "demo.controlled_test", level=logging.INFO, result=details["result"], run_id=run_id)
         return {"run_id": run_id, **details}
+
+    @staticmethod
+    def _test_quantity(spec, bid: Decimal, ask: Decimal) -> Decimal:
+        """The smallest quantity whose sell-back, net of a 0.1 % base fee and floored to the step, keeps 10 %
+        above the minimum notional at the bid."""
+
+        target = spec.min_notional * Decimal("1.2")
+        quantity = max(spec.min_qty, (target / ask / spec.step_size).to_integral_value(rounding=ROUND_UP) * spec.step_size)
+        for _ in range(1000):
+            sold = ((quantity * Decimal("0.999")) / spec.step_size).to_integral_value(rounding=ROUND_DOWN) * spec.step_size
+            if sold >= spec.min_qty and sold * bid >= spec.min_notional * Decimal("1.1"):
+                return quantity
+            quantity += spec.step_size
+        raise RuntimeError("no test quantity fits the rules")
 
     def _submit(self, actor: Actor, purpose: str, direction: Direction, units: float | None,
                 stop: float | None) -> dict[str, Any]:

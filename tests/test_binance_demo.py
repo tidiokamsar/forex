@@ -231,3 +231,60 @@ class RegistryGateTests(unittest.TestCase):
         self.assertFalse(can_trade_demo(swap(readable, environments=(VenueEnvironment.DEMO, VenueEnvironment.LIVE))))
         self.assertFalse(can_trade_demo(swap(readable, venue_id="binance_spot")))
         self.assertFalse(can_trade(grant(readable, VenueStatus.DEMO_VALIDATED)))  # never real trading
+
+
+class ReviewFixTests(DemoCase):
+    def test_m1_a_quote_read_after_the_check_started_is_fresh(self):
+        from astra.execution.spot_demo import entry_checks
+
+        spec = self.adapter.spot_specs()["BTCUSDT"]
+        book = self.adapter.ledger("BTCUSDT")
+        reasons, _ = entry_checks(policy=SpotDemoPolicy(), spec=spec, bid=80000.0, ask=80000.01, data_age=-2.5, ledger=book,
+                                  equity=1000, day_start_equity=1000, peak_equity=1000, open_symbols=0, free_quote=5000,
+                                  stop_price=78000.0, direction_long=True, requested_units=0.0001)
+        self.assertNotIn("data_stale_or_unknown", reasons)
+
+    def test_m2_the_test_quantity_survives_the_fee_and_the_step_at_any_price(self):
+        from decimal import Decimal
+
+        from astra.demo_runner import DemoRuntime
+
+        spec = self.adapter.spot_specs()["BTCUSDT"]
+        for price in ("20000", "80000", "150000", "450000"):
+            qty = DemoRuntime._test_quantity(spec, Decimal(price), Decimal(price))
+            sold = ((qty * Decimal("0.999")) / spec.step_size).to_integral_value(rounding="ROUND_DOWN") * spec.step_size
+            self.assertGreaterEqual(sold * Decimal(price), spec.min_notional * Decimal("1.1"), price)
+
+    def test_m3_strategy_orders_need_the_validated_gate(self):
+        strategy = self.command("s1", strategy="sma_atr_trend", checks=("strategy_signal",))
+        refused = self.gateway.submit(strategy, SYSTEM)
+        self.assertIn("demo_automatic_orders_not_validated", refused.reason_codes)
+        allowed = OrderGateway(store=self.store, broker=self.adapter, configured_mode=RunMode.DEMO, spot_policy=SpotDemoPolicy(),
+                               spot_auto_allowed=lambda: True, position_tolerance_units=0.00001,
+                               account_ref=self.account_ref, clock=self.clock)
+        self.assertEqual(allowed.submit(self.command("s2", strategy="sma_atr_trend", checks=("strategy_signal",)), SYSTEM).state,
+                         OrderState.FILLED)
+
+    def test_m4_history_is_read_page_by_page(self):
+        for i in range(1, 1501):
+            self.fake.trades.append({"symbol": "BTCUSDT", "id": 10_000 + i, "orderId": 99_999, "price": "1", "qty": "1",
+                                     "quoteQty": "1", "commission": "0", "commissionAsset": "USDT", "time": 0, "isBuyer": True})
+        self.assertEqual(len(self.adapter.trades("BTCUSDT")), 1500)
+
+    def test_l8_a_human_can_close_while_paused_and_l4_lookup_is_net_of_fees(self):
+        self.gateway.submit(self.command("p1"), OPERATOR)
+        self.paused = True
+        closed = self.gateway.submit(self.command("p1-close", purpose="EXIT", direction=Direction.SHORT, units=None), OPERATOR)
+        self.assertEqual(closed.state, OrderState.FILLED)
+        buy = self.store.get_order("p1")
+        looked_up = self.adapter.lookup_order(buy.client_order_id)
+        self.assertAlmostEqual(looked_up.filled_units, buy.filled_units, places=12)
+
+    def test_l7_stale_requests_expire(self):
+        from astra.demo_requests import DemoStore
+
+        store = DemoStore(Path(self.temp.name) / "astra.sqlite3")
+        store.initialize()
+        store.request("controlled_test", "ops")
+        self.assertIsNone(store.next_request(max_age_seconds=-1))
+        self.assertEqual(store.requests()[0]["status"], "FAILED")

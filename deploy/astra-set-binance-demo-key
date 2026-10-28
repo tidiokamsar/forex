@@ -1,0 +1,19 @@
+#!/bin/bash
+# Stores the Binance Spot DEMO API key and secret for ASTRA, read from the keyboard (not echoed),
+# into /etc/astra/binance-demo.cred (root 0600), handed by systemd LoadCredential to astra-demo only.
+set -euo pipefail
+[ "$(id -u)" -eq 0 ] || { echo "Lancer en root"; exit 1; }
+read -r -p "Clé API DEMO Binance (API Key) : " key
+read -r -s -p "Clé secrète DEMO Binance (Secret Key, invisible) : " secret; echo
+[[ "$key" =~ ^[A-Za-z0-9]{32,128}$ ]] || { echo "Clé API invalide (lettres et chiffres attendus)"; exit 2; }
+[[ "$secret" =~ ^[A-Za-z0-9]{32,128}$ ]] || { echo "Clé secrète invalide (lettres et chiffres attendus)"; exit 2; }
+umask 077
+tmp=$(mktemp /etc/astra/.binance-demo.XXXXXX)
+printf "BINANCE_DEMO_API_KEY=%s\nBINANCE_DEMO_API_SECRET=%s\n" "$key" "$secret" > "$tmp"
+chown root:root "$tmp"; chmod 0600 "$tmp"; mv "$tmp" /etc/astra/binance-demo.cred
+unset key secret
+echo "Enregistré dans /etc/astra/binance-demo.cred (root 0600). Seul le service astra-demo le reçoit ; ASTRA ne l affiche jamais."
+if systemctl cat astra-demo.service >/dev/null 2>&1; then
+  systemctl enable astra-demo.service >/dev/null 2>&1 || true
+  systemctl restart astra-demo.service && echo "Service astra-demo démarré (mode DEMO, exécution en pause jusqu à votre reprise)."
+fi

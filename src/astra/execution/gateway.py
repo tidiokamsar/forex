@@ -128,6 +128,7 @@ class OrderGateway:
         position_tolerance_units: float = 1e-6,
         account_ref: str | None = None,
         spot_policy: SpotDemoPolicy | None = None,
+        spot_auto_allowed: Callable[[], bool] | None = None,
     ) -> None:
         self._store = store
         self._broker = broker
@@ -145,6 +146,8 @@ class OrderGateway:
         self._cursor: int | None = None
         # Crypto spot DEMO (Binance Demo Mode): its own risk checks replace RiskEngine and margin, see spot_demo.py.
         self._spot_policy = spot_policy
+        # Orders other than the human controlled test need the venue's DEMO_VALIDATED evidence (registry gate).
+        self._spot_auto_allowed = spot_auto_allowed or (lambda: False)
         if spot_policy is not None and configured_mode is not RunMode.DEMO:
             raise ValueError("a spot DEMO policy is only valid in DEMO mode")
 
@@ -461,6 +464,13 @@ class OrderGateway:
 
         policy = self._spot_policy
         instrument = command.instrument.upper()
+        if command.strategy != CONTROLLED_TEST_STRATEGY and command.purpose == "ENTRY":
+            try:
+                auto = bool(self._spot_auto_allowed())
+            except Exception:  # noqa: BLE001 - an unreadable gate is closed
+                auto = False
+            if not auto:
+                reasons.append("demo_automatic_orders_not_validated")
         if instrument not in capabilities.instruments:
             reasons.append("instrument_not_supported_by_adapter")
         if not _finite(quote.bid) or not _finite(quote.ask) or quote.bid <= 0 or quote.ask < quote.bid:
@@ -503,8 +513,13 @@ class OrderGateway:
             policy=policy, spec=spec, bid=quote.bid, ask=quote.ask, data_age=data_age, ledger=book, equity=equity,
             day_start_equity=float(day_start), peak_equity=peak, open_symbols=open_symbols,
             free_quote=float(balances.get(spec.quote_asset, (0, 0))[0]), stop_price=command.stop_price,
-            direction_long=command.direction is Direction.LONG, requested_units=command.requested_units)
+            direction_long=command.direction is Direction.LONG, requested_units=command.requested_units,
+            max_clock_skew=self._skew)
         if "daily_loss_limit_reached" in refusals:
+            # Recorded like the Forex path, so the freeze expires on the next UTC day by itself.
+            self._store.set_control(self._daily_loss_key(), now.date().isoformat(), actor="system",
+                                    audit_type="alert.risk_daily_loss_limit",
+                                    details={"day": now.date().isoformat(), "account_ref": account.account_ref_masked})
             self._controls.freeze(FreezeReason.DAILY_LOSS_LIMIT, context=now.date().isoformat())
         if "max_drawdown_reached" in refusals:
             self._controls.freeze(FreezeReason.OPERATOR, context="max_drawdown_reached")

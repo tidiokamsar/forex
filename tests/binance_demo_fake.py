@@ -76,11 +76,16 @@ class FakeBinanceDemo:
                 return 400, {"code": -2013 if method == "GET" else -2011, "msg": "Order does not exist."}
             if method == "DELETE" and found[0]["status"] == "FILLED":
                 return 400, {"code": -2011, "msg": "Unknown order sent."}
-            return 200, found[0]
+            return 200, {k: v for k, v in found[0].items() if k != "fills"}  # GET /order carries no fills
         if path == "/api/v3/allOrders":
-            return 200, [o for o in self.orders if o["symbol"] == p["symbol"]]
+            start, limit = int(p.get("orderId", 0)), int(p.get("limit", 500))
+            return 200, [o for o in self.orders if o["symbol"] == p["symbol"] and o["orderId"] >= start][:limit]
         if path == "/api/v3/myTrades":
-            return 200, [t for t in self.trades if t["symbol"] == p["symbol"]]
+            rows = [t for t in self.trades if t["symbol"] == p["symbol"]]
+            if "orderId" in p:
+                return 200, [t for t in rows if t["orderId"] == int(p["orderId"])]
+            start, limit = int(p.get("fromId", 0)), int(p.get("limit", 500))
+            return 200, [t for t in rows if t["id"] >= start][:limit]
         return 404, {"code": -1, "msg": "unknown path"}
 
     def _market(self, p):
