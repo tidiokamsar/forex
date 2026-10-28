@@ -535,7 +535,8 @@ class SpotVenueIdentityTests(unittest.TestCase):
                 self.assertNotIn("venue_id_not_canonical", decision.reasons)
 
     def test_registered_spot_venue_is_exactly_binance_spot_and_still_allowed(self):
-        self.assertEqual(policies_module._registered_spot_venues(), frozenset({"binance_spot"}))
+        # binance_spot_demo (DEMO only) is a separate record; the SIMULATION spot policy still names both.
+        self.assertEqual(policies_module._registered_spot_venues(), frozenset({"binance_spot", "binance_spot_demo"}))
         self.assertTrue(CryptoSpotRiskPolicy().evaluate(buy(), context()).allowed)
 
     def test_unreadable_registry_refuses_every_venue(self):

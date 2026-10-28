@@ -1,9 +1,9 @@
 {
   "schema": "astra.venue_registry",
   "schema_version": 1,
-  "registry_version": "0.3.0",
-  "updated_on": "2026-10-26",
-  "content_sha256": "c22ec3194c642a10c2c602030a5af8da6353bde2c9713b3756b79701b9e64380",
+  "registry_version": "0.4.0",
+  "updated_on": "2026-10-28",
+  "content_sha256": "e4762f0ec903bca8b2dce485e1ec78a64030d1b5c0d14a12d7d896935f3eec92",
   "venues": [
     {
       "venue_id": "ctrader",
@@ -1209,6 +1209,77 @@
       "validations_missing": [
         "query the FCA Warning List, IOSCO I-SCAN, CySEC, ASIC and AMF warning lists by domain",
         "WHOIS or domain-age check"
+      ]
+    },
+    {
+      "venue_id": "binance_spot_demo",
+      "display_name": "Binance Spot Demo Mode",
+      "legal_entity": "Binance (same account as Binance Spot; the contracting entity for a Guinea resident is UNVERIFIED)",
+      "jurisdiction": null,
+      "market_types": [
+        "CRYPTO_SPOT"
+      ],
+      "instruments": [
+        "BTCUSDT"
+      ],
+      "api_name": "Binance Spot API, Demo Mode URLs",
+      "api_version": null,
+      "api_url": "https://github.com/binance/binance-spot-api-docs/blob/master/demo-mode/general-info.md",
+      "environments": [
+        "DEMO"
+      ],
+      "permissions_required": [
+        "a Binance account; Demo Mode API key created at demo.binance.com (API Key Management), HMAC, Spot trading only",
+        "the key is stored on the ASTRA server by the account holder (astra-set-binance-demo-key), never in Git or a conversation"
+      ],
+      "features": [
+        "REST https://demo-api.binance.com/api: exchangeInfo, bookTicker, klines, account, order (POST/GET/DELETE), allOrders, myTrades",
+        "MARKET orders through the BrokerAdapter permit boundary, DEMO permits only (astra.brokers.binance_spot_demo)"
+      ],
+      "size_rules": [
+        "Filters (LOT_SIZE, PRICE_FILTER, NOTIONAL/MIN_NOTIONAL) read at runtime from exchangeInfo; exactly the same as live per the Demo Mode doc"
+      ],
+      "costs_known": [
+        "Demo fees not reported by exchangeInfo; ASTRA estimates the standard 0.1% and records the fills' actual commission"
+      ],
+      "limitations": [
+        "Demo Mode prices and order books are realistic, not real: results say nothing about live trading.",
+        "Balances can be reset by the account holder in the Demo Trading UI, which breaks the continuity of ASTRA's ledger.",
+        "Spot only: long or flat. Stops are managed by ASTRA, not placed at the provider.",
+        "Not reachable from the development PC (timeouts on 2026-10-28); reachable from the ASTRA server (ping 200, 2026-10-28)."
+      ],
+      "eligibility_conditions": [],
+      "evidence": [
+        {
+          "claim": "Demo Mode REST https://demo-api.binance.com/api, WS API wss://demo-ws-api.binance.com/ws-api/v3, streams wss://demo-stream.binance.com/ws; keys created at demo.binance.com; filters and limits exactly the same as live; prices similar to live.",
+          "source_url": "https://github.com/binance/binance-spot-api-docs/blob/master/demo-mode/general-info.md",
+          "accessed_on": "2026-10-28"
+        }
+      ],
+      "statuses": [
+        {
+          "status": "DISCOVERED",
+          "since": "2026-10-28",
+          "note": "Requested as the first DEMO connector in the DEMO mission brief of 2026-10-28."
+        },
+        {
+          "status": "OFFICIAL_API_VERIFIED",
+          "since": "2026-10-28",
+          "note": "Official Demo Mode page read on the official GitHub mirror of the Spot docs; demo-api.binance.com answered /api/v3/ping from the ASTRA server."
+        },
+        {
+          "status": "ELIGIBILITY_UNKNOWN",
+          "since": "2026-10-28",
+          "note": "The account holder has not yet confirmed that Binance (Demo Trading) is available to them under Binance's terms from their country."
+        }
+      ],
+      "tests_passed": [
+        "tests/test_binance_demo.py (offline, in-process fake of Demo Mode; no Binance host contacted)"
+      ],
+      "validations_missing": [
+        "REGION_ELIGIBILITY_VERIFIED: confirmation by the account holder that their Binance account and Demo Trading are available to them under Binance's terms",
+        "READ_ONLY_CONNECTED: authenticated account read from the ASTRA server (astra demo check)",
+        "DEMO_VALIDATED: one controlled minimum order confirmed by Binance Demo, looked up, reconciled and closed"
       ]
     }
   ]

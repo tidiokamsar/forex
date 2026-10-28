@@ -24,6 +24,7 @@ from astra.venues.registry import (
 SEEDED = {
     "ctrader", "binance_spot", "binance_futures", "mt5", "iq_option", "interactive_brokers", "oanda", "fxcm",
     "ic_markets_global", "pepperstone", "fxpro", "deriv", "exness", "goforexfx_com", "goforextrading_com",
+    "binance_spot_demo",
 }
 
 

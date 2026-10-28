@@ -186,3 +186,29 @@ class LabRouteTests(WebAppCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DemoRouteTests(WebAppCase):
+    def call(self, client, path, csrf=True):
+        headers = {"Origin": ORIGIN}
+        if csrf:
+            headers["X-CSRF-Token"] = self.page_csrf(client)
+        return client.post(path, headers=headers)
+
+    def test_demo_state_is_readable_and_requests_are_operator_only(self):
+        from astra.demo_requests import DemoStore
+
+        self.assertEqual(self.client().get("/api/demo/overview").status_code, 401)
+        viewer = self.session_client("viewer", WebRole.READ_ONLY)
+        overview = viewer.get("/api/demo/overview").get_json()
+        self.assertEqual((overview["environment"], overview["live_locked"], overview["paused"]), ("DEMO", True, True))
+        self.assertIsNone(overview["orders"])  # orders stay OPERATOR-only
+        self.assertEqual(self.call(viewer, "/api/demo/resume").status_code, 403)
+        operator = self.session_client("ops", WebRole.OPERATOR)
+        self.assertEqual(self.call(operator, "/api/demo/resume", csrf=False).status_code, 403)
+        self.assertEqual(self.call(operator, "/api/demo/resume").status_code, 202)
+        self.assertEqual(self.call(operator, "/api/demo/controlled-test").status_code, 202)
+        self.assertEqual(self.call(operator, "/api/demo/live").status_code, 404)
+        kinds = [r["kind"] for r in DemoStore(self.db).requests()]
+        self.assertEqual(sorted(kinds), ["controlled_test", "resume"])
+        self.assertEqual(operator.get("/api/demo/overview").get_json()["orders"], [])

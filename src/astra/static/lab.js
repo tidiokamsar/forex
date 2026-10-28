@@ -114,7 +114,7 @@ function lineChart(container, points, label) {
 // -- tabs ------------------------------------------------------------------------------------------
 function showTab() {
   const name = (window.location.hash || "#apercu").slice(1);
-  const known = ["apercu", "donnees", "backtests", "simulation", "journaux"];
+  const known = ["apercu", "donnees", "backtests", "simulation", "demo", "journaux"];
   const active = known.includes(name) ? name : "apercu";
   for (const view of known) $(`view-${view}`).hidden = view !== active;
   for (const tab of document.querySelectorAll(".tab")) tab.classList.toggle("is-active", tab.dataset.tab === active);
@@ -356,14 +356,73 @@ function renderJobs(payload) {
   $("worker-state").textContent = `Worker : ${payload.worker.label}`;
 }
 
+// -- DEMO account -----------------------------------------------------------------------------------
+function renderDemo(d) {
+  const st = d.status;
+  const beat = d.heartbeat && d.heartbeat.at;
+  const alive = beat && Date.now() - Date.parse(beat) < 90000;
+  let label = "Service DEMO jamais démarré";
+  if (st) label = st.connected ? (alive ? "● CONNECTÉ (DEMO)" : "Service DEMO silencieux") : `DÉCONNECTÉ : ${st.error || "erreur"}`;
+  $("demo-state").textContent = label;
+  const cards = !st ? [["Connexion", "aucune", "Clé DEMO non déposée ou service astra-demo arrêté"]] : [
+    ["Connexion", st.connected ? "connecté" : "déconnecté", `${when(st.checked_at)} UTC`],
+    ["Environnement", `${st.environment_reported || "—"} (${st.environment_source || "—"})`, st.account_ref || "—"],
+    ["Prix BTCUSDT", st.quote ? `${num(st.quote.bid, true)} / ${num(st.quote.ask, true)}` : "—",
+      st.quote ? `achat / vente · ${when(st.quote.at)} UTC · Binance Demo, réaliste mais pas réel` : ""],
+    ["Soldes virtuels", Object.entries(st.balances || {}).map(([k, v]) => `${k} ${num(Number(v.free), true)}`).join(" · ") || "—",
+      "solde du compte de démonstration"],
+    ["Exécution", d.paused ? "EN PAUSE" : "active", st.demo_gate_open ? "registre : ordres DEMO autorisés" : "registre : ordres DEMO pas encore autorisés"],
+    ["Règles BTCUSDT", st.rules ? `pas ${st.rules.step_size} · minimum ${st.rules.min_notional} USDT` : "—", st.rules ? `statut ${st.rules.status}` : ""],
+    ["Position ASTRA", (st.positions || []).map((p) => `${p.symbol} ${num(p.net_units, true)}`).join(" · ") || "aucune",
+      "quantité nette des ordres ASTRA"],
+    ["Limites", st.policy ? `allocation ${num(st.policy.allocation)} USDT · risque ${num(st.policy.risk_per_trade * 100)} %` : "—",
+      st.policy ? `perte du jour ${num(st.policy.daily_loss_limit * 100)} % · drawdown ${num(st.policy.max_drawdown * 100)} %` : ""],
+  ];
+  $("demo-cards").replaceChildren(...cards.map(([k, v, small]) => {
+    const a = el("article", null, "metric-card"); a.append(el("span", k, "metric-label"), el("strong", v), el("small", small)); return a;
+  }));
+  lineChart($("demo-chart"), (d.quotes || []).map((q) => ({ x: Date.parse(q.ts), y: (q.bid + q.ask) / 2 })), "Prix BTCUSDT Binance Demo");
+  const stepText = (s) => {
+    if (!s) return "—";
+    let text = String(s.state);
+    if (s.broker_order_id) text += ` · n° ${s.broker_order_id}`;
+    if (s.filled_units) text += ` · ${num(s.filled_units, true)} @ ${num(s.average_price, true)}`;
+    return text;
+  };
+  fill("demo-tests", (d.tests || []).map((t) => {
+    const steps = Object.fromEntries((t.details.steps || []).map((s) => [s.step, s]));
+    const recon = (steps.reconciliation_after_sell || steps.reconciliation_before || {}).status || "—";
+    return row([t.id, when(t.started_at), t.actor, t.status, stepText(steps.buy), stepText(steps.sell), recon, t.details.error || "—"]);
+  }), "Aucun ordre de test. Reprenez l’exécution DEMO puis lancez « Ordre de test DEMO ».", 8);
+  if (d.orders) {
+    fill("demo-orders", d.orders.map((o) => row([when(o.created_at), o.client_order_id, o.purpose, o.direction,
+      num(o.requested_units, true), num(o.filled_units, true), num(o.average_fill_price, true), o.state,
+      (o.reason_codes || []).join(", ") || "—"])), "Aucun ordre DEMO.", 9);
+  }
+  fill("demo-requests", (d.requests || []).map((r) => row([r.id, r.kind, r.actor, when(r.created_at), STATUS[r.status] || r.status,
+    r.result ? (r.result.error || r.result.result || JSON.stringify(r.result)) : "—"])), "Aucune demande.", 6);
+}
+
+async function demoAction(action, label) {
+  status("demo-status-line", `${label} : demande envoyée…`);
+  try {
+    const r = await post(`/api/demo/${action}`);
+    const seen = r.request.duplicate ? "déjà en attente" : "enregistrée";
+    status("demo-status-line", `${label} : demande n° ${r.request.id} ${seen} ; le service DEMO la traite sous 5 secondes.`);
+    setTimeout(refreshDemo, 6000);
+    if (action === "controlled-test") setTimeout(refreshDemo, 20000);
+  } catch (error) { status("demo-status-line", error.message, true); }
+}
+
 // -- refresh ----------------------------------------------------------------------------------------
 async function refreshData() { renderData(await api("/api/market/overview")); }
 async function refreshBacktests() { return renderBacktests((await api("/api/lab/backtests")).backtests); }
 async function refreshSessions() { renderSessions(await api("/api/sim/sessions")); }
 async function refreshJobs() { renderJobs(await api("/api/system/jobs")); }
+async function refreshDemo() { renderDemo(await api("/api/demo/overview")); }
 
 async function refreshAll() {
-  const results = await Promise.allSettled([refreshData(), refreshBacktests(), refreshSessions(), refreshJobs()]);
+  const results = await Promise.allSettled([refreshData(), refreshBacktests(), refreshSessions(), refreshJobs(), refreshDemo()]);
   if (selectedSession) showSession(selectedSession).catch(() => {});
   return results[1].status === "fulfilled" && results[1].value;
 }
@@ -413,6 +472,9 @@ function wireForms() {
       pollBacktests(r.backtest_id);
     } catch (error) { status("backtest-status", error.message, true); }
   });
+  $("demo-resume").addEventListener("click", () => demoAction("resume", "Reprise"));
+  $("demo-pause").addEventListener("click", () => demoAction("pause", "Pause"));
+  $("demo-test").addEventListener("click", () => demoAction("controlled-test", "Ordre de test DEMO"));
   document.querySelector(".source-tf-select").addEventListener("change", fillSimPairs);
   $("sim-form").addEventListener("submit", async (event) => {
     event.preventDefault();

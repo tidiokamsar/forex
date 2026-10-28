@@ -7,6 +7,7 @@
         <a href="#donnees" class="tab" data-tab="donnees">Données</a>
         <a href="#backtests" class="tab" data-tab="backtests">Backtests</a>
         <a href="#simulation" class="tab" data-tab="simulation">Simulation</a>
+        <a href="#demo" class="tab" data-tab="demo">Compte DEMO</a>
         <a href="#journaux" class="tab" data-tab="journaux">Journaux</a>
       </nav>
 
@@ -232,6 +233,27 @@
         <h3>Signaux</h3><div class="table-scroll"><table><thead><tr><th>Date</th><th>Paire</th><th>Décision</th><th>Prix</th><th>Justification</th></tr></thead><tbody id="sim-signals"></tbody></table></div>
         <h3>Événements</h3><ul id="sim-events" class="plain-list"></ul>
       </section>
+      </div>
+
+      <!-- ===================== COMPTE DEMO ===================== -->
+      <div class="view" id="view-demo" hidden>
+      <section class="intro"><div><p class="eyebrow">BINANCE SPOT · MODE DÉMO</p><h2>Compte DEMO</h2>
+        <p class="muted">Prix et carnets « réalistes » de Binance Demo, pas le marché réel. Ordres virtuels seulement ; le mode RÉEL reste verrouillé côté serveur.</p></div>
+        <div class="service-state" id="demo-state">—</div></section>
+      <section class="metric-grid" id="demo-cards"></section>
+      <section class="panel operator-only">
+        <div class="panel-heading"><div><p class="eyebrow">PILOTAGE</p><h2>Exécution DEMO</h2></div>
+          <div class="button-row"><button type="button" id="demo-resume" class="small-button">Reprendre</button><button type="button" id="demo-pause" class="danger-button">Mettre en pause</button><button type="button" id="demo-test" class="small-button">Ordre de test DEMO</button></div></div>
+        <p class="footnote">L’ordre de test est technique : le minimum autorisé par Binance (environ 6 USDT de BTC), acheté puis revendu, contrôlé à chaque étape. Ce n’est pas une décision de stratégie.</p>
+        <p class="form-status" id="demo-status-line" role="status"></p>
+      </section>
+      <section class="panel"><div class="panel-heading"><div><p class="eyebrow">MARCHÉ</p><h2>BTCUSDT (Binance Demo)</h2></div></div><div id="demo-chart" class="chart"><p class="empty-cell">Aucune cotation reçue.</p></div></section>
+      <section class="panel table-panel"><div class="panel-heading"><div><p class="eyebrow">ESSAIS</p><h2>Ordres de test contrôlés</h2></div></div>
+        <div class="table-scroll"><table><thead><tr><th>N°</th><th>Début UTC</th><th>Opérateur</th><th>Résultat</th><th>Achat</th><th>Vente</th><th>Rapprochement</th><th>Erreur</th></tr></thead><tbody id="demo-tests"></tbody></table></div></section>
+      <section class="panel table-panel operator-only"><div class="panel-heading"><div><p class="eyebrow">ORDRES</p><h2>Ordres DEMO (passerelle d’exécution)</h2></div></div>
+        <div class="table-scroll"><table><thead><tr><th>Créé UTC</th><th>Identifiant client</th><th>Objet</th><th>Sens</th><th>Quantité</th><th>Remplie</th><th>Prix moyen</th><th>État</th><th>Motifs</th></tr></thead><tbody id="demo-orders"></tbody></table></div></section>
+      <section class="panel table-panel"><div class="panel-heading"><div><p class="eyebrow">DEMANDES</p><h2>Demandes au service DEMO</h2></div></div>
+        <div class="table-scroll"><table><thead><tr><th>N°</th><th>Type</th><th>Par</th><th>Créée UTC</th><th>Statut</th><th>Résultat</th></tr></thead><tbody id="demo-requests"></tbody></table></div></section>
       </div>
 
       <!-- ===================== JOURNAUX ===================== -->

@@ -137,6 +137,23 @@ def can_read_account(record: VenueRecord) -> bool:
     return _gate(record, ACCOUNT_READ_REQUIRES)
 
 
+# The only venues that may receive DEMO orders, through the BrokerAdapter permit boundary and DEMO permits.
+DEMO_TRADING_VENUES = frozenset({"binance_spot_demo"})
+
+
+def can_trade_demo(record: VenueRecord) -> bool:
+    """A controlled DEMO order (a human-requested test): account read verified, DEMO the only environment."""
+
+    return (isinstance(record, VenueRecord) and record.venue_id in DEMO_TRADING_VENUES
+            and record.environments == (VenueEnvironment.DEMO,) and _gate(record, ACCOUNT_READ_REQUIRES))
+
+
+def can_trade_demo_auto(record: VenueRecord) -> bool:
+    """Automatic DEMO orders from a strategy: additionally a validated controlled test (DEMO_VALIDATED)."""
+
+    return can_trade_demo(record) and record.holds(VenueStatus.DEMO_VALIDATED)
+
+
 def can_trade(record: VenueRecord) -> bool:
     if not TRADING_ENABLED_IN_THIS_LOT:
         return False

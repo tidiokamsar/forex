@@ -1,0 +1,63 @@
+# ASTRA Binance Spot DEMO service: account status, live Demo quotes, dashboard requests (pause, resume,
+# controlled test) and, once validated, automatic DEMO orders. DEMO ONLY: the adapter can reach no host but
+# demo-api.binance.com and LIVE is refused by the gateway, the mode check and the adapter.
+# The key file /etc/astra/binance-demo.cred (root 0600, written by astra-set-binance-demo-key) is handed to
+# this unit only, through systemd credentials; it is never in the environment, the dashboard or the logs.
+[Unit]
+Description=ASTRA DEMO account service (Binance Spot Demo Mode; no real orders)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/astra/binance-demo.cred
+StartLimitIntervalSec=600
+StartLimitBurst=10
+OnFailure=astra-alert@%n.service
+
+[Service]
+Type=simple
+User=astra
+Group=astra
+WorkingDirectory=/opt/astra/app
+EnvironmentFile=/etc/astra/web.env
+Environment=PYTHONPATH=/opt/astra/app/src
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=ASTRA_LOG_LEVEL=INFO
+Environment=ASTRA_DEMO_INSTRUMENTS=BTCUSDT
+Environment=ASTRA_DEMO_ALLOCATION_USDT=1000
+LoadCredential=binance-demo:/etc/astra/binance-demo.cred
+ExecStart=/opt/astra/venv/bin/python -m astra demo-account run
+Restart=always
+RestartSec=15
+UMask=0077
+MemoryMax=512M
+TasksMax=32
+StateDirectory=astra
+StateDirectoryMode=0700
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

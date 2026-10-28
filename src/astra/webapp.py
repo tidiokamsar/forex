@@ -33,6 +33,7 @@ from .auth import AuthError, AuthStore, AuthUnavailable, WebRole, crypto
 from .auth.mfa_crypto import load_cipher
 from .auth.store import SessionRecord, SessionStage
 from .config import AppConfig, WebConfig
+from .demo_requests import DemoStore
 from .execution import ExecutionStore, TradingControls
 from .labweb import register_lab_routes
 from .registry import ModelRegistry
@@ -571,6 +572,36 @@ def create_app(config: AppConfig, web: WebConfig, *, auth: AuthStore | None = No
     def admin_message(message: str, status: int) -> Response:
         return page("admin_users.html", status, csrf_token=csrf_for_session(g.session), users=auth.list_users(),
                     roles=[role.value for role in WebRole], me=g.session.user.username, message=message)
+
+    # -- Binance Spot DEMO account (astra-demo runs it; the web reads its state and records requests) -----
+    demo_store = DemoStore(Path(backtests.path))
+    demo_store.initialize()
+
+    @app.get("/api/demo/overview")
+    @require(WebRole.READ_ONLY)
+    def demo_overview() -> Response:
+        def produce() -> dict[str, Any]:
+            state = demo_store.state()
+            payload = {"environment": "DEMO", "live_locked": True, "venue": "binance_spot_demo",
+                       "status": state.get("status", {}).get("value"), "paused": demo_store.paused(),
+                       "heartbeat": state.get("heartbeat", {}).get("value"), "quotes": demo_store.quotes("BTCUSDT"),
+                       "tests": demo_store.tests(), "requests": demo_store.requests(), "orders": None}
+            if g.session.user.role.allows(WebRole.OPERATOR):
+                payload["orders"] = [o.to_dict() for o in execution.list_orders(limit=200) if o.mode == "DEMO"]
+            return payload
+
+        return storage_json(produce)
+
+    @app.post("/api/demo/<action>")
+    @require(WebRole.OPERATOR)
+    def demo_request(action: str) -> Response:
+        kinds = {"pause": "pause", "resume": "resume", "controlled-test": "controlled_test"}
+        if action not in kinds:
+            return _error(404, "not_found")
+        response = storage_json(lambda: {"request": demo_store.request(kinds[action], actor().removeprefix("web:"))})
+        if response.status_code == 200:
+            response.status_code = 202
+        return response
 
     # -- market data, backtests and paper simulations (astra.labweb; requests only, the worker runs them) --
     import_dir = Path(os.environ.get("ASTRA_IMPORT_DIR") or (Path(backtests.path).parent / "imports"))

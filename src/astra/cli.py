@@ -234,6 +234,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Consommer une seule fois le holdout final, après scellement SQLite du protocole",
     )
+    demo_cmd = commands.add_parser("demo-account", help="Compte Binance Spot DEMO (aucun ordre réel ; LIVE verrouillé)")
+    demo_actions = demo_cmd.add_subparsers(dest="demo_action", required=True)
+    demo_actions.add_parser("check", help="Lire l'heure, le compte, les règles et un prix de Binance Demo")
+    demo_test = demo_actions.add_parser("controlled-test", help="Ordre DEMO de test minimal : achat, contrôle, revente")
+    demo_test.add_argument("--operator", required=True, help="Nom de l'opérateur humain qui demande le test")
+    demo_actions.add_parser("run", help="Service DEMO supervisé (astra-demo.service)")
+    demo_actions.add_parser("pause", help="Mettre l'exécution DEMO en pause")
+    demo_actions.add_parser("resume", help="Reprendre l'exécution DEMO")
     worker = commands.add_parser("worker", help="Worker continu : imports, taux BCE, backtests, simulations (SIMULATION)")
     worker.add_argument("--once", action="store_true", help="Une seule itération puis arrêt")
     worker.add_argument("--no-ecb", action="store_true", help="Ne pas planifier l'acquisition des taux BCE")
@@ -302,6 +310,30 @@ def _lab_command(args: argparse.Namespace, config: AppConfig) -> int:
     return 0
 
 
+def _demo_command(args: argparse.Namespace, config: AppConfig) -> int:
+    from .demo_requests import DemoStore
+
+    if args.demo_action in ("pause", "resume"):
+        store = DemoStore(config.database_path)
+        store.initialize()
+        store.set("paused", args.demo_action == "pause")
+        _write_json({"paused": args.demo_action == "pause"})
+        return 0
+    from .demo_runner import runtime_from_environment
+
+    runtime = runtime_from_environment(config.database_path)
+    if args.demo_action == "check":
+        result = runtime.check()
+        _write_json(result)
+        return 0 if result.get("connected") else 3
+    if args.demo_action == "controlled-test":
+        result = runtime.controlled_test(f"cli:{args.operator}")
+        _write_json(result)
+        return 0 if result.get("result") == "RÉUSSI" else 3
+    runtime.run()
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     # Logs go to stderr (and optionally a rotating file); stdout stays JSON output.
@@ -354,6 +386,9 @@ def _run(args: argparse.Namespace) -> int:
 
         if args.command in ("worker", "data", "lab"):
             return _lab_command(args, config)
+
+        if args.command == "demo-account":
+            return _demo_command(args, config)
 
         if args.command == "backup":
             from dataclasses import asdict as _asdict

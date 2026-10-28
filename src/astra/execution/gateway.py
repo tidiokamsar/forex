@@ -15,6 +15,7 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from decimal import Decimal
 
 from ..brokers.base import (
     BrokerAdapter,
@@ -37,9 +38,15 @@ from ..risk import RiskEngine
 from .controls import RECONCILIATION_OWNED, FreezeReason, TradingControls
 from .mode import verify_mode
 from .orders import TERMINAL_STATES, ExecutionStore, OrderRecord, OrderState
+from .spot_demo import SpotDemoPolicy, exit_quantity
+from .spot_demo import day_key as spot_day_key
+from .spot_demo import entry_checks as spot_entry_checks
+from .spot_demo import peak_key as spot_peak_key
 
 _LOG = get_logger("execution.gateway")
 COMMAND_SCHEMA_VERSION = "astra.execution_command.v1"
+# A technical DEMO order requested by a human to test the connector; never a strategy decision.
+CONTROLLED_TEST_STRATEGY = "demo.controlled_test"
 _EVENT_CURSOR = "broker_event_cursor"
 _DAILY_LOSS_DAY = "daily_loss_limit_day"
 
@@ -120,6 +127,7 @@ class OrderGateway:
         max_clock_skew_seconds: float = 5.0,
         position_tolerance_units: float = 1e-6,
         account_ref: str | None = None,
+        spot_policy: SpotDemoPolicy | None = None,
     ) -> None:
         self._store = store
         self._broker = broker
@@ -135,6 +143,10 @@ class OrderGateway:
         self._skew = max_clock_skew_seconds
         self._tolerance = position_tolerance_units
         self._cursor: int | None = None
+        # Crypto spot DEMO (Binance Demo Mode): its own risk checks replace RiskEngine and margin, see spot_demo.py.
+        self._spot_policy = spot_policy
+        if spot_policy is not None and configured_mode is not RunMode.DEMO:
+            raise ValueError("a spot DEMO policy is only valid in DEMO mode")
 
     @property
     def controls(self) -> TradingControls:
@@ -166,6 +178,8 @@ class OrderGateway:
     def _submit(self, command: ExecutionCommand, actor: Actor) -> GatewayResult:
         self._guard.require(actor, Action.SUBMIT_ORDER_COMMAND, target=getattr(command, "intent_id", ""))
         schema_errors = _validate_command(command)
+        if not schema_errors and getattr(command, "strategy", None) == CONTROLLED_TEST_STRATEGY and not actor.is_human:
+            schema_errors = ("controlled_test_requires_human",)
         if schema_errors:
             self._store.audit(
                 "order.command_rejected",
@@ -336,12 +350,14 @@ class OrderGateway:
             reasons.append("broker_unavailable")
             return tuple(dict.fromkeys(reasons)), 0.0
 
-        verification = verify_mode(self._mode, command.mode, capabilities, account)
+        verification = verify_mode(self._mode, command.mode, capabilities, account, self._broker)
         if not verification.verified:
             reasons.extend(verification.reason_codes)
             self._controls.freeze(FreezeReason.MODE_MISMATCH, context=",".join(verification.reason_codes))
         if command.account_ref != account.account_ref_masked:
             reasons.append("account_ref_mismatch")
+        if self._spot_policy is not None:
+            return self._spot_pre_send_checks(command, account, quote, capabilities, now, reasons)
 
         instrument = command.instrument.upper()
         # Provider-reported specifications take precedence over illustrative ones.
@@ -439,6 +455,62 @@ class OrderGateway:
         if margin > account.margin_free:
             return ("margin_insufficient",), 0.0
         return (), units
+
+    def _spot_pre_send_checks(self, command, account, quote, capabilities, now, reasons):
+        """Crypto spot DEMO: long or flat, measured on ASTRA's allocation and its own fills."""
+
+        policy = self._spot_policy
+        instrument = command.instrument.upper()
+        if instrument not in capabilities.instruments:
+            reasons.append("instrument_not_supported_by_adapter")
+        if not _finite(quote.bid) or not _finite(quote.ask) or quote.bid <= 0 or quote.ask < quote.bid:
+            reasons.append("quote_invalid")
+        if reasons:
+            return tuple(dict.fromkeys(reasons)), 0.0
+        try:
+            spec = self._broker.spot_specs()[instrument]
+            book = self._broker.ledger(instrument)
+            balances = self._broker.balances().balances
+        except BrokerRequestError as exc:
+            return (*reasons, f"broker_request_error:{exc.error_code}"), 0.0
+        except (BrokerUnavailable, KeyError):
+            self.on_connection_lost(context=command.intent_id)
+            return (*reasons, "broker_unavailable"), 0.0
+        data_age = (now - quote.timestamp).total_seconds()
+        if command.purpose == "EXIT":
+            if command.direction is not Direction.SHORT:
+                return ("exit_direction_increases_position",), 0.0
+            if data_age > policy.max_data_age_seconds or data_age < -self._skew:
+                return ("data_stale_or_unknown",), 0.0
+            free_base = float(balances.get(spec.base_asset, (0, 0))[0])
+            refusals, quantity = exit_quantity(spec, book, free_base, command.requested_units)
+            bid = Decimal(repr(float(quote.bid)))
+            if not refusals and spec.order_violations(quantity, bid):
+                refusals = tuple(spec.order_violations(quantity, bid))
+            return refusals, float(quantity)
+        equity = book.equity(policy.allocation, quote.bid)
+        day = spot_day_key(account.account_ref_masked, now)
+        day_start = self._store.get_control(day)
+        if day_start is None:
+            day_start = equity
+            self._store.set_control(day, day_start, actor="system", audit_type="execution.trading_day_started",
+                                    details={"equity": equity, "policy": policy.to_dict()})
+        peak = max(float(self._store.get_control(spot_peak_key(account.account_ref_masked)) or equity), equity)
+        self._store.set_control(spot_peak_key(account.account_ref_masked), peak, actor="system",
+                                audit_type="execution.peak_equity", details={"equity": equity})
+        open_symbols = sum(1 for p in self._broker.open_positions() if p.net_units > float(spec.step_size))
+        refusals, quantity = spot_entry_checks(
+            policy=policy, spec=spec, bid=quote.bid, ask=quote.ask, data_age=data_age, ledger=book, equity=equity,
+            day_start_equity=float(day_start), peak_equity=peak, open_symbols=open_symbols,
+            free_quote=float(balances.get(spec.quote_asset, (0, 0))[0]), stop_price=command.stop_price,
+            direction_long=command.direction is Direction.LONG, requested_units=command.requested_units)
+        if "daily_loss_limit_reached" in refusals:
+            self._controls.freeze(FreezeReason.DAILY_LOSS_LIMIT, context=now.date().isoformat())
+        if "max_drawdown_reached" in refusals:
+            self._controls.freeze(FreezeReason.OPERATOR, context="max_drawdown_reached")
+        if self._controls.kill_switch_active():
+            refusals = (*refusals, "kill_switch_active")
+        return tuple(dict.fromkeys(refusals)), float(quantity)
 
     # -- broker events --------------------------------------------------------
 
@@ -599,7 +671,7 @@ class OrderGateway:
             self.on_connection_lost(context="reconcile")
             return ReconciliationResult("FAILED", ("adapter_unavailable",), tuple(resolved), rid, self._controls.freezes())
 
-        verification = verify_mode(self._mode, self._mode, capabilities, account)
+        verification = verify_mode(self._mode, self._mode, capabilities, account, self._broker)
         if not verification.verified:
             divergences.extend(f"mode:{code}" for code in verification.reason_codes)
         broker_net = {p.instrument: p.net_units for p in positions if abs(p.net_units) > self._tolerance}
@@ -720,7 +792,9 @@ def _validate_command(command: object) -> tuple[str, ...]:
     if command.purpose == "ENTRY":
         if command.stop_price is None or not _finite(command.stop_price) or command.stop_price <= 0:
             errors.append("entry_requires_stop")
-        if "strategy_signal" not in command.checks_passed:
+        controlled_test = (command.strategy == CONTROLLED_TEST_STRATEGY and command.mode is RunMode.DEMO
+                           and "controlled_test" in command.checks_passed)
+        if "strategy_signal" not in command.checks_passed and not controlled_test:
             errors.append("missing_strategy_signal_check")
     if command.requested_units is not None and (not _finite(command.requested_units) or command.requested_units <= 0):
         errors.append("invalid_requested_units")

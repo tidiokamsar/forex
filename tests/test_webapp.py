@@ -43,6 +43,10 @@ LAB_READ_ROUTES = ["/api/market/overview", "/api/market/quality", "/api/market/c
                    "/api/sim/sessions/<int:session_id>", "/api/system/jobs"]
 LAB_REQUEST_ROUTES = ["/api/market/import", "/api/market/ingest", "/api/lab/backtests", "/api/sim/sessions",
                       "/api/sim/sessions/<int:session_id>/<action>"]
+# Binance Spot DEMO account: the state is READ_ONLY (its orders OPERATOR), requests (pause, resume, controlled
+# test) are OPERATOR and only recorded; astra-demo acts on them through the gateway.
+DEMO_READ_ROUTES = ["/api/demo/overview"]
+DEMO_REQUEST_ROUTES = ["/api/demo/<action>"]
 
 
 class HttpsClient(FlaskClient):
@@ -526,7 +530,8 @@ class PermissionTests(WebAppCase):
 
     def test_every_registered_route_is_covered_by_this_test_file(self):
         app_routes = {rule.rule for rule in self.app.url_map.iter_rules()}
-        known = set(READ_ONLY_ROUTES + OPERATOR_ROUTES + ADMIN_ROUTES + LAB_READ_ROUTES + LAB_REQUEST_ROUTES) | {
+        known = set(READ_ONLY_ROUTES + OPERATOR_ROUTES + ADMIN_ROUTES + LAB_READ_ROUTES + LAB_REQUEST_ROUTES
+                    + DEMO_READ_ROUTES + DEMO_REQUEST_ROUTES) | {
             "/", "/login", "/logout", "/login/mfa", "/mfa/setup", "/account/password", "/api/health",
             "/static/<name>", "/admin/users", "/admin/users/<username>/<action>"}
         self.assertEqual(app_routes, known, "a new route needs explicit permission tests")
@@ -641,7 +646,7 @@ class TradingIsolationTests(WebAppCase):
         # Besides sign-in and administration, only research and paper-simulation requests (astra.labweb) mutate,
         # and none reaches the execution gateway (see test_webapp_never_calls_execution_mutators).
         self.assertEqual(mutating, {"/login", "/logout", "/login/mfa", "/mfa/setup", "/account/password", "/admin/users",
-                                    "/admin/users/<username>/<action>", *LAB_REQUEST_ROUTES})
+                                    "/admin/users/<username>/<action>", *LAB_REQUEST_ROUTES, *DEMO_REQUEST_ROUTES})
         operator = self.session_client("ops", WebRole.OPERATOR)
         for route in OPERATOR_ROUTES:
             self.assertEqual(self.post(operator, route, {"csrf_token": self.page_csrf(operator)}).status_code, 405, route)
@@ -649,7 +654,7 @@ class TradingIsolationTests(WebAppCase):
     def test_webapp_never_calls_execution_mutators(self):
         source = Path(__file__).resolve().parents[1] / "src" / "astra" / "webapp.py"
         for module in (source, source.with_name("labweb.py"), source.with_name("papertrade.py"),
-                       source.with_name("jobs.py"), source.with_name("marketdata.py")):
+                       source.with_name("jobs.py"), source.with_name("marketdata.py"), source.with_name("demo_requests.py")):
             text = module.read_text(encoding="utf-8")
             names = {node.attr for node in ast.walk(ast.parse(text)) if isinstance(node, ast.Attribute)}
             forbidden_names = {"submit", "submit_order", "release_kill_switch", "activate_kill_switch", "clear_freeze",

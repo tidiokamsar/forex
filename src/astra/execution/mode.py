@@ -12,9 +12,15 @@ from dataclasses import dataclass
 from ..brokers.base import AccountSnapshot, BrokerEnvironment, Capabilities, EnvironmentSource
 from ..models import RunMode
 
-# DEMO is defined by the contract but no verified demo connector exists in
-# this build, so it is not yet an executable mode. LIVE is always locked here.
+# SIMULATION is executable with every adapter. DEMO is executable only with the exact adapter types listed in
+# DEMO_EXECUTABLE_ADAPTERS (by qualified name; a subclass or look-alike is not enough). LIVE is always locked.
 EXECUTABLE_MODES = frozenset({RunMode.SIMULATION})
+DEMO_EXECUTABLE_ADAPTERS = frozenset({"astra.brokers.binance_spot_demo.BinanceSpotDemoAdapter"})
+
+
+def demo_executable(adapter: object) -> bool:
+    kind = type(adapter)
+    return f"{kind.__module__}.{kind.__qualname__}" in DEMO_EXECUTABLE_ADAPTERS
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +35,7 @@ def verify_mode(
     command_mode: RunMode,
     capabilities: Capabilities,
     account: AccountSnapshot,
+    adapter: object = None,
 ) -> ModeVerification:
     reasons: list[str] = []
     if not isinstance(configured_mode, RunMode) or not isinstance(command_mode, RunMode):
@@ -40,7 +47,7 @@ def verify_mode(
         account.environment_reported,
     ):
         reasons.append("live_locked_requires_human_authorization")
-    if configured_mode not in EXECUTABLE_MODES:
+    if configured_mode not in EXECUTABLE_MODES and not (configured_mode is RunMode.DEMO and demo_executable(adapter)):
         reasons.append("mode_not_executable_in_this_build")
 
     expected = BrokerEnvironment(configured_mode.value)
