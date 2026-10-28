@@ -1,9 +1,9 @@
 {
   "schema": "astra.venue_registry",
   "schema_version": 1,
-  "registry_version": "0.4.0",
+  "registry_version": "0.4.1",
   "updated_on": "2026-10-28",
-  "content_sha256": "e4762f0ec903bca8b2dce485e1ec78a64030d1b5c0d14a12d7d896935f3eec92",
+  "content_sha256": "f73b2bc5c45299d4323516bf7f344b15b26d43993d86245ecacf627f8a404ca3",
   "venues": [
     {
       "venue_id": "ctrader",
@@ -1248,7 +1248,9 @@
         "Spot only: long or flat. Stops are managed by ASTRA, not placed at the provider.",
         "Not reachable from the development PC (timeouts on 2026-10-28); reachable from the ASTRA server (ping 200, 2026-10-28)."
       ],
-      "eligibility_conditions": [],
+      "eligibility_conditions": [
+        "DEMO only (virtual funds); the account holder confirmed on 2026-10-28 that their Binance account and Demo Trading are available to them under Binance's terms from their country"
+      ],
       "evidence": [
         {
           "claim": "Demo Mode REST https://demo-api.binance.com/api, WS API wss://demo-ws-api.binance.com/ws-api/v3, streams wss://demo-stream.binance.com/ws; keys created at demo.binance.com; filters and limits exactly the same as live; prices similar to live.",
@@ -1268,16 +1270,15 @@
           "note": "Official Demo Mode page read on the official GitHub mirror of the Spot docs; demo-api.binance.com answered /api/v3/ping from the ASTRA server."
         },
         {
-          "status": "ELIGIBILITY_UNKNOWN",
+          "status": "REGION_ELIGIBILITY_VERIFIED",
           "since": "2026-10-28",
-          "note": "The account holder has not yet confirmed that Binance (Demo Trading) is available to them under Binance's terms from their country."
+          "note": "Confirmed by the account holder on 2026-10-28, in their words: \"Je confirme que mon compte Binance et Demo Trading me sont accessibles selon les conditions de Binance depuis mon pays.\" Account holder's statement, not an independent legal review."
         }
       ],
       "tests_passed": [
         "tests/test_binance_demo.py (offline, in-process fake of Demo Mode; no Binance host contacted)"
       ],
       "validations_missing": [
-        "REGION_ELIGIBILITY_VERIFIED: confirmation by the account holder that their Binance account and Demo Trading are available to them under Binance's terms",
         "READ_ONLY_CONNECTED: authenticated account read from the ASTRA server (astra demo check)",
         "DEMO_VALIDATED: one controlled minimum order confirmed by Binance Demo, looked up, reconciled and closed"
       ]

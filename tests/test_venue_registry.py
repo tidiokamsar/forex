@@ -54,6 +54,12 @@ class SeedTests(unittest.TestCase):
 
     def test_every_eligibility_is_unknown_and_nothing_can_read_or_trade(self):
         for record in self.registry.records:
+            if record.venue_id == "binance_spot_demo":
+                # Eligibility confirmed by the account holder (2026-10-28): public data only until a read check.
+                self.assertTrue(can_read_public_data(record))
+                self.assertFalse(can_read_account(record))
+                self.assertFalse(can_trade(record))
+                continue
             self.assertTrue(record.holds(VenueStatus.ELIGIBILITY_UNKNOWN), record.venue_id)
             self.assertTrue(record.holds(VenueStatus.DISCOVERED), record.venue_id)
             self.assertFalse(can_read_public_data(record), record.venue_id)
