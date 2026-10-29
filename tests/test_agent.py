@@ -23,8 +23,10 @@ from test_webapp import ORIGIN, LoopbackClient, WebAppCase
 EXPECTED_AGENT_ENDPOINTS = {
     "read": {"agent_whoami", "status", "summary", "runs", "model_versions", "experiments", "controls",
              "market_overview", "market_quality", "market_candles", "lab_catalog", "lab_backtests", "lab_backtest",
-             "sim_sessions", "sim_session", "learn_overview", "system_jobs"},
+             "sim_sessions", "sim_session", "learn_overview", "system_jobs", "mt5_overview", "market_chart",
+             "dashboard_overview"},
     "lab": {"market_ingest", "lab_backtest_create", "sim_create", "sim_action"},
+    "mt5": {"mt5_snapshot", "mt5_quotes", "mt5_candles"},
 }
 
 
@@ -47,6 +49,93 @@ class AgentTokenCase(WebAppCase):
 
     def events(self, action):
         return [e for e in self.auth.events(limit=500) if e["action"] == action]
+
+
+SNAPSHOT = {"account": {"login": 114765880, "server": "MetaQuotes-Demo", "environment": "DEMO", "currency": "USD",
+                        "balance": 99999.88, "equity": 99505.39, "margin": 5012.66, "margin_free": 94492.73,
+                        "leverage": 100, "algo_trading_enabled": True},
+            "positions": [{"ticket": 1, "symbol": "AUDUSD", "side": "SHORT", "volume": 0.88, "price_open": 0.70553,
+                           "price_current": 0.7064, "sl": 0.71119, "profit": -76.56, "astra": True,
+                           "time_open": "2026-10-28T21:22:29+00:00"}],
+            "actions": [{"kind": "open", "symbol": "AUDUSD", "side": "SHORT", "lots": 0.88, "price": 0.70553,
+                         "sl": 0.71119, "reason": "position SHORT du compte simulé"}]}
+
+
+class Mt5DashboardTests(AgentTokenCase):
+    def test_only_a_token_with_the_mt5_scope_can_report_the_account(self):
+        post = {"method": "POST", "json": SNAPSHOT}
+        for name, scopes in (("reader", ("read",)), ("labber", ("read", "lab"))):
+            token, _ = self.tokens.issue("cli:test", name, "owner", list(scopes))
+            self.assertEqual(self.bearer(token, "/api/mt5/snapshot", **post).status_code, 403)
+        browser = self.session_client("ops", WebRole.OPERATOR)
+        headers = {"Origin": ORIGIN, "X-CSRF-Token": self.page_csrf(browser)}
+        self.assertEqual(browser.post("/api/mt5/snapshot", json=SNAPSHOT, headers=headers).status_code, 403)  # not a person
+        token = self.issue(scopes=("read", "mt5"))
+        self.assertEqual(self.bearer(token, "/api/mt5/snapshot", **post).status_code, 200)
+        overview = self.bearer(token, "/api/mt5/overview").get_json()
+        self.assertEqual((overview["environment"], overview["connected"], overview["live_locked"]), ("DEMO", True, True))
+        self.assertEqual(overview["snapshot"]["open_profit"], -76.56)
+        self.assertEqual(overview["events"][0]["kind"], "open")
+        viewer = self.session_client("viewer", WebRole.READ_ONLY)
+        self.assertEqual(viewer.get("/api/mt5/overview").get_json()["snapshot"]["account"]["login"], 114765880)
+
+    def test_a_non_demo_or_malformed_snapshot_is_refused_and_nothing_is_stored(self):
+        token = self.issue(scopes=("read", "mt5"))
+        real = {**SNAPSHOT, "account": {**SNAPSHOT["account"], "environment": "REAL"}}
+        broken = {**SNAPSHOT, "positions": [{**SNAPSHOT["positions"][0], "side": "HOLD"}]}
+        nan = {**SNAPSHOT, "account": {**SNAPSHOT["account"], "equity": float("nan")}}
+        for payload in (real, broken, {"account": "x"}, nan):
+            response = self.bearer(token, "/api/mt5/snapshot", method="POST", data=json.dumps(payload),
+                                   content_type="application/json")
+            self.assertEqual(response.status_code, 400, payload)
+        self.assertIsNone(self.bearer(token, "/api/mt5/overview").get_json()["snapshot"])
+
+
+CANDLES = {"server": "MetaQuotes-Demo", "symbol": "EURUSD", "timeframe": "H1", "candles": [
+    {"ts": "2026-10-28T10:00:00+00:00", "open": 1.1, "high": 1.102, "low": 1.099, "close": 1.101, "volume": 10},
+    {"ts": "2026-10-28T11:00:00+00:00", "open": 1.101, "high": 1.103, "low": 1.1, "close": 1.102, "volume": 12}]}
+
+
+class Mt5FlowTests(AgentTokenCase):
+    def send(self, token, path, payload):
+        return self.bearer(token, path, method="POST", data=json.dumps(payload), content_type="application/json")
+
+    def test_quotes_candles_and_the_chart_with_indicators(self):
+        token = self.issue(scopes=("read", "mt5"))
+        quotes = {"quotes": [{"symbol": "EURUSD", "bid": 1.1, "ask": 1.10002, "time": "2026-10-28T20:00:00+00:00"}]}
+        self.assertEqual(self.send(token, "/api/mt5/quotes", quotes).status_code, 200)
+        self.assertEqual(self.send(token, "/api/mt5/candles", CANDLES).get_json()["inserted"], 2)
+        self.assertEqual(self.send(token, "/api/mt5/candles", CANDLES).get_json()["already_stored"], 2)
+        chart = self.bearer(token, "/api/market/chart?symbol=EURUSD&timeframe=H1&source=MT5_METAQUOTES_DEMO").get_json()
+        self.assertEqual(len(chart["candles"]), 2)
+        self.assertEqual(set(chart["indicators"]), {"sma20", "sma50", "rsi14", "macd", "signal", "histogram"})
+        self.assertEqual(len(chart["indicators"]["rsi14"]), 2)
+        board = self.bearer(token, "/api/dashboard/overview").get_json()
+        self.assertEqual(board["quotes"]["EURUSD"]["bid"], 1.1)
+        self.assertTrue(board["quotes"]["EURUSD"]["live"])
+        self.assertEqual(len(board["signals"]), 7)
+
+    def test_bad_quotes_and_candles_are_refused(self):
+        token = self.issue(scopes=("read", "mt5"))
+        bad_quote = {"quotes": [{"symbol": "EURUSD", "bid": 1.2, "ask": 1.1, "time": "x"}]}
+        self.assertEqual(self.send(token, "/api/mt5/quotes", bad_quote).status_code, 400)
+        for change in ({"server": "Broker-Live"}, {"timeframe": "M1"}, {"symbol": "XAUUSD"},
+                       {"candles": [{**CANDLES["candles"][0], "high": 1.0}]},
+                       {"candles": [{**CANDLES["candles"][0], "ts": "2999-01-01T00:00:00+00:00"}]},
+                       {"candles": [{**CANDLES["candles"][0], "ts": "2026-10-28T10:00:00"}]}):
+            self.assertEqual(self.send(token, "/api/mt5/candles", {**CANDLES, **change}).status_code, 400, change)
+
+    def test_a_token_without_the_mt5_scope_cannot_feed_the_dashboard(self):
+        token = self.issue(scopes=("read", "lab"))
+        self.assertEqual(self.send(token, "/api/mt5/quotes", {"quotes": []}).status_code, 403)
+        self.assertEqual(self.send(token, "/api/mt5/candles", CANDLES).status_code, 403)
+
+    def test_allowed_servers_are_the_same_in_the_connector_and_the_dashboard(self):
+        from astra import mt5view
+        from astra.brokers import mt5_demo
+
+        self.assertEqual(mt5_demo.ALLOWED_SERVERS, mt5view.SERVERS)
+        self.assertEqual(mt5_demo.source_name("MetaQuotes-Demo"), mt5view.source_name("MetaQuotes-Demo"))
 
 
 class AgentTokenTests(AgentTokenCase):

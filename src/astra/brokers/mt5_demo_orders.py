@@ -34,6 +34,8 @@ class Mt5Position:
     sl: float
     profit: float
     astra: bool
+    price_current: float | None = None
+    time_open: str | None = None
 
 
 class Mt5DemoTrader(Mt5DemoFeed):
@@ -63,8 +65,11 @@ class Mt5DemoTrader(Mt5DemoFeed):
         mt5 = self.mt5
         result = []
         for p in mt5.positions_get() or ():
+            opened = getattr(p, "time", None)
             result.append(Mt5Position(p.ticket, p.symbol, "LONG" if p.type == mt5.POSITION_TYPE_BUY else "SHORT",
-                                      p.volume, p.price_open, p.sl, p.profit, p.magic == MAGIC))
+                                      p.volume, p.price_open, p.sl, p.profit, p.magic == MAGIC,
+                                      getattr(p, "price_current", None),
+                                      self._utc(opened) if opened else None))
         return result
 
     def _filling(self, symbol_info: Any) -> int:

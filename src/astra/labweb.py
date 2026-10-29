@@ -14,9 +14,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, g, jsonify, request
 
-from . import learning, marketdata
+from . import indicators, learning, marketdata, mt5view
 from .auth import WebRole
 from .jobs import JobStore, worker_health
 from .marketdata import CandleStore, MarketDataError
@@ -29,7 +29,8 @@ def register_lab_routes(app: Flask, *, database: Path, import_dir: Path, require
                         error: Callable[[int, str], Response]) -> None:
     candles, lab, jobs = CandleStore(database), LabStore(database), JobStore(database)
     learn_store = learning.LearningStore(database)
-    for store in (candles, lab, jobs, learn_store):
+    mt5_view = mt5view.Mt5View(database)
+    for store in (candles, lab, jobs, learn_store, mt5_view):
         store.initialize()
 
     def answer(producer: Callable[[], Any], status: int = 200) -> Response:
@@ -131,6 +132,60 @@ def register_lab_routes(app: Flask, *, database: Path, import_dir: Path, require
     def learn_overview() -> Response:
         return answer(lambda: learning.overview(learn_store, lab))
 
+    @app.get("/api/mt5/overview")
+    @require(WebRole.READ_ONLY)
+    def mt5_overview() -> Response:
+        return answer(mt5_view.overview)
+
+    @app.get("/api/market/chart")
+    @require(WebRole.READ_ONLY)
+    def market_chart() -> Response:
+        """Candles with SMA 20 and 50, RSI 14 and MACD, aligned; the indicators warm up on 120 earlier candles."""
+
+        def produce() -> dict[str, Any]:
+            symbol, timeframe, source = series_args()
+            try:
+                limit = max(10, min(600, int(request.args.get("limit", "200") or 200)))
+            except ValueError as exc:
+                raise MarketDataError("limit doit être un nombre") from exc
+            rows = list(reversed(candles.candles(symbol, timeframe, source, limit=limit + 120, newest=True)))
+            series = indicators.bundle([c.close for c in rows])
+            keep = slice(max(0, len(rows) - limit), None)
+            return {"symbol": symbol, "timeframe": timeframe, "source": source,
+                    "candles": [{"ts": c.timestamp.isoformat(), "open": c.open, "high": c.high, "low": c.low,
+                                 "close": c.close, "volume": c.volume} for c in rows[keep]],
+                    "indicators": {name: [None if v is None else round(v, 6) for v in values[keep]]
+                                   for name, values in series.items()}}
+
+        return answer(produce)
+
+    @app.get("/api/dashboard/overview")
+    @require(WebRole.READ_ONLY)
+    def dashboard_overview() -> Response:
+        def produce() -> dict[str, Any]:
+            account = mt5_view.overview(event_limit=40)
+            perf = mt5_view.performance()
+            quotes = mt5_view.quotes()
+            source = mt5view.source_name("MetaQuotes-Demo")
+            for symbol, quote in quotes.items():
+                quote["change_24h_pct"] = None
+                rows = candles.candles(symbol, "H1", source, limit=25, newest=True)
+                if len(rows) >= 25 and rows[-1].close:
+                    quote["change_24h_pct"] = round((quote["bid"] / rows[-1].close - 1) * 100, 3)
+            signals = []
+            for pair in learning.overview(learn_store, lab)["pairs"]:
+                session = pair.get("session")
+                detail = lab.session(session["id"], item_limit=1) if session else None
+                last = detail["signals"][-1] if detail and detail.get("signals") else None
+                family = pair["champion"]["params"]["strategy"].get("family", "sma_trend")
+                signals.append({"symbol": pair["symbol"], "family": family, "version": pair["champion"]["version"],
+                                "decision": last["decision"] if last else None, "reason": last["reason"] if last else None,
+                                "since": last["ts"] if last else None})
+            return {"mode": "SIMULATION", "live_locked": True, "mt5": account, "performance": perf, "quotes": quotes,
+                    "signals": signals}
+
+        return answer(produce)
+
     @app.get("/api/system/jobs")
     @require(WebRole.READ_ONLY)
     def system_jobs() -> Response:
@@ -193,6 +248,55 @@ def register_lab_routes(app: Flask, *, database: Path, import_dir: Path, require
             return {"backtest_id": backtest_id, "job": job}
 
         return answer(produce, 202)
+
+    @app.post("/api/mt5/snapshot")
+    @require(WebRole.OPERATOR)
+    def mt5_snapshot() -> Response:
+        if g.get("agent") is None:
+            return error(403, "forbidden")  # only the MT5 bridge, with an agent token, reports the account
+
+        def produce() -> dict[str, Any]:
+            try:
+                return mt5_view.record(request.get_json(silent=True), actor())
+            except mt5view.Mt5ViewError as exc:
+                raise MarketDataError(str(exc)) from exc
+
+        return answer(produce)
+
+    @app.post("/api/mt5/quotes")
+    @require(WebRole.OPERATOR)
+    def mt5_quotes() -> Response:
+        if g.get("agent") is None:
+            return error(403, "forbidden")
+
+        def produce() -> dict[str, Any]:
+            try:
+                return mt5_view.record_quotes(request.get_json(silent=True))
+            except mt5view.Mt5ViewError as exc:
+                raise MarketDataError(str(exc)) from exc
+
+        return answer(produce)
+
+    @app.post("/api/mt5/candles")
+    @require(WebRole.OPERATOR)
+    def mt5_candles() -> Response:
+        if g.get("agent") is None:
+            return error(403, "forbidden")
+
+        def produce() -> dict[str, Any]:
+            try:
+                source, symbol, timeframe, rows = mt5view.parse_candles(request.get_json(silent=True))
+            except mt5view.Mt5ViewError as exc:
+                raise MarketDataError(str(exc)) from exc
+            symbol = marketdata.canonical_symbol(symbol)
+            batch = [marketdata.Candle(symbol, timeframe, ts, o, h, low, c, v, source, marketdata.KIND_OHLC)
+                     for ts, o, h, low, c, v in rows]
+            candles.register_source(source, "MT5_DEMO_FEED", "HISTORICAL", "Bougies closes du terminal MT5 (compte démo)")
+            inserted, same, conflicts = candles.store(batch, "HISTORICAL", None)
+            candles.source_success(source, max(r[0] for r in rows).isoformat())
+            return {"inserted": inserted, "already_stored": same, "conflicts": conflicts}
+
+        return answer(produce)
 
     @app.post("/api/sim/sessions")
     @require(WebRole.OPERATOR)

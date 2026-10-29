@@ -30,7 +30,7 @@ from .store import AuthError, AuthStore, WebRole, _iso, _parse, normalize_userna
 
 TOKEN_PREFIX = "astra_agt_"
 AGENT_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{2,63}")
-SCOPES = {"read": WebRole.READ_ONLY, "lab": WebRole.OPERATOR}  # scope -> minimum role of the owner
+SCOPES = {"read": WebRole.READ_ONLY, "lab": WebRole.OPERATOR, "mt5": WebRole.OPERATOR}  # scope -> minimum role of the owner
 DEFAULT_DAYS = 30
 MAX_DAYS = 90
 MAX_ACTIVE_PER_AGENT = 2  # the current token and its replacement during a renewal

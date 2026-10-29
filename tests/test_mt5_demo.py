@@ -18,7 +18,7 @@ def server_seconds(wall: str) -> int:
 
 class FakeMt5:
     ACCOUNT_TRADE_MODE_DEMO, ACCOUNT_TRADE_MODE_CONTEST, ACCOUNT_TRADE_MODE_REAL = 0, 1, 2
-    TIMEFRAME_M15, TIMEFRAME_H1, TIMEFRAME_H4, TIMEFRAME_D1 = 15, 16385, 16388, 16408
+    TIMEFRAME_M5, TIMEFRAME_M15, TIMEFRAME_H1, TIMEFRAME_H4, TIMEFRAME_D1 = 5, 15, 16385, 16388, 16408
 
     def __init__(self, trade_mode=0, server="MetaQuotes-Demo", logged_in=True):
         self.trade_mode, self.server, self.logged_in = trade_mode, server, logged_in

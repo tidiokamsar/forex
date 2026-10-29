@@ -33,7 +33,7 @@ from ..marketdata import KIND_OHLC, PAIRS, Candle, MarketDataError, canonical_sy
 DEFAULT_TERMINAL = r"C:\Program Files\MetaTrader 5\terminal64.exe"
 SERVER_ZONES = {"MetaQuotes-Demo": "Europe/Athens"}  # server -> IANA zone with the same offsets and switch dates
 ALLOWED_SERVERS = frozenset(SERVER_ZONES)
-TIMEFRAMES = ("M15", "H1", "H4", "D1")
+TIMEFRAMES = ("M5", "M15", "H1", "H4", "D1")
 MAX_BARS = 100_000
 
 
@@ -66,16 +66,21 @@ class Mt5DemoFeed:
         self.terminal_path = terminal_path
         self.timeout_ms = timeout_ms
         self.account: dict[str, Any] | None = None
+        self._depth = 0  # the terminal connection can be entered again by the code running inside it
         if credentials is not None and credentials[2] not in ALLOWED_SERVERS:
             raise Mt5DemoError(f"serveur {credentials[2]!r} non vérifié (autorisés : {', '.join(sorted(ALLOWED_SERVERS))})")
         self._credentials = credentials  # never logged nor returned
 
     def __enter__(self) -> Mt5DemoFeed:
-        self.connect()
+        if self._depth == 0:
+            self.connect()
+        self._depth += 1
         return self
 
     def __exit__(self, *exc: object) -> None:
-        self.mt5.shutdown()
+        self._depth -= 1
+        if self._depth == 0:
+            self.mt5.shutdown()
 
     def connect(self) -> dict[str, Any]:
         mt5 = self.mt5
@@ -98,15 +103,46 @@ class Mt5DemoFeed:
         terminal = mt5.terminal_info()
         self.account = {"login": info.login, "server": info.server, "environment": "DEMO", "currency": info.currency,
                         "balance": info.balance, "equity": info.equity, "leverage": info.leverage,
+                        "margin": getattr(info, "margin", 0.0), "margin_free": getattr(info, "margin_free", info.equity),
                         "terminal_connected": bool(terminal and terminal.connected),
                         "algo_trading_enabled": bool(terminal and terminal.trade_allowed),
                         "source": source_name(info.server)}
+        return self.account
+
+    def refresh_account(self) -> dict[str, Any]:
+        """The account figures as they are now (balance, equity and margins move with every price tick)."""
+
+        info = self.mt5.account_info()
+        if info is None or self.account is None:
+            raise Mt5DemoError("compte indisponible")
+        self.account.update(balance=info.balance, equity=info.equity, margin=getattr(info, "margin", 0.0),
+                            margin_free=getattr(info, "margin_free", info.equity))
         return self.account
 
     def _zone(self) -> ZoneInfo:
         if self.account is None:
             raise Mt5DemoError("connect() d'abord")
         return ZoneInfo(SERVER_ZONES[self.account["server"]])
+
+    def _utc(self, server_seconds: int) -> str:
+        """A time written in the trade server's clock, as an ISO time in UTC."""
+
+        wall = datetime.fromtimestamp(int(server_seconds), UTC).replace(tzinfo=self._zone())
+        return wall.astimezone(UTC).isoformat()
+
+    def quotes(self) -> list[dict[str, Any]]:
+        """Latest bid and ask of the pairs the terminal quotes, with the tick time in UTC."""
+
+        out = []
+        for symbol in PAIRS:
+            if not self.mt5.symbol_select(symbol, True):
+                continue
+            tick = self.mt5.symbol_info_tick(symbol)
+            if tick is None or not tick.bid or not tick.ask:
+                continue
+            stamp = self._utc(tick.time) if getattr(tick, "time", 0) else datetime.now(UTC).isoformat()
+            out.append({"symbol": symbol, "bid": float(tick.bid), "ask": float(tick.ask), "time": stamp})
+        return out
 
     def candles(self, symbol: str, timeframe: str, count: int) -> list[Candle]:
         """The ``count`` most recent closed candles, timestamps in UTC (bar open time)."""

@@ -11,7 +11,7 @@ from astra.agent import AgentHalt, AstraClient
 from astra.brokers.mt5_demo import Mt5DemoError
 from astra.brokers.mt5_demo_orders import MAGIC, Mt5DemoTrader
 from astra.mt5_bridge import Bridge, targets
-from test_mt5_demo import FakeMt5
+from test_mt5_demo import FakeMt5, server_seconds
 
 LOGIN = 114765880
 
@@ -39,7 +39,7 @@ class TradingMt5(FakeMt5):
                                point=0.00001, digits=5)
 
     def symbol_info_tick(self, symbol):
-        return SimpleNamespace(bid=1.10000, ask=1.10002)
+        return SimpleNamespace(bid=1.10000, ask=1.10002, time=server_seconds("2026-10-28 20:00"))
 
     def order_calc_profit(self, kind, symbol, volume, price_open, price_close):
         move = (price_close - price_open) if kind == self.ORDER_TYPE_BUY else (price_open - price_close)
@@ -73,8 +73,12 @@ class FakeServer:
     def __init__(self):
         self.status = {"mode": "SIMULATION", "live_locked": True}
         self.view = overview(SHORT)
+        self.posts = []
 
     def __call__(self, method, path, body):
+        if method == "POST":
+            self.posts.append((path, body))
+            return 200, {}
         return 200, self.status if path == "/api/status" else self.view
 
 
@@ -148,6 +152,34 @@ class BridgeTests(unittest.TestCase):
         with self.assertRaises(AgentHalt):
             self.bridge.cycle()
         self.assertEqual(self.fake.sent, [])
+
+    def test_stream_sends_quotes_account_and_positions_without_trading(self):
+        with self.bridge.trader:
+            sent = self.bridge.stream()
+        self.assertEqual(sent["quotes"], 7)
+        paths = [p for p, _ in self.server.posts]
+        self.assertEqual(paths, ["/api/mt5/quotes", "/api/mt5/snapshot"])
+        quote = self.server.posts[0][1]["quotes"][0]
+        self.assertEqual((quote["bid"], quote["ask"], quote["time"]), (1.1, 1.10002, "2026-10-28T18:00:00+00:00"))
+        self.assertEqual(self.fake.sent, [])
+
+    def test_candles_go_to_the_server_in_utc_for_every_pair_and_timeframe(self):
+        with self.bridge.trader:
+            count = self.bridge.push_candles(("M5", "H1"), recent=True)
+        posts = [(b["symbol"], b["timeframe"]) for p, b in self.server.posts if p == "/api/mt5/candles"]
+        self.assertEqual(len(posts), 14)
+        self.assertEqual(count, 14 * 2)  # the fake terminal returns two bars
+        body = next(b for p, b in self.server.posts if p == "/api/mt5/candles")
+        self.assertEqual(body["server"], "MetaQuotes-Demo")
+        self.assertEqual(body["candles"][0]["ts"], "2025-12-15T08:00:00+00:00")
+
+    def test_flow_keeps_one_connection_and_trades_only_when_the_cycle_is_due(self):
+        clock = {"t": 0.0}
+        self.bridge.flow(300, lambda: clock["t"], lambda s: clock.update(t=clock["t"] + 5), rounds=3)
+        paths = [p for p, _ in self.server.posts]
+        self.assertEqual(paths.count("/api/mt5/quotes"), 3)  # one stream per round
+        self.assertEqual(len(self.fake.sent), 1)  # the paper position opened by the first cycle, nothing after
+        self.assertTrue(self.fake.closed)  # the connection is closed when the flow ends
 
 
 if __name__ == "__main__":

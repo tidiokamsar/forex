@@ -113,9 +113,9 @@ function lineChart(container, points, label) {
 
 // -- tabs ------------------------------------------------------------------------------------------
 function showTab() {
-  const name = (window.location.hash || "#apercu").slice(1);
-  const known = ["apercu", "donnees", "backtests", "simulation", "apprentissage", "demo", "journaux"];
-  const active = known.includes(name) ? name : "apercu";
+  const name = (window.location.hash || "#tableau").slice(1);
+  const known = ["tableau", "apercu", "donnees", "backtests", "simulation", "apprentissage", "demo", "journaux"];
+  const active = known.includes(name) ? name : "tableau";
   for (const view of known) $(`view-${view}`).hidden = view !== active;
   for (const tab of document.querySelectorAll(".tab")) tab.classList.toggle("is-active", tab.dataset.tab === active);
 }

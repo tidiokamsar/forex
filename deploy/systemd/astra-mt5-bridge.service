@@ -25,16 +25,17 @@ WorkingDirectory=/var/lib/astra-mt5
 Environment=HOME=/var/lib/astra-mt5
 Environment=WINEPREFIX=/var/lib/astra-mt5/.wine
 Environment=WINEDEBUG=-all
-Environment=PYTHONPATH=Z:\opt\astra\app\src
+Environment=WINEDLLOVERRIDES=mscoree,mshtml=
+Environment=PYTHONPATH=Z:/opt/astra/app/src
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=ASTRA_MT5_SERVER=MetaQuotes-Demo
 Environment=ASTRA_MT5_DIR=/var/lib/astra-mt5/bridge
-Environment=ASTRA_MT5_TERMINAL=C:\Program Files\MetaTrader 5\terminal64.exe
+Environment="ASTRA_MT5_TERMINAL=C:/Program Files/MetaTrader 5/terminal64.exe"
 LoadCredential=mt5-password:/etc/astra/mt5-demo.cred
 LoadCredential=mt5-bridge-token:/etc/astra/mt5-bridge.token
 ExecStartPre=+/usr/bin/install -d -o astra-mt5 -g astra-mt5 -m 0700 /var/lib/astra-mt5/bridge
-ExecStart=/usr/bin/xvfb-run -a -s "-screen 0 1280x800x24 -nolisten tcp" /usr/bin/wine64-stable C:\Python314\python.exe -m astra mt5 bridge run
-ExecStopPost=-/usr/bin/runuser -u astra-mt5 -- env WINEPREFIX=/var/lib/astra-mt5/.wine /usr/lib/x86_64-linux-gnu/wine/wineserver -k
+ExecStart=/usr/bin/xvfb-run -a -s "-screen 0 1280x800x24 -nolisten tcp" /opt/wine-devel/bin/wine /var/lib/astra-mt5/.wine/drive_c/Python312/python.exe -m astra mt5 bridge run
+ExecStopPost=-/usr/bin/runuser -u astra-mt5 -- env WINEPREFIX=/var/lib/astra-mt5/.wine /opt/wine-devel/bin/wineserver -k
 # Exit code 2 = halted on purpose (server not in SIMULATION, token refused, account refused): no restart loop.
 Restart=on-failure
 RestartPreventExitStatus=2

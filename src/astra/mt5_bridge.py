@@ -29,7 +29,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .agent import AgentHalt, AstraClient, http_transport
+from .agent import AgentHalt, ApiError, AstraClient, http_transport
+from .brokers import mt5_demo
 from .brokers.mt5_demo import DEFAULT_TERMINAL, Mt5DemoError
 from .brokers.mt5_demo_orders import Mt5DemoTrader
 
@@ -37,6 +38,11 @@ RISK_PCT = 0.5
 DAILY_LOSS_PCT = 3.0
 MAX_POSITIONS = 7
 DEFAULT_INTERVAL_SECONDS = 300
+STREAM_SECONDS = 5          # quotes, balance and open positions reach the dashboard this often
+FAST_CANDLES_SECONDS = 60   # M5 and M15: the last bars, every minute
+SLOW_CANDLES_SECONDS = 600  # H1, H4 and D1: the last bars, every ten minutes
+BACKFILL_BARS = {"M5": 1500, "M15": 1500, "H1": 1500, "H4": 1500, "D1": 300}
+RECENT_BARS = {"M5": 12, "M15": 8, "H1": 8, "H4": 6, "D1": 4}
 
 
 def targets(overview: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -93,7 +99,7 @@ class Bridge:
         wanted = targets(self.client.get("/api/learn/overview"))
         actions: list[dict[str, Any]] = []
         with self.trader as trader:
-            account = trader.account
+            account = trader.refresh_account()
             today = self.clock().date().isoformat()
             if self.state.get("day") != today:
                 self.state["day"], self.state["day_start_equity"] = today, account["equity"]
@@ -133,19 +139,89 @@ class Bridge:
                 actions.append({"kind": "open", "symbol": symbol, "side": target["side"], "lots": lots, "sl": sl,
                                 "price": report["price"], "order": report["order"], "risk_usd": round(risk_usd, 2),
                                 "reason": target["reason"]})
+            everything = trader.positions()
+            account = trader.refresh_account()
+            manual_positions = [asdict(p) for p in everything if not p.astra]
             summary = {"account": {k: account[k] for k in ("login", "server", "environment", "equity")},
                        "actions": actions, "astra_positions": [asdict(p) for p in trader.positions() if p.astra]}
         for action in actions:
             self.note(action["kind"], **{k: v for k, v in action.items() if k != "kind"})
         self.note("cycle", actions=len(actions))
         self.save()
+        self.publish(account, summary["astra_positions"] + manual_positions, actions)
         return summary
 
+    def publish(self, account: dict[str, Any], positions: list[dict[str, Any]], actions: list[dict[str, Any]]) -> None:
+        """Show the DEMO account on the dashboard. A failure here never stops trading: it is journaled."""
+
+        try:
+            self.client.post("/api/mt5/snapshot", {"account": account, "positions": positions, "actions": actions})
+        except (ApiError, OSError) as exc:
+            self.note("publish_failed", reason=str(exc)[:200])
+
+    def stream(self) -> dict[str, int]:
+        """Continuous flow: quotes, account figures and open positions, without trading."""
+
+        quotes = self.trader.quotes()
+        if quotes:
+            self.client.post("/api/mt5/quotes", {"quotes": quotes})
+        account = self.trader.refresh_account()
+        positions = [asdict(p) for p in self.trader.positions()]
+        self.publish(account, positions, [])
+        return {"quotes": len(quotes), "positions": len(positions)}
+
+    def push_candles(self, timeframes: tuple[str, ...], recent: bool) -> int:
+        """Closed candles of every pair to the server (idempotent: stored bars are kept, new ones added)."""
+
+        sent = 0
+        server = self.trader.account["server"]
+        for timeframe in timeframes:
+            count = RECENT_BARS[timeframe] if recent else BACKFILL_BARS[timeframe]
+            for symbol in mt5_demo.PAIRS:
+                bars = self.trader.candles(symbol, timeframe, count)
+                if not bars:
+                    continue
+                self.client.post("/api/mt5/candles", {
+                    "server": server, "symbol": symbol, "timeframe": timeframe,
+                    "candles": [{"ts": c.timestamp.isoformat(), "open": c.open, "high": c.high, "low": c.low,
+                                 "close": c.close, "volume": c.volume} for c in bars]})
+                sent += len(bars)
+        return sent
+
+    def flow(self, cycle_seconds: int, now: Callable[[], float], sleep: Callable[[float], None],
+             stream_seconds: int = STREAM_SECONDS, rounds: int | None = None) -> None:
+        """One connection to the terminal, kept open: the stream every few seconds, the trading cycle every
+        ``cycle_seconds``, candles every minute (fast timeframes) and ten minutes (slow ones)."""
+
+        next_cycle = next_fast = next_slow = 0.0
+        first = True
+        with self.trader:
+            done = 0
+            while rounds is None or done < rounds:
+                started = now()
+                if first:
+                    self.note("backfill", candles=self.push_candles(tuple(BACKFILL_BARS), recent=False))
+                    first = False
+                    next_fast, next_slow = started + FAST_CANDLES_SECONDS, started + SLOW_CANDLES_SECONDS
+                if started >= next_cycle:
+                    summary = self.cycle()
+                    print(json.dumps(summary, ensure_ascii=False, default=str), flush=True)
+                    next_cycle = started + cycle_seconds
+                if started >= next_fast:
+                    self.push_candles(("M5", "M15"), recent=True)
+                    next_fast = started + FAST_CANDLES_SECONDS
+                if started >= next_slow:
+                    self.push_candles(("H1", "H4", "D1"), recent=True)
+                    next_slow = started + SLOW_CANDLES_SECONDS
+                self.stream()
+                done += 1
+                sleep(max(0.0, stream_seconds - (now() - started)))
+
     def run(self, interval: int, once: bool = False, sleep: Callable[[float], None] = time.sleep) -> int:
-        while True:
+        if once:
             try:
-                summary = self.cycle()
-                print(json.dumps(summary, ensure_ascii=False, default=str), flush=True)
+                print(json.dumps(self.cycle(), ensure_ascii=False, default=str), flush=True)
+                return 0
             except AgentHalt as exc:
                 self.note("halt", reason=str(exc))
                 print(f"astra-mt5-bridge: arrêt : {exc}", file=sys.stderr)
@@ -153,9 +229,18 @@ class Bridge:
             except (Mt5DemoError, OSError) as exc:
                 self.note("error", reason=str(exc))
                 print(f"astra-mt5-bridge: {exc}", file=sys.stderr, flush=True)
-            if once:
                 return 0
-            sleep(interval)
+        while True:
+            try:
+                self.flow(interval, time.monotonic, sleep)
+            except AgentHalt as exc:
+                self.note("halt", reason=str(exc))
+                print(f"astra-mt5-bridge: arrêt : {exc}", file=sys.stderr)
+                return 2
+            except (Mt5DemoError, ApiError, OSError) as exc:
+                self.note("error", reason=str(exc))
+                print(f"astra-mt5-bridge: {exc} : nouvelle tentative dans 30 s", file=sys.stderr, flush=True)
+                sleep(30)  # terminal restarting or server unreachable: reconnect, never stop for good
 
 
 def _native(path: str) -> str:

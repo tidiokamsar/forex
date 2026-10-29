@@ -1,19 +1,62 @@
 {% extends "base.html" %}
 {% block title %}ASTRA Forex Intelligence{% endblock %}
-{% block head %}<meta name="astra-role" content="{{ role }}"><script src="/static/app.js" defer></script><script src="/static/lab.js" defer></script>{% endblock %}
+{% block head %}<meta name="astra-role" content="{{ role }}"><script src="/static/app.js" defer></script><script src="/static/lab.js" defer></script><script src="/static/board.js" defer></script>{% endblock %}
+{% block bodyclass %}app{% endblock %}
 {% block content %}
-      <nav class="tabs" aria-label="Sections">
-        <a href="#apercu" class="tab" data-tab="apercu">Vue d’ensemble</a>
-        <a href="#donnees" class="tab" data-tab="donnees">Données</a>
-        <a href="#backtests" class="tab" data-tab="backtests">Backtests</a>
-        <a href="#simulation" class="tab" data-tab="simulation">Simulation</a>
-        <a href="#apprentissage" class="tab" data-tab="apprentissage">Apprentissage</a>
-        <a href="#demo" class="tab" data-tab="demo">Compte DEMO</a>
-        <a href="#journaux" class="tab" data-tab="journaux">Journaux</a>
-      </nav>
+      <div class="app-shell">
+      <aside class="sidebar">
+        <nav class="tabs" aria-label="Sections">
+          <a href="#tableau" class="tab" data-tab="tableau">Tableau de bord</a>
+          <a href="#apercu" class="tab" data-tab="apercu">Recherche</a>
+          <a href="#donnees" class="tab" data-tab="donnees">Marchés et données</a>
+          <a href="#backtests" class="tab" data-tab="backtests">Backtests</a>
+          <a href="#simulation" class="tab" data-tab="simulation">Simulation</a>
+          <a href="#apprentissage" class="tab" data-tab="apprentissage">Stratégies et apprentissage</a>
+          <a href="#demo" class="tab" data-tab="demo">Compte Binance DEMO</a>
+          <a href="#journaux" class="tab" data-tab="journaux">Journaux</a>
+        </nav>
+        <div class="mode-card"><span class="mode-dot" aria-hidden="true"></span><div><small>Mode actuel</small><strong>DÉMO</strong>
+          <small>Aucun ordre réel possible : le mode RÉEL reste verrouillé côté serveur.</small></div></div>
+      </aside>
+      <div class="app-main">
+
+      <!-- ===================== TABLEAU DE BORD ===================== -->
+      <div class="view" id="view-tableau">
+        <section class="intro"><div><h2>Tableau de bord</h2>
+          <p class="muted">Compte démo MetaTrader 5 · décisions d’ASTRA · données en continu. Argent virtuel seulement.</p></div>
+          <div class="service-state" id="board-status" role="status"></div></section>
+        <section class="metric-grid kpi-grid" id="board-kpis" aria-label="Chiffres du compte démo"></section>
+        <section class="ticker" id="board-ticker" aria-label="Cotations en direct"></section>
+        <section class="board-grid">
+          <article class="panel board-chart-panel">
+            <div class="chart-head">
+              <div><h3 id="board-pair-title">EUR/USD</h3></div>
+              <div class="live-box"><strong id="board-live-price">—</strong><span id="board-live-change" class="live-change"></span></div>
+              <div class="tf-row" id="board-tfs"></div>
+            </div>
+            <div class="legend" id="board-legend"></div>
+            <div class="chart pro-chart" id="board-chart"></div>
+            <p class="footnote">Bougies closes du compte démo MT5 (heures UTC), mises à jour chaque minute ; le trait vert pointillé est la cotation en cours. SMA, RSI et MACD sont calculés par ASTRA. Entrée : trait plein. Stop : pointillés.</p>
+          </article>
+          <article class="panel"><div class="panel-heading"><div><h2>Décision d’ASTRA</h2></div></div>
+            <div id="board-decision"></div>
+            <p class="footnote">ASTRA décide seul. Cette page ne peut envoyer aucun ordre : le site web n’a volontairement aucun accès à l’exécution.</p></article>
+          <div class="board-side">
+            <article class="panel"><div class="panel-heading"><div><h2>Comptes connectés</h2></div></div><div id="board-accounts"></div></article>
+            <article class="panel"><div class="panel-heading"><div><h2>Flux de données</h2></div><span id="board-flow-pill" class="pill">—</span></div><div id="board-flow"></div></article>
+          </div>
+        </section>
+        <section class="board-bottom">
+          <article class="panel"><div class="panel-heading"><div><h2>Décisions des stratégies</h2></div></div><div id="board-signals"></div></article>
+          <article class="panel"><div class="panel-heading"><div><h2 id="board-positions-title">Positions ouvertes</h2></div></div><div id="board-positions"></div></article>
+          <article class="panel table-panel"><div class="panel-heading"><div><h2>Historique des ordres</h2></div></div>
+            <div class="table-scroll"><table><thead><tr><th>Date UTC</th><th>Paire</th><th>Type</th><th>Sens</th><th>Lot</th><th>Résultat</th></tr></thead><tbody id="board-history"></tbody></table></div></article>
+          <article class="panel"><div class="panel-heading"><div><h2>Performance (DÉMO, 7 jours)</h2></div></div><div id="board-perf"></div></article>
+        </section>
+      </div>
 
       <!-- ===================== VUE D'ENSEMBLE ===================== -->
-      <div class="view" id="view-apercu">
+      <div class="view" id="view-apercu" hidden>
       <section class="intro" aria-labelledby="overview-title">
         <div>
           <p class="eyebrow">ESPACE DE RECHERCHE</p>
@@ -279,6 +322,9 @@
           <thead><tr><th>N°</th><th>Type</th><th>Statut</th><th>Demandée par</th><th>Créée UTC</th><th>Terminée UTC</th><th>Résultat ou erreur</th></tr></thead>
           <tbody id="jobs-body"><tr><td colspan="7" class="empty-cell">Aucune tâche.</td></tr></tbody></table></div>
       </section>
+      </div>
+
+      </div>
       </div>
 
       <p class="disclaimer">Les résultats proviennent de simulations avec hypothèses documentées. Ils ne constituent ni un conseil financier, ni une garantie de performance.</p>

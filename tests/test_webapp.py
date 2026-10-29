@@ -40,9 +40,10 @@ ADMIN_ROUTES = ["/api/admin/users", "/api/admin/auth-events"]
 # Market data, backtests and paper simulations (astra.labweb): reading is READ_ONLY, requests are OPERATOR.
 LAB_READ_ROUTES = ["/api/market/overview", "/api/market/quality", "/api/market/candles", "/api/lab/catalog",
                    "/api/lab/backtests", "/api/lab/backtests/<int:backtest_id>", "/api/sim/sessions",
-                   "/api/sim/sessions/<int:session_id>", "/api/system/jobs", "/api/learn/overview"]
+                   "/api/sim/sessions/<int:session_id>", "/api/system/jobs", "/api/learn/overview",
+                   "/api/mt5/overview", "/api/market/chart", "/api/dashboard/overview"]
 LAB_REQUEST_ROUTES = ["/api/market/import", "/api/market/ingest", "/api/lab/backtests", "/api/sim/sessions",
-                      "/api/sim/sessions/<int:session_id>/<action>"]
+                      "/api/sim/sessions/<int:session_id>/<action>", "/api/mt5/snapshot", "/api/mt5/quotes", "/api/mt5/candles"]
 # Binance Spot DEMO account: the state is READ_ONLY (its orders OPERATOR), requests (pause, resume, controlled
 # test) are OPERATOR and only recorded; astra-demo acts on them through the gateway.
 DEMO_READ_ROUTES = ["/api/demo/overview"]

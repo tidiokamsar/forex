@@ -50,7 +50,8 @@ DEVICE_COOKIE = "__Host-astra_device"
 DEVICE_COOKIE_SECONDS = 90 * 24 * 3600
 STATIC_DIR = Path(__file__).with_name("static")
 PUBLIC_STATIC = {"styles.css": "text/css; charset=utf-8"}
-PRIVATE_STATIC = {"app.js": "text/javascript; charset=utf-8", "lab.js": "text/javascript; charset=utf-8"}
+PRIVATE_STATIC = {"app.js": "text/javascript; charset=utf-8", "lab.js": "text/javascript; charset=utf-8",
+                  "board.js": "text/javascript; charset=utf-8"}
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
        "object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
@@ -60,8 +61,11 @@ CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' 
 AGENT_ENDPOINTS = {
     "read": frozenset({"agent_whoami", "status", "summary", "runs", "model_versions", "experiments", "controls",
                        "market_overview", "market_quality", "market_candles", "lab_catalog", "lab_backtests",
-                       "lab_backtest", "sim_sessions", "sim_session", "learn_overview", "system_jobs"}),
+                       "lab_backtest", "sim_sessions", "sim_session", "learn_overview", "system_jobs", "mt5_overview",
+                       "market_chart", "dashboard_overview"}),
     "lab": frozenset({"market_ingest", "lab_backtest_create", "sim_create", "sim_action"}),
+    # The MT5 bridge shows its DEMO account on the dashboard: data only, never an order.
+    "mt5": frozenset({"mt5_snapshot", "mt5_quotes", "mt5_candles"}),
 }
 
 

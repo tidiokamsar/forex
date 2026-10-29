@@ -41,7 +41,10 @@ ALLOWED_ROUTES = (
     ("GET", r"/api/agent/whoami"), ("GET", r"/api/status"), ("GET", r"/api/controls"),
     ("GET", r"/api/market/overview"), ("GET", r"/api/lab/catalog"), ("GET", r"/api/lab/backtests"),
     ("GET", r"/api/lab/backtests/\d+"), ("GET", r"/api/sim/sessions"), ("GET", r"/api/sim/sessions/\d+"),
-    ("GET", r"/api/learn/overview"), ("GET", r"/api/system/jobs"),
+    ("GET", r"/api/learn/overview"), ("GET", r"/api/system/jobs"), ("GET", r"/api/mt5/overview"),
+    ("GET", r"/api/market/chart"), ("GET", r"/api/dashboard/overview"),
+    ("POST", r"/api/mt5/snapshot"), ("POST", r"/api/mt5/quotes"), ("POST", r"/api/mt5/candles"),
+    # the three POST routes above are refused by the server unless the token holds the mt5 scope
     ("POST", r"/api/market/ingest"), ("POST", r"/api/lab/backtests"), ("POST", r"/api/sim/sessions"),
     ("POST", r"/api/sim/sessions/\d+/stop"),
 )

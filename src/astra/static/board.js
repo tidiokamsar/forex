@@ -1,0 +1,366 @@
+// ASTRA dashboard home: figures of the MT5 DEMO account, live quotes, candle chart with SMA, RSI and MACD,
+// signals, positions, trade history and performance. Read only: this script never sends an order, and the server
+// refuses one from a browser. It relies on the helpers of lab.js (loaded first).
+"use strict";
+
+const BOARD_PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCHF", "USDCAD", "NZDUSD"];
+const BOARD_TFS = [["M5", "5m"], ["M15", "15m"], ["H1", "1h"], ["H4", "4h"], ["D1", "1J"]];
+const BOARD_SOURCE = "MT5_METAQUOTES_DEMO";
+const BOARD_FAST_MS = 5000;
+const BOARD_SLOW_MS = 30000;
+let boardPair = "EURUSD";
+let boardTf = "H1";
+let boardOverview = null;
+let boardChartData = null;
+let boardLastSlow = 0;
+
+const pairLabel = (symbol) => `${symbol.slice(0, 3)}/${symbol.slice(3)}`;
+const decimals = (symbol) => (symbol.includes("JPY") ? 3 : 5);
+const price = (symbol, value) => (value == null ? "—" : Number(value).toFixed(decimals(symbol)));
+const usdText = (value) => (value == null ? "—" : `${fmt.format(value)} USD`);
+const signed = (value) => `${value >= 0 ? "+" : ""}${fmt.format(value)}`;
+const percent = (value) => `${value >= 0 ? "+" : ""}${value.toFixed(2).replace(".", ",")} %`;
+const tone = (value) => (value > 0 ? "gain" : value < 0 ? "loss" : "");
+const NS = "http://www.w3.org/2000/svg";
+
+function ago(iso) {
+  if (!iso) return "—";
+  const seconds = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000));
+  if (seconds < 90) return `il y a ${seconds} s`;
+  if (seconds < 5400) return `il y a ${Math.round(seconds / 60)} min`;
+  if (seconds < 172800) return `il y a ${Math.round(seconds / 3600)} h`;
+  return `il y a ${Math.round(seconds / 86400)} j`;
+}
+
+function chip(symbol) { return el("span", symbol.slice(0, 3), "pair-chip"); }
+
+function card(label, value, small, toneClass) {
+  const node = el("article", null, "metric-card");
+  const strong = el("strong", value);
+  if (toneClass) strong.classList.add(toneClass);
+  const sub = el("small", small || "");
+  node.append(el("span", label, "metric-label"), strong, sub);
+  return node;
+}
+
+function renderKpis(d) {
+  const snap = d.mt5.snapshot;
+  const a = snap && snap.account;
+  const perf = d.performance;
+  const base = perf.baseline_equity;
+  const net = a && base != null ? a.equity - base : null;
+  const dd = a && perf.peak_equity ? Math.max(0, (perf.peak_equity - a.equity) / perf.peak_equity * 100) : null;
+  const anyLive = Object.values(d.quotes || {}).some((q) => q.live);
+  const system = !snap ? ["EN ATTENTE", "Le pont MT5 n'a encore rien envoyé"]
+    : d.mt5.connected ? (anyLive ? ["OPÉRATIONNEL", "Cotations en continu"] : ["PARTIEL", "Compte lu, cotations anciennes"])
+      : ["PONT SILENCIEUX", `Dernier message ${ago(d.mt5.received_at)}`];
+  $("board-kpis").replaceChildren(
+    card("Capital total (DÉMO)", a ? usdText(a.equity) : "—",
+      net == null ? "Aucun compte lu" : `${percent(net / base * 100)} (${signed(net)} USD)`, net == null ? "" : tone(net)),
+    card("Positions ouvertes", snap ? String(snap.positions.length) : "—", snap ? `${snap.astra_positions} ouvertes par ASTRA` : ""),
+    card("Résultat net (DÉMO)", net == null ? "—" : `${signed(net)} USD`, "depuis le début du suivi", net == null ? "" : tone(net)),
+    card("Drawdown actuel", dd == null ? "—" : `${dd.toFixed(2).replace(".", ",")} %`, "depuis le sommet des fonds propres"),
+    card("Trades aujourd’hui", String(perf.today.trades), `${perf.today.wins} gagnants / ${perf.today.losses} perdants`),
+    card("Statut système", system[0], system[1], system[0] === "OPÉRATIONNEL" ? "gain" : "warn"));
+}
+
+function renderTicker(d) {
+  $("board-ticker").replaceChildren(...BOARD_PAIRS.map((symbol) => {
+    const q = d.quotes && d.quotes[symbol];
+    const item = el("button", null, symbol === boardPair ? "ticker-item is-active" : "ticker-item");
+    item.type = "button";
+    item.addEventListener("click", () => { boardPair = symbol; boardChartData = null; renderBoard(); refreshChart(); });
+    const change = q && q.change_24h_pct != null ? q.change_24h_pct : null;
+    item.append(chip(symbol), el("strong", pairLabel(symbol)), el("span", q ? price(symbol, q.bid) : "—", "ticker-price"),
+      el("span", change == null ? "" : percent(change), `ticker-change ${tone(change)}`));
+    if (q && !q.live) item.title = "Cotation ancienne";
+    return item;
+  }));
+}
+
+// -- chart: candles, SMA 20 / 50, RSI 14, MACD ------------------------------------------------------
+function svgNode(parent, tag, attrs, text) {
+  const node = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, String(v));
+  if (text != null) node.textContent = text;
+  parent.append(node);
+  return node;
+}
+
+function polyline(svg, values, sx, sy, className) {
+  let path = "";
+  let open = false;
+  values.forEach((v, i) => {
+    if (v == null) { open = false; return; }
+    path += `${open ? "L" : "M"}${sx(i).toFixed(1)},${sy(v).toFixed(1)} `;
+    open = true;
+  });
+  if (path) svgNode(svg, "path", { d: path.trim(), class: className });
+}
+
+function lastValue(values) {
+  for (let i = values.length - 1; i >= 0; i -= 1) if (values[i] != null) return values[i];
+  return null;
+}
+
+function proChart(container, data, levels, live, symbol) {
+  container.replaceChildren();
+  const cs = data.candles;
+  if (cs.length < 5) { container.append(el("p", "Pas assez de bougies pour cette paire et cette unité de temps.", "empty-cell")); return; }
+  const W = 1000, padL = 6, padR = 70, top = 8, gap = 12, h1 = 280, h2 = 80, h3 = 90, bottom = 22;
+  const H = top + h1 + gap + h2 + gap + h3 + bottom;
+  const n = cs.length;
+  const step = (W - padL - padR) / n;
+  const sx = (i) => padL + step * (i + 0.5);
+  const ind = data.indicators;
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", `Bougies ${pairLabel(symbol)} avec SMA 20, SMA 50, RSI 14 et MACD`);
+  // price panel
+  const prices = [...cs.map((c) => c.low), ...cs.map((c) => c.high), ...levels.map((l) => l.price)];
+  for (const s of [ind.sma20, ind.sma50]) for (const v of s) if (v != null) prices.push(v);
+  if (live != null) prices.push(live);
+  const lo0 = Math.min(...prices), hi0 = Math.max(...prices);
+  const pad = (hi0 - lo0) * 0.05 || 0.0005;
+  const lo = lo0 - pad, hi = hi0 + pad;
+  const sy1 = (v) => top + (hi - v) / (hi - lo) * h1;
+  for (let i = 0; i <= 5; i += 1) {
+    const v = lo + (hi - lo) * i / 5;
+    svgNode(svg, "line", { x1: padL, x2: W - padR, y1: sy1(v), y2: sy1(v), class: "candle-grid" });
+    svgNode(svg, "text", { x: W - padR + 6, y: sy1(v) + 3, class: "chart-axis" }, price(symbol, v));
+  }
+  cs.forEach((c, i) => {
+    const up = c.close >= c.open;
+    svgNode(svg, "line", { x1: sx(i), x2: sx(i), y1: sy1(c.high), y2: sy1(c.low), class: up ? "candle-up" : "candle-down" });
+    svgNode(svg, "rect", { x: sx(i) - Math.max(step * 0.34, 0.5), width: Math.max(step * 0.68, 1), y: sy1(Math.max(c.open, c.close)),
+      height: Math.max(Math.abs(sy1(c.open) - sy1(c.close)), 1), class: up ? "candle-up candle-body" : "candle-down candle-body" });
+  });
+  polyline(svg, ind.sma20, sx, sy1, "line-sma20");
+  polyline(svg, ind.sma50, sx, sy1, "line-sma50");
+  for (const level of levels) {
+    svgNode(svg, "line", { x1: padL, x2: W - padR, y1: sy1(level.price), y2: sy1(level.price), class: `level-${level.kind}` });
+    svgNode(svg, "text", { x: W - padR - 4, y: sy1(level.price) - 3, "text-anchor": "end", class: `level-text level-${level.kind}-text` }, level.text);
+  }
+  if (live != null) {
+    svgNode(svg, "line", { x1: padL, x2: W - padR, y1: sy1(live), y2: sy1(live), class: "line-live" });
+    svgNode(svg, "rect", { x: W - padR, y: sy1(live) - 8, width: padR - 2, height: 16, class: "tag-live" });
+    svgNode(svg, "text", { x: W - padR + 4, y: sy1(live) + 4, class: "tag-live-text" }, price(symbol, live));
+  }
+  // RSI panel
+  const y2 = top + h1 + gap;
+  const sy2 = (v) => y2 + (100 - v) / 100 * h2;
+  svgNode(svg, "rect", { x: padL, y: y2, width: W - padL - padR, height: h2, class: "sub-frame" });
+  for (const level of [30, 70]) {
+    svgNode(svg, "line", { x1: padL, x2: W - padR, y1: sy2(level), y2: sy2(level), class: "line-rsi-band" });
+    svgNode(svg, "text", { x: W - padR + 6, y: sy2(level) + 3, class: "chart-axis" }, String(level));
+  }
+  polyline(svg, ind.rsi14, sx, sy2, "line-rsi");
+  svgNode(svg, "text", { x: padL + 6, y: y2 + 12, class: "sub-label" }, `RSI 14  ${lastValue(ind.rsi14) == null ? "—" : lastValue(ind.rsi14).toFixed(1)}`);
+  // MACD panel
+  const y3 = y2 + h2 + gap;
+  const macdAll = [...ind.macd, ...ind.signal, ...ind.histogram].filter((v) => v != null);
+  const bound = Math.max(...macdAll.map(Math.abs), 1e-9) * 1.1;
+  const sy3 = (v) => y3 + (bound - v) / (2 * bound) * h3;
+  svgNode(svg, "rect", { x: padL, y: y3, width: W - padL - padR, height: h3, class: "sub-frame" });
+  svgNode(svg, "line", { x1: padL, x2: W - padR, y1: sy3(0), y2: sy3(0), class: "line-rsi-band" });
+  ind.histogram.forEach((v, i) => {
+    if (v == null) return;
+    svgNode(svg, "rect", { x: sx(i) - Math.max(step * 0.3, 0.4), width: Math.max(step * 0.6, 0.8), y: Math.min(sy3(v), sy3(0)),
+      height: Math.max(Math.abs(sy3(v) - sy3(0)), 0.5), class: v >= 0 ? "hist-up" : "hist-down" });
+  });
+  polyline(svg, ind.macd, sx, sy3, "line-macd");
+  polyline(svg, ind.signal, sx, sy3, "line-signal");
+  const m = lastValue(ind.macd);
+  svgNode(svg, "text", { x: padL + 6, y: y3 + 12, class: "sub-label" }, `MACD 12 26 9  ${m == null ? "—" : m.toFixed(5)}`);
+  // time axis
+  const intraday = data.timeframe !== "D1";
+  for (let i = 0; i < 6; i += 1) {
+    const idx = Math.min(n - 1, Math.round((n - 1) * i / 5));
+    const d = new Date(cs[idx].ts);
+    const text = intraday ? d.toLocaleString("fr-FR", { timeZone: "UTC", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })
+      : d.toLocaleDateString("fr-FR", { timeZone: "UTC", day: "2-digit", month: "2-digit", year: "2-digit" });
+    svgNode(svg, "text", { x: sx(idx), y: H - 6, "text-anchor": i === 0 ? "start" : i === 5 ? "end" : "middle", class: "chart-axis" }, text);
+  }
+  container.append(svg);
+  const legend = [["SMA 20", lastValue(ind.sma20), "legend-sma20"], ["SMA 50", lastValue(ind.sma50), "legend-sma50"]];
+  $("board-legend").replaceChildren(...legend.map(([name, v, cls]) => el("span", `${name}  ${v == null ? "—" : price(symbol, v)}`, `legend-item ${cls}`)),
+    el("span", `RSI 14  ${lastValue(ind.rsi14) == null ? "—" : lastValue(ind.rsi14).toFixed(1)}`, "legend-item"),
+    el("span", `MACD  ${m == null ? "—" : m.toFixed(5)}`, "legend-item"));
+}
+
+function renderChart() {
+  const d = boardOverview;
+  $("board-pair-title").textContent = pairLabel(boardPair);
+  const q = d && d.quotes && d.quotes[boardPair];
+  $("board-live-price").textContent = q ? price(boardPair, q.bid) : "—";
+  const change = q && q.change_24h_pct != null ? q.change_24h_pct : null;
+  const changeNode = $("board-live-change");
+  changeNode.textContent = change == null ? "" : `${percent(change)} sur 24 h`;
+  changeNode.className = `live-change ${tone(change)}`;
+  $("board-tfs").replaceChildren(...BOARD_TFS.map(([tf, label]) => {
+    const b = button(label, () => { boardTf = tf; boardChartData = null; renderChart(); refreshChart(); }, tf === boardTf ? "tf-button is-active" : "tf-button");
+    return b;
+  }));
+  if (!boardChartData) return;
+  const positions = (d && d.mt5.snapshot ? d.mt5.snapshot.positions : []).filter((p) => p.symbol === boardPair);
+  const levels = [];
+  for (const p of positions) {
+    levels.push({ kind: "entry", price: p.price_open, text: `${p.side === "LONG" ? "achat" : "vente"} ${fmt.format(p.volume)} lot  ${price(boardPair, p.price_open)}` });
+    if (p.sl) levels.push({ kind: "stop", price: p.sl, text: `stop ${price(boardPair, p.sl)}` });
+  }
+  proChart($("board-chart"), boardChartData, levels, q ? q.bid : null, boardPair);
+}
+
+async function refreshChart() {
+  try {
+    boardChartData = await api(`/api/market/chart?symbol=${boardPair}&timeframe=${boardTf}&source=${BOARD_SOURCE}&limit=${boardTf === "M5" ? 220 : 200}`);
+  } catch (error) {
+    boardChartData = { candles: [], indicators: {}, timeframe: boardTf };
+  }
+  renderChart();
+}
+
+// -- side and bottom panels ------------------------------------------------------------------------
+function badge(decision) {
+  const text = decision === "ACHAT" ? "ACHAT" : decision === "VENTE" ? "VENTE" : "ATTENTE";
+  return el("span", text, `badge ${decision === "ACHAT" ? "badge-buy" : decision === "VENTE" ? "badge-sell" : "badge-wait"}`);
+}
+
+const FAMILY = { sma_trend: "tendance SMA", momentum: "momentum", mean_reversion: "retour à la moyenne" };
+
+function renderDecision(d) {
+  const s = (d.signals || []).find((x) => x.symbol === boardPair);
+  const box = $("board-decision");
+  if (!s) { box.replaceChildren(el("p", "Aucune décision pour cette paire.", "empty-cell")); return; }
+  const position = (d.mt5.snapshot ? d.mt5.snapshot.positions : []).find((p) => p.symbol === boardPair);
+  const rows = [
+    ["Paire", pairLabel(boardPair)],
+    ["Stratégie en service", `${FAMILY[s.family] || s.family} · version ${s.version}`],
+    ["Dernière décision", s.since ? `${when(s.since)} UTC` : "—"],
+    ["Position MT5 démo", position ? `${position.side === "LONG" ? "ACHAT" : "VENTE"} ${fmt.format(position.volume)} lot` : "aucune"],
+  ];
+  const list = el("dl", null, "kv");
+  for (const [k, v] of rows) list.append(el("dt", k), el("dd", v));
+  box.replaceChildren(el("div", null, "decision-head"), list, el("p", s.reason || "—", "decision-reason"));
+  box.firstChild.append(badge(s.decision), el("span", "décision d’ASTRA", "muted"));
+}
+
+function renderAccounts(d, demo) {
+  const snap = d.mt5.snapshot;
+  const bn = demo && demo.status;
+  const rows = [
+    ["BN", "Binance Spot DEMO", bn && bn.connected ? ["Connecté", "ok"] : ["Non connecté", "off"],
+      bn && bn.connected ? Object.entries(bn.balances || {}).map(([k, v]) => `${k} ${fmt.format(Number(v.free))}`).slice(0, 2).join(" · ")
+        : "clé démo à créer et déposer"],
+    ["MT", "MetaTrader 5 DEMO", snap && d.mt5.connected ? ["Connecté", "ok"] : ["Hors ligne", "off"],
+      snap ? `Solde ${usdText(snap.account.balance)} · résultat latent ${signed(snap.open_profit)}` : "pont arrêté ou terminal éteint"],
+    ["IQ", "IQ Option", ["Indisponible", "off"], "pas d’API officielle : non connectable"],
+  ];
+  $("board-accounts").replaceChildren(...rows.map(([code, name, [state, kind], detail]) => {
+    const item = el("div", null, "account-item");
+    const head = el("div", null, "account-head");
+    head.append(el("span", code, "pair-chip"), el("strong", name), el("span", state, `pill pill-${kind}`));
+    item.append(head, el("small", detail));
+    return item;
+  }));
+  const times = Object.values(d.quotes || {}).map((q) => Date.parse(q.received_at)).filter(Boolean);
+  const newest = times.length ? new Date(Math.max(...times)).toISOString() : null;
+  const live = Object.values(d.quotes || {}).some((q) => q.live);
+  const flow = el("dl", null, "kv");
+  for (const [k, v] of [["Source", "MetaQuotes-Demo (compte démo MT5)"], ["Dernière cotation", ago(newest)],
+    ["Rythme", live ? "mise à jour toutes les 5 s" : "flux interrompu"], ["Couverture", "7 paires · 5 unités de temps"]]) flow.append(el("dt", k), el("dd", v));
+  $("board-flow").replaceChildren(flow);
+  $("board-flow-pill").textContent = live ? "En continu" : "Interrompu";
+  $("board-flow-pill").className = `pill ${live ? "pill-ok" : "pill-off"}`;
+}
+
+function renderSignals(d) {
+  $("board-signals").replaceChildren(...(d.signals || []).map((s) => {
+    const item = el("div", null, "signal-item");
+    const head = el("div", null, "signal-head");
+    head.append(chip(s.symbol), el("strong", pairLabel(s.symbol)), badge(s.decision), el("small", s.since ? ago(s.since) : "—"));
+    item.append(head, el("small", `${FAMILY[s.family] || s.family} v${s.version} · ${s.reason || "pas encore de décision"}`));
+    return item;
+  }));
+}
+
+function renderPositions(d) {
+  const positions = d.mt5.snapshot ? d.mt5.snapshot.positions : [];
+  $("board-positions-title").textContent = `Positions ouvertes (${positions.length})`;
+  if (!positions.length) { $("board-positions").replaceChildren(el("p", "Aucune position ouverte.", "empty-cell")); return; }
+  $("board-positions").replaceChildren(...positions.map((p) => {
+    const item = el("div", null, "position-item");
+    const head = el("div", null, "signal-head");
+    head.append(chip(p.symbol), el("strong", pairLabel(p.symbol)),
+      el("span", p.side === "LONG" ? "ACHAT" : "VENTE", `badge ${p.side === "LONG" ? "badge-buy" : "badge-sell"}`),
+      el("small", `${fmt.format(p.volume)} lot`), el("span", `${signed(p.profit)} USD`, `position-profit ${tone(p.profit)}`));
+    const grid = el("div", null, "position-grid");
+    for (const [k, v] of [["Prix d’entrée", price(p.symbol, p.price_open)], ["Prix actuel", price(p.symbol, p.price_current)],
+      ["Stop", price(p.symbol, p.sl)]]) { const cell = el("div"); cell.append(el("small", k), el("strong", v)); grid.append(cell); }
+    item.append(head, grid);
+    return item;
+  }));
+}
+
+function renderHistory(d) {
+  const events = (d.mt5.events || []).slice(0, 12);
+  fill("board-history", events.map((e) => row([when(e.ts).slice(0, 17), e.symbol ? pairLabel(e.symbol) : "—",
+    e.kind === "open" ? "ouverture" : e.kind === "close" ? "fermeture" : e.kind, e.side ? (e.side === "LONG" ? "Achat" : "Vente") : "—",
+    num(e.lots), e.profit == null ? "—" : el("span", signed(e.profit), tone(e.profit))])), "Aucun ordre pour l’instant.", 6);
+}
+
+function renderPerformance(d) {
+  const p = d.performance;
+  const a = d.mt5.snapshot && d.mt5.snapshot.account;
+  const net = a && p.baseline_equity != null ? a.equity - p.baseline_equity : null;
+  const stats = el("div", null, "perf-stats");
+  const cell = (k, v, t) => { const c = el("div"); c.append(el("small", k), el("strong", v, t || "")); return c; };
+  stats.append(cell("Gain total (DÉMO)", net == null ? "—" : `${signed(net)} USD`, net == null ? "" : tone(net)),
+    cell("Trades fermés", String(p.trades)), cell("Taux de réussite", p.win_rate_pct == null ? "—" : `${String(p.win_rate_pct).replace(".", ",")} %`),
+    cell("Facteur de profit", p.profit_factor == null ? "—" : String(p.profit_factor).replace(".", ",")));
+  const chart = el("div", null, "chart");
+  $("board-perf").replaceChildren(stats, chart);
+  const points = (p.curve || []).map((x) => ({ x: Date.parse(x.ts), y: x.equity }));
+  if (points.length >= 2) lineChart(chart, points, "Fonds propres du compte démo MT5");
+  else chart.append(el("p", "La courbe se construit au fil des minutes.", "empty-cell"));
+}
+
+function renderBoard() {
+  if (!boardOverview) return;
+  const d = boardOverview;
+  renderKpis(d);
+  renderTicker(d);
+  renderChart();
+  renderDecision(d);
+  renderSignals(d);
+  renderPositions(d);
+  renderHistory(d);
+  renderPerformance(d);
+}
+
+let boardDemo = null;
+
+async function refreshBoard() {
+  if (window.location.hash && window.location.hash !== "#tableau") return;
+  try {
+    boardOverview = await api("/api/dashboard/overview");
+  } catch (error) {
+    $("board-status").textContent = "Données du tableau de bord indisponibles";
+    return;
+  }
+  $("board-status").textContent = "";
+  if (Date.now() - boardLastSlow > BOARD_SLOW_MS || !boardChartData) {
+    boardLastSlow = Date.now();
+    try { boardDemo = await api("/api/demo/overview"); } catch (error) { boardDemo = null; }
+    refreshChart().catch(() => {});
+  }
+  renderBoard();
+  renderAccounts(boardOverview, boardDemo);
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  refreshBoard();
+  setInterval(refreshBoard, BOARD_FAST_MS);
+  window.addEventListener("hashchange", refreshBoard);
+});
