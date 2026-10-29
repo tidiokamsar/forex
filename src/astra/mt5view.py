@@ -23,8 +23,15 @@ SERVERS = frozenset({"MetaQuotes-Demo"})  # same set as brokers.mt5_demo.ALLOWED
 CANDLE_TIMEFRAMES = ("M5", "M15", "H1", "H4", "D1")
 MAX_CANDLES = 2000
 ASTRA_MAGIC = 20261028  # the magic number of ASTRA's orders (same value as brokers.mt5_demo_orders.MAGIC, tested)
+MANUAL_MAGIC = 20261029  # orders placed from the site (same value as brokers.mt5_demo_orders.MAGIC_MANUAL, tested)
 MAX_HISTORY_ITEMS = 120
 MAX_PANEL_BYTES = 16_000
+REQUEST_KINDS = ("pause", "resume", "close", "order", "modify_sl")
+REQUEST_STATUSES = ("EN_ATTENTE", "EXECUTE", "REFUSE", "ECHEC", "EXPIRE")
+REQUEST_TTL_SECONDS = 120   # a request not taken within two minutes is cancelled, never executed late
+MAX_PENDING_REQUESTS = 10
+STOP_PIPS_RANGE = (5.0, 300.0)
+PAIR_SYMBOLS = ("EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCHF", "USDCAD", "NZDUSD")
 MAX_POSITIONS = 50
 MAX_ACTIONS = 50
 MAX_EVENTS_KEPT = 500
@@ -54,6 +61,9 @@ CREATE TABLE IF NOT EXISTS mt5_orders (
     ticket INTEGER PRIMARY KEY, position_id INTEGER NOT NULL, ts TEXT NOT NULL, symbol TEXT NOT NULL, type INTEGER NOT NULL,
     state INTEGER NOT NULL, volume REAL NOT NULL, magic INTEGER NOT NULL, comment TEXT NOT NULL, received_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS mt5_sync (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS mt5_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, actor TEXT NOT NULL, kind TEXT NOT NULL, params_json TEXT NOT NULL,
+    status TEXT NOT NULL, result_json TEXT, finished_at TEXT);
 CREATE INDEX IF NOT EXISTS mt5_deals_position ON mt5_deals(position_id);
 """
 
@@ -70,6 +80,38 @@ def _history_time(value: Any, limit: datetime) -> str:
     if moment.tzinfo is None or moment > limit:
         raise Mt5ViewError("ts : date UTC passée attendue")
     return moment.astimezone(UTC).isoformat()
+
+
+def validate_request(payload: Any) -> tuple[str, dict[str, Any]]:
+    """A site request, as the bridge will execute it. The page can ask; it can never choose the volume of an order:
+    the bridge computes it from the risk limit."""
+
+    if not isinstance(payload, dict) or payload.get("kind") not in REQUEST_KINDS:
+        raise Mt5ViewError(f"demande : type parmi {', '.join(REQUEST_KINDS)}")
+    kind = payload["kind"]
+    params: dict[str, Any] = {}
+    if kind in ("close", "modify_sl"):
+        ticket = payload.get("ticket")
+        if isinstance(ticket, bool) or not isinstance(ticket, int) or ticket <= 0:
+            raise Mt5ViewError("ticket : entier positif attendu")
+        params["ticket"] = ticket
+    if kind == "modify_sl":
+        params["sl"] = _number(payload.get("sl"), "sl")
+        if params["sl"] <= 0:
+            raise Mt5ViewError("sl : prix positif attendu")
+    if kind == "order":
+        symbol = payload.get("symbol")
+        if symbol not in PAIR_SYMBOLS or payload.get("side") not in ("LONG", "SHORT"):
+            raise Mt5ViewError("ordre : paire connue et sens LONG ou SHORT attendus")
+        stop_pips = _number(payload.get("stop_pips"), "stop_pips")
+        if not STOP_PIPS_RANGE[0] <= stop_pips <= STOP_PIPS_RANGE[1]:
+            raise Mt5ViewError(f"stop_pips : entre {STOP_PIPS_RANGE[0]:g} et {STOP_PIPS_RANGE[1]:g} pips")
+        if "lots" in payload or "volume" in payload:
+            raise Mt5ViewError("le volume n'est jamais saisi : il est calculé par le risque")
+        params.update(symbol=symbol, side=payload["side"], stop_pips=stop_pips)
+    if payload.get("reason"):
+        params["reason"] = _text(payload["reason"], "motif", 120)
+    return kind, params
 
 
 def _mean(items: list[dict[str, Any]], field: str) -> float | None:
@@ -319,6 +361,52 @@ class Mt5View:
             row = db.execute(f"SELECT MAX(ts) FROM mt5_events WHERE kind IN ({marks})", kinds).fetchone()
         return row[0]
 
+    # -- requests from the site, executed by the bridge ------------------------------------------------------
+
+    def create_request(self, payload: Any, actor: str) -> int:
+        kind, params = validate_request(payload)
+        now = _now().isoformat()
+        with self._connect() as db:
+            waiting = db.execute("SELECT COUNT(*) FROM mt5_requests WHERE status = 'EN_ATTENTE'").fetchone()[0]
+            if waiting >= MAX_PENDING_REQUESTS:
+                raise Mt5ViewError("trop de demandes en attente")
+            cursor = db.execute("INSERT INTO mt5_requests(ts, actor, kind, params_json, status) VALUES (?,?,?,?, 'EN_ATTENTE')",
+                                (now, actor, kind, json.dumps(params, ensure_ascii=False)))
+        return int(cursor.lastrowid)
+
+    def _expire(self, db: sqlite3.Connection) -> None:
+        cutoff = (_now() - timedelta(seconds=REQUEST_TTL_SECONDS)).isoformat()
+        message = json.dumps({"message": "non prise en charge à temps : annulée, jamais exécutée"})
+        db.execute("UPDATE mt5_requests SET status = 'EXPIRE', finished_at = ?, result_json = ? "
+                   "WHERE status = 'EN_ATTENTE' AND ts < ?", (_now().isoformat(), message, cutoff))
+
+    def pending_requests(self) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            self._expire(db)
+            rows = db.execute("SELECT * FROM mt5_requests WHERE status = 'EN_ATTENTE' ORDER BY id").fetchall()
+        return [{"id": r["id"], "ts": r["ts"], "actor": r["actor"], "kind": r["kind"], **json.loads(r["params_json"])}
+                for r in rows]
+
+    def finish_request(self, request_id: int, status: str, result: Any) -> None:
+        if status not in ("EXECUTE", "REFUSE", "ECHEC") or not isinstance(result, dict):
+            raise Mt5ViewError("résultat : statut EXECUTE, REFUSE ou ECHEC et objet attendus")
+        if len(json.dumps(result)) > MAX_PANEL_BYTES:
+            raise Mt5ViewError("résultat trop volumineux")
+        with self._connect() as db:
+            cursor = db.execute("UPDATE mt5_requests SET status = ?, result_json = ?, finished_at = ? "
+                                "WHERE id = ? AND status = 'EN_ATTENTE'",
+                                (status, json.dumps(result), _now().isoformat(), request_id))
+            if cursor.rowcount != 1:
+                raise Mt5ViewError("demande inconnue ou déjà traitée")
+
+    def requests(self, limit: int = 30) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            self._expire(db)
+            rows = db.execute("SELECT * FROM mt5_requests ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [{"id": r["id"], "ts": r["ts"], "actor": r["actor"], "kind": r["kind"], "params": json.loads(r["params_json"]),
+                 "status": r["status"], "result": json.loads(r["result_json"]) if r["result_json"] else None,
+                 "finished_at": r["finished_at"]} for r in rows]
+
     def deals(self) -> list[dict[str, Any]]:
         with self._connect() as db:
             rows = db.execute("SELECT * FROM mt5_deals ORDER BY ts, ticket").fetchall()
@@ -383,7 +471,7 @@ class Mt5View:
         snapshot = json.loads(row["payload_json"])
         age = (_now() - datetime.fromisoformat(row["received_at"])).total_seconds()
         deals = self.deals()
-        positions = [{**p, "origin": mt5accounting.origin(p, deals, ASTRA_MAGIC)} for p in snapshot["positions"]]
+        positions = [{**p, "origin": mt5accounting.origin(p, deals, ASTRA_MAGIC, MANUAL_MAGIC)} for p in snapshot["positions"]]
         accounting = self.accounting({**snapshot, "positions": positions})
         recent = [{**d, "net": round(d["profit"] + d["commission"] + d["swap"] + d["fee"], 2),
                    "astra": d["magic"] == ASTRA_MAGIC and str(d["comment"]).startswith("ASTRA")}

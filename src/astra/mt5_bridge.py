@@ -33,7 +33,15 @@ from typing import Any
 from .agent import AgentHalt, ApiError, AstraClient, http_transport
 from .brokers import mt5_demo
 from .brokers.mt5_demo import DEFAULT_TERMINAL, Mt5DemoError
-from .brokers.mt5_demo_orders import COMMENT, MAGIC, Mt5DemoTrader, Mt5OrderRejected, Mt5OrderUnknown
+from .brokers.mt5_demo_orders import (
+    COMMENT,
+    COMMENT_MANUAL,
+    MAGIC,
+    MAGIC_MANUAL,
+    Mt5DemoTrader,
+    Mt5OrderRejected,
+    Mt5OrderUnknown,
+)
 from .marketdata import pip_size
 from .mt5_risk import AccountState, OrderRequest, RiskConfigError, RiskLimits, entries_state, evaluate_entry, load_limits
 
@@ -163,7 +171,7 @@ class Bridge:
             environment=account.get("environment"), login=account.get("login"), expected_login=self.trader.expected_login,
             equity=account["equity"], margin=account.get("margin"), day_start_equity=self.state["day_start_equity"],
             peak_equity=self.state["peak_equity"], positions=tuple({"symbol": p.symbol, "side": p.side, "volume": p.volume}
-                                                                    for p in positions if p.astra),
+                                                                    for p in positions if p.magic in (MAGIC, MAGIC_MANUAL)),
             connector_ok=bool(account.get("terminal_connected", True)),
             algo_trading_enabled=account.get("algo_trading_enabled"), entries_allowed_by_server=allowed,
             kill_switch_active=kill)
@@ -255,6 +263,138 @@ class Bridge:
         recent = sorted(self.state["intents"].values(), key=lambda i: i["at"], reverse=True)[:8]
         return [{k: v for k, v in i.items() if k in keep} for i in recent]
 
+    def _enter(self, trader: Mt5DemoTrader, symbol: str, side: str, stop_distance: float, entry_ts: str, reason: str,
+               manual: bool = False) -> tuple[str, list[dict[str, Any]]]:
+        """One opening order through the gateway, the written intention and the outcome handling. Automatic and manual
+        orders share this path. The volume always comes from the risk limit. Returns (outcome, actions) with outcome
+        OUVERT, REFUSE, REJETE or INCONNU."""
+
+        state = self.account_state(trader.refresh_account(), trader.positions())
+        limits = self.limits
+        risk_pct = limits.risk_per_trade_pct if isinstance(limits, RiskLimits) else 0.0
+        risk_usd = state.equity * risk_pct / 100
+        entry = trader.prepare_entry(symbol, side, stop_distance, risk_usd)
+        age = None
+        if entry["tick_time"]:
+            age = (self.clock() - datetime.fromisoformat(entry["tick_time"])).total_seconds()
+        order = OrderRequest(symbol, side, entry["lots"], entry["loss_at_stop_usd"], entry["required_margin"], entry["bid"],
+                             entry["ask"], age, entry["volume_min"], entry["volume_max"], entry["volume_step"], entry["has_stop"])
+        decision = evaluate_entry(state, order, limits)
+        if not decision.allowed:
+            key = f"{entry_ts}|{'|'.join(decision.reasons)}"
+            if manual or self.state["last_refusal"].get(symbol) != key:  # automatic: one line per change, not per cycle
+                self.state["last_refusal"][symbol] = key
+                return "REFUSE", [{"kind": "refused", "symbol": symbol, "side": side, "lots": entry["lots"],
+                                   "reason": "; ".join(decision.reasons)[:190]}]
+            return "REFUSE", []
+        intent = self._intent(symbol, side, entry["lots"], entry["sl"], entry_ts)
+        tag, magic = (COMMENT_MANUAL, MAGIC_MANUAL) if manual else (COMMENT, MAGIC)
+        try:
+            report = trader.open(symbol, side, entry["lots"], entry["sl"], comment=f"{tag}:{intent}", magic=magic)
+        except Mt5OrderRejected as exc:
+            self._set_intent(intent, "REJETE", retcode=exc.retcode, error=str(exc)[:160])
+            key = f"{entry_ts}|rejet {exc.retcode}"
+            if manual or self.state["last_refusal"].get(symbol) != key:
+                self.state["last_refusal"][symbol] = key
+                return "REJETE", [{"kind": "refused", "symbol": symbol, "side": side, "lots": entry["lots"],
+                                   "reason": f"refus du courtier : {exc}"[:190]}]
+            return "REJETE", []
+        except Mt5OrderUnknown as exc:
+            self._set_intent(intent, "INCONNU", error=str(exc)[:160])
+            return "INCONNU", [{"kind": "order_unknown", "symbol": symbol, "side": side, "lots": entry["lots"],
+                                "reason": f"{exc} : vérification du compte avant tout nouvel essai"[:190]}]
+        filled = report["volume"]
+        self._set_intent(intent, "PARTIEL" if report.get("partial") else "EXECUTE", ticket=report["order"], lots_filled=filled,
+                         retcode=report["retcode"])
+        if not manual:
+            self.state["mirrored"][symbol] = entry_ts
+            self.state["last_refusal"].pop(symbol, None)
+        pips = pip_size(symbol)
+        sign = 1 if side == "LONG" else -1
+        return "OUVERT", [{"kind": "open", "symbol": symbol, "side": side, "lots": filled, "sl": entry["sl"],
+                           "price": report["price"], "order": report["order"], "manual": manual,
+                           "status": "PARTIEL" if report.get("partial") else "EXECUTE", "risk_usd": round(risk_usd, 2),
+                           "reason": reason, "requested_price": report["requested_price"], "latency_ms": report["latency_ms"],
+                           "spread_pips": round((entry["ask"] - entry["bid"]) / pips, 2),
+                           "slippage_pips": round(sign * (report["price"] - report["requested_price"]) / pips, 2) + 0.0}]
+
+    # -- requests from the site -------------------------------------------------------------------------------
+
+    def process_requests(self) -> list[dict[str, Any]]:
+        """Take the requests the site queued and execute each one with the same protections as automatic orders.
+        Closing and moving a stop towards the price are always possible; an opening order is refused while the
+        STOP file or the emergency stop is active."""
+
+        try:
+            pending = self.client.get("/api/mt5/requests/pending").get("requests", [])
+        except (ApiError, OSError, AttributeError):
+            return []
+        done = []
+        for item in pending:
+            status, result, actions = self._handle_request(item)
+            self.client.post(f"/api/mt5/requests/{item['id']}/result", {"status": status, "result": result})
+            for action in actions:
+                self.note(action["kind"], **{k: v for k, v in action.items() if k != "kind"})
+            self.note("request", id=item["id"], request_kind=item["kind"], actor=item.get("actor"), status=status,
+                      message=result.get("message"))
+            done.append({"id": item["id"], "kind": item["kind"], "status": status, "actions": actions})
+        return done
+
+    def _handle_request(self, item: dict[str, Any]) -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
+        kind = item["kind"]
+        stop = self.workdir / "STOP"
+        if kind == "pause":
+            stop.write_text("", encoding="utf-8")
+            return "EXECUTE", {"message": "ordres automatiques suspendus (fichier STOP posé)"}, []
+        if kind == "resume":
+            allowed, kill = self.controls()
+            if allowed is not True or kill is not False:
+                return "REFUSE", {"message": "arrêt d'urgence ou gel actif, ou état illisible : le STOP reste en place"}, []
+            stop.unlink(missing_ok=True)
+            return "EXECUTE", {"message": "fichier STOP retiré : les entrées automatiques reprennent au prochain cycle"}, []
+        trader = self.trader
+        positions = trader.positions()
+        if kind == "order":
+            self.controls_cache_clear()
+            if stop.exists():
+                return "REFUSE", {"message": "fichier STOP présent : aucun ordre d'ouverture"}, []
+            outcome, actions = self._enter(trader, item["symbol"], item["side"], item["stop_pips"] * pip_size(item["symbol"]),
+                                           f"manuel:{item['id']}", f"ordre manuel demandé par {item.get('actor')}", manual=True)
+            if outcome == "OUVERT":
+                return "EXECUTE", {"message": "ordre exécuté", "order": actions[0]["order"], "lots": actions[0]["lots"],
+                                   "price": actions[0]["price"]}, actions
+            if outcome in ("REFUSE", "REJETE"):
+                return "REFUSE", {"message": actions[0]["reason"] if actions else "refusé"}, actions
+            return "ECHEC", {"message": actions[0]["reason"] if actions else "résultat inconnu"}, actions
+        position = next((p for p in positions if p.ticket == item.get("ticket") and p.magic in (MAGIC, MAGIC_MANUAL)), None)
+        if position is None:
+            return "REFUSE", {"message": "position introuvable parmi celles d'ASTRA (les autres ne sont jamais touchées)"}, []
+        try:
+            if kind == "close":
+                report = trader.close(position)
+                action = {"kind": "close", "symbol": position.symbol, "ticket": position.ticket, "side": position.side,
+                          "volume": position.volume, "profit": position.profit, "price": report["price"],
+                          "reason": f"fermeture demandée par {item.get('actor')}"}
+                return "EXECUTE", {"message": "position fermée", "price": report["price"]}, [action]
+            if kind == "modify_sl":
+                new_sl, price, long = float(item["sl"]), position.price_current, position.side == "LONG"
+                if not price:
+                    return "REFUSE", {"message": "prix actuel inconnu : stop inchangé"}, []
+                if not (new_sl < price if long else new_sl > price):
+                    return "REFUSE", {"message": "le stop doit rester du côté protecteur du prix actuel"}, []
+                if position.sl and (new_sl <= position.sl if long else new_sl >= position.sl):
+                    return "REFUSE", {"message": "le stop ne peut que se rapprocher du prix : jamais s'éloigner"}, []
+                report = trader.modify_stop(position, new_sl)
+                return "EXECUTE", {"message": f"stop déplacé à {new_sl}", "retcode": report["retcode"]}, []
+        except Mt5OrderRejected as exc:
+            return "REFUSE", {"message": f"refus du courtier : {exc}"[:190]}, []
+        except Mt5OrderUnknown as exc:
+            return "ECHEC", {"message": f"{exc} : vérifiez le compte avant de recommencer"[:190]}, []
+        return "REFUSE", {"message": "type de demande inconnu"}, []
+
+    def controls_cache_clear(self) -> None:
+        self._controls = None
+
     def cycle(self) -> dict[str, Any]:
         status = self.client.get("/api/status")
         if status.get("mode") != "SIMULATION" or not status.get("live_locked", False):
@@ -289,55 +429,8 @@ class Bridge:
                     continue  # already mirrored once for this paper entry: stopped out on MT5, not reopened
                 if self.pending_intent(symbol) is not None:
                     continue  # an earlier order on this pair has no known outcome yet: look first, never send again
-                state = self.account_state(trader.refresh_account(), trader.positions())
-                limits = self.limits
-                risk_pct = limits.risk_per_trade_pct if isinstance(limits, RiskLimits) else 0.0
-                risk_usd = state.equity * risk_pct / 100
-                entry = trader.prepare_entry(symbol, target["side"], target["stop_distance"], risk_usd)
-                age = None
-                if entry["tick_time"]:
-                    age = (self.clock() - datetime.fromisoformat(entry["tick_time"])).total_seconds()
-                order = OrderRequest(symbol, target["side"], entry["lots"], entry["loss_at_stop_usd"], entry["required_margin"],
-                                     entry["bid"], entry["ask"], age, entry["volume_min"], entry["volume_max"],
-                                     entry["volume_step"], entry["has_stop"])
-                decision = evaluate_entry(state, order, limits)
-                if not decision.allowed:
-                    key = f"{target['entry_ts']}|{'|'.join(decision.reasons)}"
-                    if self.state["last_refusal"].get(symbol) != key:  # one line per change, not one per cycle
-                        self.state["last_refusal"][symbol] = key
-                        actions.append({"kind": "refused", "symbol": symbol, "side": target["side"],
-                                        "lots": entry["lots"], "reason": "; ".join(decision.reasons)[:190]})
-                    continue
-                intent = self._intent(symbol, target["side"], entry["lots"], entry["sl"], target["entry_ts"])
-                try:
-                    report = trader.open(symbol, target["side"], entry["lots"], entry["sl"], comment=f"{COMMENT}:{intent}")
-                except Mt5OrderRejected as exc:
-                    self._set_intent(intent, "REJETE", retcode=exc.retcode, error=str(exc)[:160])
-                    key = f"{target['entry_ts']}|rejet {exc.retcode}"
-                    if self.state["last_refusal"].get(symbol) != key:
-                        self.state["last_refusal"][symbol] = key
-                        actions.append({"kind": "refused", "symbol": symbol, "side": target["side"], "lots": entry["lots"],
-                                        "reason": f"refus du courtier : {exc}"[:190]})
-                    continue
-                except Mt5OrderUnknown as exc:
-                    self._set_intent(intent, "INCONNU", error=str(exc)[:160])
-                    actions.append({"kind": "order_unknown", "symbol": symbol, "side": target["side"], "lots": entry["lots"],
-                                    "reason": f"{exc} : vérification du compte avant tout nouvel essai"[:190]})
-                    continue
-                filled = report["volume"]
-                self._set_intent(intent, "PARTIEL" if report.get("partial") else "EXECUTE", ticket=report["order"],
-                                 lots_filled=filled, retcode=report["retcode"])
-                self.state["mirrored"][symbol] = target["entry_ts"]
-                self.state["last_refusal"].pop(symbol, None)
-                pips = pip_size(symbol)
-                sign = 1 if target["side"] == "LONG" else -1
-                actions.append({"kind": "open", "symbol": symbol, "side": target["side"], "lots": filled,
-                                "sl": entry["sl"], "price": report["price"], "order": report["order"],
-                                "status": "PARTIEL" if report.get("partial") else "EXECUTE",
-                                "risk_usd": round(risk_usd, 2), "reason": target["reason"],
-                                "requested_price": report["requested_price"], "latency_ms": report["latency_ms"],
-                                "spread_pips": round((entry["ask"] - entry["bid"]) / pips, 2),
-                                "slippage_pips": round(sign * (report["price"] - report["requested_price"]) / pips, 2) + 0.0})
+                actions.extend(self._enter(trader, symbol, target["side"], target["stop_distance"], target["entry_ts"],
+                                           target["reason"])[1])
             everything = trader.positions()
             account = trader.refresh_account()
             manual_positions = [asdict(p) for p in everything if not p.astra]
@@ -371,6 +464,7 @@ class Bridge:
         quotes = self.trader.quotes()
         if quotes:
             self.client.post("/api/mt5/quotes", {"quotes": quotes})
+        self.process_requests()  # requests queued on the site: executed here, with the same protections
         account = self.trader.refresh_account()
         objects = self.trader.positions()
         positions = [asdict(p) for p in objects]

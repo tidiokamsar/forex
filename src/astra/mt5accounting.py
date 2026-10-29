@@ -51,9 +51,18 @@ def _net(deal: dict[str, Any]) -> float:
     return deal["profit"] + deal["commission"] + deal["swap"] + deal["fee"]
 
 
-def origin(position: dict[str, Any], deals: list[dict[str, Any]], magic: int) -> dict[str, Any]:
-    """Whether a position can be proven to come from ASTRA, from the broker's own identifiers."""
+def origin(position: dict[str, Any], deals: list[dict[str, Any]], magic: int, manual_magic: int | None = None) -> dict[str, Any]:
+    """Whether a position can be proven to come from ASTRA (automatic) or from an order placed on the site (manual),
+    from the broker's own identifiers."""
 
+    if manual_magic is not None and position.get("magic") == manual_magic:
+        opening = [d for d in deals if d["position_id"] == position["ticket"] and d["entry"] == ENTRY_IN
+                   and d["type"] in (DEAL_BUY, DEAL_SELL) and d["magic"] == manual_magic]
+        if opening:
+            return {"astra": False, "manual": True, "label": "ouverte depuis le site (ordre manuel, confirmée)",
+                    "proof": f"transaction d'ouverture {opening[0]['ticket']}, ordre {opening[0]['order']}, magic {manual_magic}"}
+        return {"astra": False, "manual": True, "label": "position du compte — origine non confirmée",
+                "proof": "marque d'ordre manuel du site, mais transaction d'ouverture absente de l'historique reçu"}
     opening = [d for d in deals if d["position_id"] == position["ticket"] and d["type"] in (DEAL_BUY, DEAL_SELL)
                and d["entry"] == ENTRY_IN]
     marked = position.get("magic") == magic and str(position.get("comment") or "").startswith("ASTRA")

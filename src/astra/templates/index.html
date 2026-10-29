@@ -54,6 +54,31 @@
             <div class="table-scroll"><table><thead><tr><th>Date UTC</th><th>Paire</th><th>Type</th><th>Sens</th><th>Lot</th><th>Résultat net</th><th>Origine</th></tr></thead><tbody id="board-history"></tbody></table></div></article>
           <article class="panel"><div class="panel-heading"><div><h2>Performance (DÉMO)</h2></div></div><div id="board-perf"></div></article>
         </section>
+        <section class="panel operator-only board-actions" id="board-actions" hidden>
+          <div class="panel-heading"><div><h2>Actions sur le compte démo</h2></div><span class="pill pill-ok">DÉMO uniquement</span></div>
+          <div class="actions-grid">
+            <div>
+              <h3>Placer un ordre au marché</h3>
+              <div class="order-form">
+                <label>Paire<select id="board-ord-pair"></select></label>
+                <label>Stop (pips)<input type="number" id="board-ord-stop" value="30" min="5" max="300" step="1"></label>
+                <button type="button" id="board-ord-buy" class="small-button">Acheter (DÉMO)</button>
+                <button type="button" id="board-ord-sell" class="danger-button">Vendre (DÉMO)</button>
+              </div>
+              <p class="footnote">Le volume n'est jamais saisi : il est calculé pour que la perte au stop reste dans la limite de risque. L'ordre passe par le portail de risque et est refusé si le fichier STOP ou l'arrêt d'urgence est actif.</p>
+            </div>
+            <div>
+              <h3>Ordres automatiques</h3>
+              <div class="button-row">
+                <button type="button" id="board-pause" class="danger-button">Suspendre les ordres automatiques</button>
+                <button type="button" id="board-resume" class="small-button">Reprendre les ordres automatiques</button>
+              </div>
+              <p class="footnote">Suspendre pose le fichier STOP : ni ouverture ni fermeture automatique, les positions restent ouvertes avec leurs stops. Reprendre retire ce fichier, et reste refusé tant que l'arrêt d'urgence est actif. L'arrêt d'urgence du moteur lui-même se commande en ligne de commande sur le serveur (<code>astra controls kill</code>) ; sa levée est une action humaine séparée.</p>
+            </div>
+          </div>
+          <p class="form-status" id="board-act-status" role="status"></p>
+          <div class="table-scroll"><table><thead><tr><th>N°</th><th>Date UTC</th><th>Demandeur</th><th>Demande</th><th>Statut</th><th>Résultat</th></tr></thead><tbody id="board-requests"></tbody></table></div>
+        </section>
         <section class="board-audit">
           <article class="panel"><div class="panel-heading"><div><h2>Comptabilité du compte</h2></div><span id="board-accounting-pill" class="pill">—</span></div>
             <div id="board-accounting"></div>

@@ -65,7 +65,8 @@ AGENT_ENDPOINTS = {
                        "market_chart", "dashboard_overview"}),
     "lab": frozenset({"market_ingest", "lab_backtest_create", "sim_create", "sim_action"}),
     # The MT5 bridge shows its DEMO account on the dashboard: data only, never an order.
-    "mt5": frozenset({"mt5_snapshot", "mt5_quotes", "mt5_candles", "mt5_history"}),
+    "mt5": frozenset({"mt5_snapshot", "mt5_quotes", "mt5_candles", "mt5_history", "mt5_requests_pending",
+                      "mt5_request_result"}),
 }
 
 

@@ -363,6 +363,20 @@ function renderPositions(d) {
       ["Billet", String(p.ticket)]]) { const cell = el("div"); cell.append(el("small", k), el("strong", v)); grid.append(cell); }
     const proof = el("small", `${p.origin ? p.origin.label : "origine non confirmée"}${p.origin && p.origin.proof ? ` · ${p.origin.proof}` : ""}`, p.origin && p.origin.astra ? "risk-ok" : "risk-muted");
     item.append(head, grid, proof);
+    if (CAN_ACT && p.origin && (p.origin.astra || p.origin.manual)) {
+      const buttons = el("div", null, "button-row position-actions");
+      buttons.append(
+        button("Fermer", () => sendRequest({ kind: "close", ticket: p.ticket },
+          `Fermer la position ${p.ticket} (${pairLabel(p.symbol)}, ${p.side === "LONG" ? "achat" : "vente"} ${fmt.format(p.volume)} lot) au marché ?\n\nRésultat actuel : ${signed(p.profit + (p.swap || 0))} USD, qui devient réalisé.`), "small-button"),
+        button("Resserrer le stop", () => {
+          const value = window.prompt(`Nouveau stop pour ${pairLabel(p.symbol)} (prix). Il ne peut que se rapprocher du prix actuel ${price(p.symbol, p.price_current)}. Stop actuel : ${price(p.symbol, p.sl)}.`);
+          if (value === null || value.trim() === "") return;
+          const sl = Number(value.replace(",", "."));
+          if (!Number.isFinite(sl) || sl <= 0) { status("board-act-status", "Prix de stop invalide.", true); return; }
+          sendRequest({ kind: "modify_sl", ticket: p.ticket, sl }, `Déplacer le stop de la position ${p.ticket} à ${sl} ?`);
+        }, "small-button"));
+      item.append(buttons);
+    }
     return item;
   }));
 }
@@ -438,6 +452,80 @@ function renderFreshness(d) {
   box.replaceChildren(...items);
 }
 
+// -- actions on the DEMO account: the page queues a request, the bridge executes it with its protections ---------
+const REQUEST_LABEL = { order: "Ordre", close: "Fermeture", modify_sl: "Stop", pause: "Suspendre", resume: "Reprendre" };
+const REQUEST_STATUS = { EN_ATTENTE: "en attente du pont", EXECUTE: "exécutée", REFUSE: "refusée", ECHEC: "échec", EXPIRE: "expirée, jamais exécutée" };
+let boardRequestWatch = null;
+
+function describeRequest(r) {
+  const p = r.params || {};
+  if (r.kind === "order") return `${p.side === "LONG" ? "Achat" : "Vente"} ${pairLabel(p.symbol)}, stop ${p.stop_pips} pips`;
+  if (r.kind === "close") return `Fermer la position ${p.ticket}`;
+  if (r.kind === "modify_sl") return `Stop de la position ${p.ticket} à ${p.sl}`;
+  return REQUEST_LABEL[r.kind];
+}
+
+function renderRequests(list) {
+  fill("board-requests", list.slice(0, 12).map((r) => row([String(r.id), when(r.ts).slice(0, 16), (r.actor || "").replace("web:", ""),
+    describeRequest(r), el("span", REQUEST_STATUS[r.status] || r.status, r.status === "EXECUTE" ? "gain" : r.status === "EN_ATTENTE" ? "" : "loss"),
+    r.result && r.result.message ? r.result.message : "—"])), "Aucune demande.", 6);
+}
+
+async function refreshRequests() {
+  try {
+    const d = await api("/api/mt5/requests");
+    renderRequests(d.requests || []);
+    return d.requests || [];
+  } catch (error) { return []; }
+}
+
+async function sendRequest(body, confirmation) {
+  if (!window.confirm(confirmation)) return;
+  const line = $("board-act-status");
+  status("board-act-status", "Demande envoyée…");
+  try {
+    const r = await post("/api/mt5/requests", body);
+    status("board-act-status", `Demande n° ${r.request_id} enregistrée : le pont la traite sous quelques secondes (elle expire après 2 minutes).`);
+    if (boardRequestWatch) clearInterval(boardRequestWatch);
+    let tries = 0;
+    boardRequestWatch = setInterval(async () => {
+      tries += 1;
+      const list = await refreshRequests();
+      const mine = list.find((x) => x.id === r.request_id);
+      if (mine && mine.status !== "EN_ATTENTE") {
+        status("board-act-status", `Demande n° ${mine.id} ${REQUEST_STATUS[mine.status]} : ${(mine.result && mine.result.message) || "—"}`, mine.status !== "EXECUTE");
+        clearInterval(boardRequestWatch);
+        refreshBoard();
+      } else if (tries > 30) clearInterval(boardRequestWatch);
+    }, 3000);
+  } catch (error) { line.textContent = error.message; line.classList.add("is-error"); }
+}
+
+function wireActions() {
+  const section = $("board-actions");
+  if (!section || !CAN_ACT) return;
+  section.hidden = false;
+  $("board-ord-pair").replaceChildren(...BOARD_PAIRS.map((p) => new Option(pairLabel(p), p)));
+  const risk = () => {
+    const lim = boardOverview && boardOverview.mt5.snapshot && boardOverview.mt5.snapshot.risk ? boardOverview.mt5.snapshot.risk.limits : null;
+    return lim ? `${lim.risk_per_trade_pct} % des fonds propres` : "la limite de risque";
+  };
+  const order = (side) => {
+    const symbol = $("board-ord-pair").value;
+    const stop = Number($("board-ord-stop").value);
+    const verb = side === "LONG" ? "ACHAT" : "VENTE";
+    sendRequest({ kind: "order", symbol, side, stop_pips: stop },
+      `Placer un ordre DÉMO : ${verb} ${pairLabel(symbol)} au marché, stop à ${stop} pips.\n\nLe volume est calculé pour perdre au plus ${risk()} si le stop est atteint. L'ordre est refusé si le portail de risque, le fichier STOP ou l'arrêt d'urgence l'interdit.\n\nConfirmer ?`);
+  };
+  $("board-ord-buy").addEventListener("click", () => order("LONG"));
+  $("board-ord-sell").addEventListener("click", () => order("SHORT"));
+  $("board-pause").addEventListener("click", () => sendRequest({ kind: "pause" },
+    "Suspendre les ordres automatiques ?\n\nLe pont ne fera plus aucune ouverture ni fermeture automatique. Les positions restent ouvertes avec leurs stops chez le courtier."));
+  $("board-resume").addEventListener("click", () => sendRequest({ kind: "resume" },
+    "Reprendre les ordres automatiques ?\n\nLe fichier STOP est retiré : le pont pourra ouvrir et fermer des positions démo selon les décisions des stratégies, avec le portail de risque. C'est refusé tant que l'arrêt d'urgence est actif."));
+  refreshRequests();
+}
+
 function renderBoard() {
   if (!boardOverview) return;
   const d = boardOverview;
@@ -468,6 +556,7 @@ async function refreshBoard() {
   if (Date.now() - boardLastSlow > BOARD_SLOW_MS || !boardChartData) {
     boardLastSlow = Date.now();
     try { boardDemo = await api("/api/demo/overview"); } catch (error) { boardDemo = null; }
+    if (CAN_ACT) refreshRequests();
     refreshChart().catch(() => {});
   }
   renderBoard();
@@ -475,6 +564,7 @@ async function refreshBoard() {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  wireActions();
   refreshBoard();
   setInterval(refreshBoard, BOARD_FAST_MS);
   window.addEventListener("hashchange", refreshBoard);

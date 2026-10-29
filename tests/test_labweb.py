@@ -81,6 +81,34 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(len(ingests), 2)  # fresh data: no new request for 6 hours
         self.assertEqual(self.calls, 1)
 
+    def scheduled_ecb_jobs(self, now, success_minutes_ago, last_data):
+        """Would the worker ask the ECB at ``now``? Each scenario gets its own database."""
+
+        from astra.jobs import Worker as W
+
+        with workspace_tempdir() as temp:
+            root = Path(temp)
+            (root / "imports").mkdir()
+            worker = W(root / "astra.sqlite3", root / "imports", ecb_fetch=self.fetch, clock=lambda: now)
+            worker.initialize()
+            worker.candles.register_source(marketdata.ECB_SOURCE, "ECB_SDMX_API", "REFERENCE", "test")
+            ago = (now - timedelta(minutes=success_minutes_ago)).isoformat()
+            with worker.candles._connect() as db:
+                db.execute("UPDATE md_sources SET last_success_at = ?, last_attempt_at = ?, last_data_ts = ?, next_allowed_at = NULL "
+                           "WHERE name = ?", (ago, ago, last_data, marketdata.ECB_SOURCE))
+            worker.maybe_schedule_ecb()
+            return len([j for j in worker.jobs.jobs() if j["kind"] == "ingest_ecb"])
+
+    def test_the_ecb_is_asked_every_thirty_minutes_while_todays_candle_is_awaited_and_every_six_hours_otherwise(self):
+        thursday_afternoon = datetime(2026, 10, 29, 15, 0, tzinfo=UTC)
+        old, today = "2026-10-28T13:15:00+00:00", "2026-10-29T13:15:00+00:00"
+        self.assertEqual(self.scheduled_ecb_jobs(thursday_afternoon, 31, old), 1)  # window open, yesterday's candle last: ask again
+        self.assertEqual(self.scheduled_ecb_jobs(thursday_afternoon, 10, old), 0)  # but not more than every 30 minutes
+        self.assertEqual(self.scheduled_ecb_jobs(thursday_afternoon, 31, today), 0)  # today's candle is stored: back to six hours
+        self.assertEqual(self.scheduled_ecb_jobs(thursday_afternoon, 400, today), 1)  # six hours later it asks again
+        self.assertEqual(self.scheduled_ecb_jobs(datetime(2026, 10, 29, 10, 0, tzinfo=UTC), 31, old), 0)  # before the window
+        self.assertEqual(self.scheduled_ecb_jobs(datetime(2026, 10, 31, 15, 0, tzinfo=UTC), 31, "2026-10-30T13:15:00+00:00"), 0)  # weekend
+
     def test_interrupted_job_is_marked_failed_after_a_restart(self):
         worker = self.worker()
         worker.jobs.enqueue("ingest_ecb", {}, "test")

@@ -26,7 +26,7 @@ EXPECTED_AGENT_ENDPOINTS = {
              "sim_sessions", "sim_session", "learn_overview", "system_jobs", "mt5_overview", "market_chart",
              "dashboard_overview"},
     "lab": {"market_ingest", "lab_backtest_create", "sim_create", "sim_action"},
-    "mt5": {"mt5_snapshot", "mt5_quotes", "mt5_candles", "mt5_history"},
+    "mt5": {"mt5_snapshot", "mt5_quotes", "mt5_candles", "mt5_history", "mt5_requests_pending", "mt5_request_result"},
 }
 
 
@@ -202,6 +202,91 @@ class Mt5FlowTests(AgentTokenCase):
 
         self.assertEqual(mt5_demo.ALLOWED_SERVERS, mt5view.SERVERS)
         self.assertEqual(mt5_demo.source_name("MetaQuotes-Demo"), mt5view.source_name("MetaQuotes-Demo"))
+
+
+class SiteRequestTests(AgentTokenCase):
+    """Requests queued by a signed-in person on the site, taken and executed by the bridge."""
+
+    def send(self, token, path, payload):
+        return self.bearer(token, path, method="POST", data=json.dumps(payload), content_type="application/json")
+
+    def person(self, role=WebRole.OPERATOR, name="ops"):
+        client = self.session_client(name, role)
+        return client, {"Origin": ORIGIN, "X-CSRF-Token": self.page_csrf(client)}
+
+    def test_only_a_signed_in_operator_with_csrf_can_queue_a_request_and_a_viewer_can_only_look(self):
+        operator, headers = self.person()
+        body = {"kind": "close", "ticket": 11149214517}
+        self.assertEqual(self.client().post("/api/mt5/requests", json=body, headers={"Origin": ORIGIN}).status_code, 401)
+        self.assertEqual(operator.post("/api/mt5/requests", json=body, headers={"Origin": ORIGIN}).status_code, 403)  # no CSRF
+        queued = operator.post("/api/mt5/requests", json=body, headers=headers)
+        self.assertEqual(queued.status_code, 202)
+        viewer, viewer_headers = self.person(WebRole.READ_ONLY, "viewer")
+        self.assertEqual(viewer.post("/api/mt5/requests", json=body, headers=viewer_headers).status_code, 403)
+        listed = viewer.get("/api/mt5/requests").get_json()["requests"]
+        self.assertEqual((listed[0]["kind"], listed[0]["status"], listed[0]["actor"]), ("close", "EN_ATTENTE", "web:ops"))
+        self.assertEqual(viewer.get("/api/mt5/requests/pending").status_code, 403)  # only the bridge takes requests
+
+    def test_a_token_can_take_and_report_but_never_create_a_request(self):
+        operator, headers = self.person()
+        operator.post("/api/mt5/requests", json={"kind": "pause"}, headers=headers)
+        token = self.issue(scopes=("read", "mt5"))
+        self.assertEqual(self.send(token, "/api/mt5/requests", {"kind": "pause"}).status_code, 403)
+        pending = self.bearer(token, "/api/mt5/requests/pending").get_json()["requests"]
+        self.assertEqual([p["kind"] for p in pending], ["pause"])
+        done = self.send(token, f"/api/mt5/requests/{pending[0]['id']}/result", {"status": "EXECUTE", "result": {"message": "ok"}})
+        self.assertEqual(done.status_code, 200)
+        self.assertEqual(self.bearer(token, "/api/mt5/requests/pending").get_json()["requests"], [])
+        again = self.send(token, f"/api/mt5/requests/{pending[0]['id']}/result", {"status": "EXECUTE", "result": {}})
+        self.assertEqual(again.status_code, 400)  # already settled
+        for name, scopes in (("reader", ("read",)), ("labber", ("read", "lab"))):
+            other, _ = self.tokens.issue("cli:test", name, "owner", list(scopes))
+            self.assertEqual(self.bearer(other, "/api/mt5/requests/pending").status_code, 403)
+
+    def test_requests_are_validated_and_the_volume_is_never_chosen_by_the_page(self):
+        operator, headers = self.person()
+        bad = [{"kind": "liquidate"}, {"kind": "close"}, {"kind": "close", "ticket": "7"}, {"kind": "close", "ticket": -1},
+               {"kind": "modify_sl", "ticket": 1}, {"kind": "modify_sl", "ticket": 1, "sl": -2},
+               {"kind": "order", "symbol": "XAUUSD", "side": "LONG", "stop_pips": 30},
+               {"kind": "order", "symbol": "EURUSD", "side": "UP", "stop_pips": 30},
+               {"kind": "order", "symbol": "EURUSD", "side": "LONG", "stop_pips": 1},
+               {"kind": "order", "symbol": "EURUSD", "side": "LONG", "stop_pips": 30, "lots": 50},
+               {"kind": "order", "symbol": "EURUSD", "side": "LONG", "stop_pips": 30, "volume": 1}, "x", None]
+        for payload in bad:
+            self.assertEqual(operator.post("/api/mt5/requests", json=payload, headers=headers).status_code, 400, payload)
+        good = {"kind": "order", "symbol": "EURUSD", "side": "LONG", "stop_pips": 30}
+        self.assertEqual(operator.post("/api/mt5/requests", json=good, headers=headers).status_code, 202)
+
+    def test_a_request_not_taken_in_time_expires_and_is_never_executed_late(self):
+        from astra.mt5view import Mt5View
+
+        operator, headers = self.person()
+        operator.post("/api/mt5/requests", json={"kind": "pause"}, headers=headers)
+        with Mt5View(self.db)._connect() as db:
+            db.execute("UPDATE mt5_requests SET ts = ?", ("2026-01-01T00:00:00+00:00",))
+        token = self.issue(scopes=("read", "mt5"))
+        self.assertEqual(self.bearer(token, "/api/mt5/requests/pending").get_json()["requests"], [])
+        self.assertEqual(operator.get("/api/mt5/requests").get_json()["requests"][0]["status"], "EXPIRE")
+
+    def test_the_queue_is_bounded(self):
+        operator, headers = self.person()
+        codes = [operator.post("/api/mt5/requests", json={"kind": "pause"}, headers=headers).status_code for _ in range(12)]
+        self.assertEqual(codes.count(202), 10)
+
+    def test_a_manual_order_has_its_own_proof_of_origin(self):
+        from astra import mt5accounting
+        from test_mt5_accounting import MAGIC
+
+        manual = {"ticket": 5, "magic": MAGIC + 1, "comment": "ASTRA-M:ab12cd34"}
+        deals = [{"ticket": 9, "order": 8, "position_id": 5, "type": 0, "entry": 0, "magic": MAGIC + 1, "comment": "ASTRA-M:ab12cd34"}]
+        proven = mt5accounting.origin(manual, deals, MAGIC, MAGIC + 1)
+        self.assertEqual((proven["astra"], proven["manual"]), (False, True))
+        self.assertIn("ouverte depuis le site", proven["label"])
+        self.assertIn("non confirmée", mt5accounting.origin(manual, [], MAGIC, MAGIC + 1)["label"])
+        from astra import mt5view
+        from astra.brokers import mt5_demo_orders
+
+        self.assertEqual((mt5view.ASTRA_MAGIC, mt5view.MANUAL_MAGIC), (mt5_demo_orders.MAGIC, mt5_demo_orders.MAGIC_MANUAL))
 
 
 class AgentTokenTests(AgentTokenCase):

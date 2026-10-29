@@ -10,7 +10,7 @@ from _support import workspace_tempdir
 from astra import mt5_risk
 from astra.agent import AgentHalt, AstraClient
 from astra.brokers.mt5_demo import Mt5DemoError
-from astra.brokers.mt5_demo_orders import MAGIC, Mt5DemoTrader
+from astra.brokers.mt5_demo_orders import MAGIC, MAGIC_MANUAL, Mt5DemoTrader
 from astra.mt5_bridge import Bridge, targets
 from test_mt5_demo import FakeMt5, server_seconds
 
@@ -20,7 +20,7 @@ LOGIN = 114765880
 class TradingMt5(FakeMt5):
     POSITION_TYPE_BUY, POSITION_TYPE_SELL = 0, 1
     ORDER_TYPE_BUY, ORDER_TYPE_SELL = 0, 1
-    TRADE_ACTION_DEAL, ORDER_TIME_GTC = 1, 0
+    TRADE_ACTION_DEAL, TRADE_ACTION_SLTP, ORDER_TIME_GTC = 1, 6, 0
     ORDER_FILLING_FOK, ORDER_FILLING_IOC, ORDER_FILLING_RETURN = 0, 1, 2
     TRADE_RETCODE_DONE, TRADE_RETCODE_DONE_PARTIAL = 10009, 10010
 
@@ -57,6 +57,11 @@ class TradingMt5(FakeMt5):
 
     def order_send(self, request):
         self.sent.append(request)
+        if request.get("action") == self.TRADE_ACTION_SLTP:
+            for p in self.open_positions:
+                if p.ticket == request["position"]:
+                    p.sl = request["sl"]
+            return SimpleNamespace(retcode=self.TRADE_RETCODE_DONE, comment="done", order=0, deal=0, volume=0.0, price=0.0)
         if "position" in request:
             self.open_positions = [p for p in self.open_positions if p.ticket != request["position"]]
         else:
@@ -94,11 +99,18 @@ class FakeServer:
         self.view = overview(SHORT)
         self.posts = []
         self.controls = {"entries_allowed": True, "kill_switch": {"active": False}}
+        self.requests, self.results, self.fail_pending = [], [], False
 
     def __call__(self, method, path, body):
         if method == "POST":
             self.posts.append((path, body))
+            if "/api/mt5/requests/" in path:
+                self.results.append((path, body))
             return 200, {}
+        if path == "/api/mt5/requests/pending":
+            if self.fail_pending:
+                return 503, {"error": "down"}
+            return 200, {"requests": self.requests}
         if path == "/api/controls":
             return 200, self.controls
         return 200, self.status if path == "/api/status" else self.view
@@ -327,6 +339,86 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(len(self.fake.sent), 1)
         snapshot = next(b for p, b in reversed(self.server.posts) if p == "/api/mt5/snapshot")
         self.assertEqual(snapshot["bridge"]["intents"][0]["status"], "EXECUTE")
+
+    # -- requests queued on the site ---------------------------------------------------------------------
+
+    def ask(self, **request):
+        """Queue one request on the fake server, let the bridge take it, return (status, message, actions)."""
+
+        self.server.requests = [{"id": len(self.server.results) + 1, "actor": "web:ops", **request}]
+        with self.bridge.trader:
+            done = self.bridge.process_requests()
+        status, result = self.server.results[-1][1]["status"], self.server.results[-1][1]["result"]
+        return status, result["message"], done[0]["actions"]
+
+    def test_a_manual_order_goes_through_the_gateway_with_a_computed_volume_and_its_own_magic(self):
+        status, message, actions = self.ask(kind="order", symbol="EURUSD", side="LONG", stop_pips=60.0)
+        self.assertEqual((status, message), ("EXECUTE", "ordre exécuté"))
+        self.assertEqual(self.fake.sent[0]["magic"], MAGIC_MANUAL)
+        self.assertTrue(self.fake.sent[0]["comment"].startswith("ASTRA-M:"))
+        self.assertEqual(self.fake.sent[0]["volume"], 0.83)  # 0.5 % of 100 000 at a 60 pip stop: computed, never typed
+        self.assertTrue(actions[0]["manual"])
+        self.assertEqual([i["status"] for i in self.bridge.state["intents"].values()], ["EXECUTE"])
+
+    def test_a_manual_order_is_refused_under_the_stop_file_the_emergency_stop_and_the_gateway(self):
+        (self.dir / "STOP").write_text("", encoding="utf-8")
+        self.assertEqual(self.ask(kind="order", symbol="EURUSD", side="LONG", stop_pips=60.0)[0], "REFUSE")
+        (self.dir / "STOP").unlink()
+        self.server.controls = {"entries_allowed": False, "kill_switch": {"active": True}}
+        status, message, _ = self.ask(kind="order", symbol="EURUSD", side="LONG", stop_pips=60.0)
+        self.assertEqual(status, "REFUSE")
+        self.assertIn("arret_d_urgence", message)
+        self.server.controls = {"entries_allowed": True, "kill_switch": {"active": False}}
+        self.fake.tick_time = server_seconds("2026-10-29 10:00")  # an hour-old quote
+        self.assertIn("fraicheur", self.ask(kind="order", symbol="EURUSD", side="LONG", stop_pips=60.0)[1])
+        self.assertEqual(self.fake.sent, [])
+
+    def test_a_manual_position_is_never_closed_by_the_automatic_mirroring(self):
+        self.ask(kind="order", symbol="EURUSD", side="LONG", stop_pips=60.0)
+        self.server.view = overview(None)  # the paper account holds nothing on EURUSD
+        self.assertEqual(self.bridge.cycle()["actions"], [])
+        self.assertEqual(len(self.fake.open_positions), 1)
+
+    def test_close_works_even_under_the_stop_file_and_never_touches_a_foreign_position(self):
+        self.bridge.cycle()
+        ticket = self.fake.open_positions[0].ticket
+        self.fake.open_positions.append(SimpleNamespace(ticket=99, symbol="GBPUSD", type=0, volume=1.0, price_open=1.3, sl=1.2,
+                                                        profit=0.0, magic=0, comment=""))
+        (self.dir / "STOP").write_text("", encoding="utf-8")
+        self.assertEqual(self.ask(kind="close", ticket=99)[0], "REFUSE")  # opened by hand: not ours
+        status, message, actions = self.ask(kind="close", ticket=ticket)
+        self.assertEqual((status, message), ("EXECUTE", "position fermée"))
+        self.assertEqual(actions[0]["kind"], "close")
+        self.assertEqual([p.ticket for p in self.fake.open_positions], [99])
+
+    def test_a_stop_can_only_move_towards_the_price_on_the_protective_side(self):
+        self.bridge.cycle()  # the paper account is short: a sale, so the stop sits above the price
+        position = self.fake.open_positions[0]
+        position.sl, position.price_current = 1.1060, 1.1000
+        self.assertEqual(self.ask(kind="modify_sl", ticket=position.ticket, sl=1.1100)[0], "REFUSE")  # looser: farther away
+        self.assertEqual(self.ask(kind="modify_sl", ticket=position.ticket, sl=1.0950)[0], "REFUSE")  # wrong side of the price
+        status, message, _ = self.ask(kind="modify_sl", ticket=position.ticket, sl=1.1030)
+        self.assertEqual((status, position.sl, message), ("EXECUTE", 1.1030, "stop déplacé à 1.103"))
+
+    def test_pause_and_resume_move_the_stop_file_and_resume_waits_for_the_emergency_stop_to_be_released(self):
+        self.assertEqual(self.ask(kind="pause")[0], "EXECUTE")
+        self.assertTrue((self.dir / "STOP").exists())
+        self.server.controls = {"entries_allowed": False, "kill_switch": {"active": True}}
+        self.bridge.controls_cache_clear()
+        status, _message, _ = self.ask(kind="resume")
+        self.assertEqual(status, "REFUSE")
+        self.assertTrue((self.dir / "STOP").exists())
+        self.server.controls = {"entries_allowed": True, "kill_switch": {"active": False}}
+        self.bridge.controls_cache_clear()
+        self.assertEqual(self.ask(kind="resume")[0], "EXECUTE")
+        self.assertFalse((self.dir / "STOP").exists())
+
+    def test_the_bridge_survives_an_unreachable_queue_and_an_unknown_kind(self):
+        self.server.fail_pending = True
+        with self.bridge.trader:
+            self.assertEqual(self.bridge.process_requests(), [])
+        self.server.fail_pending = False
+        self.assertEqual(self.ask(kind="teleport")[0], "REFUSE")
 
     def test_flow_keeps_one_connection_and_trades_only_when_the_cycle_is_due(self):
         clock = {"t": 0.0}

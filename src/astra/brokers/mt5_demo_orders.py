@@ -20,7 +20,9 @@ from ..marketdata import PAIRS
 from .mt5_demo import ALLOWED_SERVERS, Mt5DemoError, Mt5DemoFeed
 
 MAGIC = 20261028
+MAGIC_MANUAL = 20261029  # orders placed from the site: the automatic mirroring never closes them
 COMMENT = "ASTRA"
+COMMENT_MANUAL = "ASTRA-M"
 DEVIATION_POINTS = 20
 MAX_LOTS = 2.0  # hard cap per position, whatever the risk computation says
 
@@ -153,7 +155,7 @@ class Mt5DemoTrader(Mt5DemoFeed):
                 "required_margin": margin, "volume_min": info.volume_min, "volume_max": info.volume_max,
                 "volume_step": info.volume_step, "has_stop": bool(sl)}
 
-    def open(self, symbol: str, side: str, lots: float, sl: float, comment: str = COMMENT) -> dict[str, Any]:
+    def open(self, symbol: str, side: str, lots: float, sl: float, comment: str = COMMENT, magic: int = MAGIC) -> dict[str, Any]:
         self._guard()
         mt5 = self.mt5
         if symbol not in PAIRS or side not in ("LONG", "SHORT"):
@@ -164,14 +166,14 @@ class Mt5DemoTrader(Mt5DemoFeed):
         buy = side == "LONG"
         request = {"action": mt5.TRADE_ACTION_DEAL, "symbol": symbol, "volume": float(lots),
                    "type": mt5.ORDER_TYPE_BUY if buy else mt5.ORDER_TYPE_SELL, "price": tick.ask if buy else tick.bid,
-                   "sl": float(sl), "deviation": DEVIATION_POINTS, "magic": MAGIC, "comment": comment[:31],
+                   "sl": float(sl), "deviation": DEVIATION_POINTS, "magic": magic, "comment": comment[:31],
                    "type_time": mt5.ORDER_TIME_GTC, "type_filling": self._filling(info)}
         return self._send(request)
 
     def close(self, position: Mt5Position) -> dict[str, Any]:
         self._guard()
         mt5 = self.mt5
-        if not position.astra:
+        if position.magic not in (MAGIC, MAGIC_MANUAL):
             raise Mt5DemoError(f"position {position.ticket} ouverte hors ASTRA : jamais fermée par ASTRA")
         info, tick = mt5.symbol_info(position.symbol), mt5.symbol_info_tick(position.symbol)
         long = position.side == "LONG"
@@ -179,6 +181,17 @@ class Mt5DemoTrader(Mt5DemoFeed):
                    "type": mt5.ORDER_TYPE_SELL if long else mt5.ORDER_TYPE_BUY, "position": position.ticket,
                    "price": tick.bid if long else tick.ask, "deviation": DEVIATION_POINTS, "magic": MAGIC,
                    "comment": COMMENT, "type_time": mt5.ORDER_TIME_GTC, "type_filling": self._filling(info)}
+        return self._send(request)
+
+    def modify_stop(self, position: Mt5Position, sl: float) -> dict[str, Any]:
+        """Move the stop of one of our positions. The caller decides whether the new level is acceptable."""
+
+        self._guard()
+        if position.magic not in (MAGIC, MAGIC_MANUAL):
+            raise Mt5DemoError(f"position {position.ticket} ouverte hors ASTRA : jamais modifiée par ASTRA")
+        mt5 = self.mt5
+        request = {"action": mt5.TRADE_ACTION_SLTP, "symbol": position.symbol, "position": position.ticket, "sl": float(sl),
+                   "tp": float(position.tp), "magic": position.magic}
         return self._send(request)
 
     def _send(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -193,7 +206,7 @@ class Mt5DemoTrader(Mt5DemoFeed):
             raise Mt5OrderUnknown(f"résultat de l'ordre inconnu : {mt5.last_error()}")
         partial = result.retcode == getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", RETCODE_PARTIAL)
         done = result.retcode == mt5.TRADE_RETCODE_DONE or partial
-        report = {"ok": done, "retcode": result.retcode, "partial": bool(partial and result.volume < request["volume"]),
+        report = {"ok": done, "retcode": result.retcode, "partial": bool(partial and result.volume < request.get("volume", 0.0)),
                   "comment": result.comment, "order": result.order, "deal": result.deal, "volume": result.volume,
                   "price": result.price, "latency_ms": latency_ms,
                   "requested_price": request.get("price"),

@@ -234,5 +234,12 @@ body.app .metric-card, body.app .panel { background: linear-gradient(145deg, #13
 .panel .empty-cell { padding: 14px 0; }
 @media (max-width: 1400px) { .board-grid { grid-template-columns: minmax(0, 1.8fr) minmax(0, 1fr); } .board-side { grid-column: 1 / -1; flex-direction: row; } .board-side > * { flex: 1; } .board-bottom { grid-template-columns: repeat(2, minmax(0, 1fr)); } .kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 1000px) { .app-shell { grid-template-columns: 1fr; } .sidebar { position: static; } .sidebar .tabs { flex-direction: row; flex-wrap: wrap; } .mode-card { display: none; } .board-grid, .board-bottom { grid-template-columns: 1fr; } .board-side { flex-direction: column; } .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.board-actions { margin-top: 14px; }
+.actions-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px; margin-bottom: 8px; }
+.order-form { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+.order-form label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--muted); }
+.order-form select, .order-form input { padding: 7px 9px; background: #0d1830; color: var(--text); border: 1px solid var(--line); border-radius: 7px; font: 12px var(--mono); }
+.position-actions { margin-top: 8px; }
+@media (max-width: 1000px) { .actions-grid { grid-template-columns: 1fr; } }
 .board-audit { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 14px; margin-top: 14px; }
 @media (max-width: 1000px) { .board-audit { grid-template-columns: 1fr; } }

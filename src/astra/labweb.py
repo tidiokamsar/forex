@@ -207,6 +207,18 @@ def register_lab_routes(app: Flask, *, database: Path, import_dir: Path, require
 
         return answer(produce)
 
+    @app.get("/api/mt5/requests")
+    @require(WebRole.READ_ONLY)
+    def mt5_requests() -> Response:
+        return answer(lambda: {"requests": mt5_view.requests()})
+
+    @app.get("/api/mt5/requests/pending")
+    @require(WebRole.READ_ONLY)
+    def mt5_requests_pending() -> Response:
+        if g.get("agent") is None:
+            return error(403, "forbidden")  # only the bridge takes requests
+        return answer(lambda: {"requests": mt5_view.pending_requests()})
+
     @app.get("/api/system/jobs")
     @require(WebRole.READ_ONLY)
     def system_jobs() -> Response:
@@ -295,6 +307,38 @@ def register_lab_routes(app: Flask, *, database: Path, import_dir: Path, require
                 return mt5_view.record_quotes(request.get_json(silent=True))
             except mt5view.Mt5ViewError as exc:
                 raise MarketDataError(str(exc)) from exc
+
+        return answer(produce)
+
+    @app.post("/api/mt5/requests")
+    @require(WebRole.OPERATOR)
+    def mt5_request_create() -> Response:
+        if g.get("agent") is not None:
+            return error(403, "forbidden")  # a request comes from a signed-in person, never from an agent token
+
+        def produce() -> dict[str, Any]:
+            try:
+                return {"request_id": mt5_view.create_request(request.get_json(silent=True), actor())}
+            except mt5view.Mt5ViewError as exc:
+                raise MarketDataError(str(exc)) from exc
+
+        return answer(produce, 202)
+
+    @app.post("/api/mt5/requests/<int:request_id>/result")
+    @require(WebRole.OPERATOR)
+    def mt5_request_result(request_id: int) -> Response:
+        if g.get("agent") is None:
+            return error(403, "forbidden")  # only the bridge reports what it did
+
+        def produce() -> dict[str, Any]:
+            payload = request.get_json(silent=True)
+            if not isinstance(payload, dict):
+                raise MarketDataError("corps JSON attendu")
+            try:
+                mt5_view.finish_request(request_id, payload.get("status"), payload.get("result"))
+            except mt5view.Mt5ViewError as exc:
+                raise MarketDataError(str(exc)) from exc
+            return {"ok": True}
 
         return answer(produce)
 

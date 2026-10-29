@@ -28,6 +28,10 @@ LOG = logging.getLogger("astra.worker")
 JOB_KINDS = ("import_csv", "ingest_ecb", "backtest", "learn")
 LEARN_INTERVAL = timedelta(hours=20)  # one learning run per pair and day at most
 ECB_INTERVAL = timedelta(hours=6)
+# The ECB publishes the day's reference rates in the afternoon (about 14:15 CET). From 14:00 UTC on a weekday, until the day's
+# candle is stored, the worker asks every 30 minutes instead of every 6 hours, so the strategies see the new bar quickly.
+ECB_WINDOW_INTERVAL = timedelta(minutes=30)
+ECB_WINDOW_FROM_HOUR = 14
 POLL_SECONDS = 5.0
 
 
@@ -232,8 +236,11 @@ class Worker:
         source = self.candles.source(marketdata.ECB_SOURCE) or {}
         now = self.clock()
         success, attempt = source.get("last_success_at"), source.get("last_attempt_at")
-        if success and now - datetime.fromisoformat(success) < ECB_INTERVAL:
-            return  # fresh enough: one request every 6 hours at most
+        waiting_for_today = (now.weekday() < 5 and now.hour >= ECB_WINDOW_FROM_HOUR
+                             and (source.get("last_data_ts") or "")[:10] < now.date().isoformat())
+        interval = ECB_WINDOW_INTERVAL if waiting_for_today else ECB_INTERVAL
+        if success and now - datetime.fromisoformat(success) < interval:
+            return  # fresh enough: one request every 6 hours, every 30 minutes while today's candle is awaited
         if source.get("next_allowed_at") and datetime.fromisoformat(source["next_allowed_at"]) > now:
             return  # back-off after failures (5 min, 10 min, ... up to 6 h)
         if attempt and now - datetime.fromisoformat(attempt) < timedelta(minutes=5):
