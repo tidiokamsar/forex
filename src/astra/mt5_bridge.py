@@ -43,6 +43,10 @@ FAST_CANDLES_SECONDS = 60   # M5 and M15: the last bars, every minute
 SLOW_CANDLES_SECONDS = 600  # H1, H4 and D1: the last bars, every ten minutes
 BACKFILL_BARS = {"M5": 1500, "M15": 1500, "H1": 1500, "H4": 1500, "D1": 300}
 CANDLES_PER_POST = 250  # about 35 KB of JSON
+HISTORY_DAYS_FIRST = 30
+HISTORY_DAYS_RECENT = 2
+HISTORY_SECONDS = 60
+ITEMS_PER_POST = 80  # keeps a history post well under the proxy's 64 KB body limit
 RECENT_BARS = {"M5": 12, "M15": 8, "H1": 8, "H4": 6, "D1": 4}
 
 
@@ -82,10 +86,14 @@ class Bridge:
         self.state.setdefault("mirrored", {})
         self.state.setdefault("last_refusal", {})
         self.targets: dict[str, dict[str, Any]] = {}
+        self.last_error: dict[str, str] | None = None
+        self.history_synced_at: str | None = None
         self._controls: tuple[datetime, bool | None, bool | None] | None = None
 
     def note(self, kind: str, **fields: Any) -> None:
         now = self.clock()
+        if kind in ("error", "publish_failed", "history_failed"):
+            self.last_error = {"at": now.isoformat(), "kind": kind, "reason": str(fields.get("reason", ""))[:160]}
         line = json.dumps({"ts": now.isoformat(), "kind": kind, **fields}, ensure_ascii=False, default=str)
         with (self.workdir / f"journal-{now.date().isoformat()}.jsonl").open("a", encoding="utf-8") as out:
             out.write(line + "\n")
@@ -248,7 +256,9 @@ class Bridge:
 
         state = self.account_state(account, objects)
         body = {"account": account, "positions": positions, "actions": actions, "risk": self.risk_panel(state),
-                "reconciliation": self.reconcile(objects)}
+                "reconciliation": self.reconcile(objects),
+                "bridge": {"last_error": self.last_error, "history_synced_at": self.history_synced_at,
+                           "stop_file": (self.workdir / "STOP").exists()}}
         try:
             self.client.post("/api/mt5/snapshot", body)
         except (ApiError, OSError) as exc:
@@ -265,6 +275,20 @@ class Bridge:
         positions = [asdict(p) for p in objects]
         self.publish(account, positions, [], objects)
         return {"quotes": len(quotes), "positions": len(positions)}
+
+    def sync_history(self, days: int) -> dict[str, int]:
+        """Send the broker's deal and order history. Idempotent on the server (keyed by the broker's tickets)."""
+
+        history = self.trader.history(days)
+        server = self.trader.account["server"]
+        sent = {"deals": 0, "orders": 0}
+        for kind in ("deals", "orders"):
+            items = history[kind]
+            for start in range(0, len(items), ITEMS_PER_POST):
+                self.client.post("/api/mt5/history", {"server": server, kind: items[start:start + ITEMS_PER_POST]})
+            sent[kind] = len(items)
+        self.history_synced_at = self.clock().isoformat()
+        return sent
 
     def push_candles(self, timeframes: tuple[str, ...], recent: bool) -> int:
         """Closed candles of every pair to the server (idempotent: stored bars are kept, new ones added)."""
@@ -291,7 +315,7 @@ class Bridge:
         """One connection to the terminal, kept open: the stream every few seconds, the trading cycle every
         ``cycle_seconds``, candles every minute (fast timeframes) and ten minutes (slow ones)."""
 
-        next_cycle = next_fast = next_slow = 0.0
+        next_cycle = next_fast = next_slow = next_history = 0.0
         first = True
         with self.trader:
             done = 0
@@ -300,11 +324,19 @@ class Bridge:
                 if first:
                     self.note("backfill", candles=self.push_candles(tuple(BACKFILL_BARS), recent=False))
                     first = False
+                    next_history = started  # the full history first, then only the recent days
                     next_fast, next_slow = started + FAST_CANDLES_SECONDS, started + SLOW_CANDLES_SECONDS
                 if started >= next_cycle:
                     summary = self.cycle()
                     print(json.dumps(summary, ensure_ascii=False, default=str), flush=True)
                     next_cycle = started + cycle_seconds
+                if started >= next_history:
+                    days = HISTORY_DAYS_FIRST if self.history_synced_at is None else HISTORY_DAYS_RECENT
+                    try:
+                        self.note("history", **self.sync_history(days))
+                    except (ApiError, OSError) as exc:
+                        self.note("history_failed", reason=str(exc)[:160])
+                    next_history = started + HISTORY_SECONDS
                 if started >= next_fast:
                     self.push_candles(("M5", "M15"), recent=True)
                     next_fast = started + FAST_CANDLES_SECONDS

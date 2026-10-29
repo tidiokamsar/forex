@@ -23,7 +23,7 @@ from __future__ import annotations
 import csv
 import io
 from collections.abc import Iterable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import ModuleType
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -143,6 +143,27 @@ class Mt5DemoFeed:
             stamp = self._utc(tick.time) if getattr(tick, "time", 0) else datetime.now(UTC).isoformat()
             out.append({"symbol": symbol, "bid": float(tick.bid), "ask": float(tick.ask), "time": stamp})
         return out
+
+    def history(self, days: int = 30) -> dict[str, list[dict[str, Any]]]:
+        """The broker's own deal and order history over the last ``days`` days (times in UTC). Nothing is invented:
+        an empty answer stays empty."""
+
+        mt5 = self.mt5
+        end = datetime.now(UTC).replace(tzinfo=None) + timedelta(days=1)
+        start = end - timedelta(days=days + 1)
+        deals = []
+        for d in mt5.history_deals_get(start, end) or ():
+            deals.append({"ticket": int(d.ticket), "order": int(d.order), "position_id": int(d.position_id),
+                          "ts": self._utc(d.time), "symbol": d.symbol or "", "type": int(d.type), "entry": int(d.entry),
+                          "volume": float(d.volume), "price": float(d.price), "commission": float(d.commission),
+                          "swap": float(d.swap), "fee": float(d.fee), "profit": float(d.profit), "magic": int(d.magic),
+                          "comment": str(d.comment or "")[:60], "reason": int(d.reason)})
+        orders = []
+        for o in mt5.history_orders_get(start, end) or ():
+            orders.append({"ticket": int(o.ticket), "position_id": int(o.position_id), "ts": self._utc(o.time_setup),
+                           "symbol": o.symbol or "", "type": int(o.type), "state": int(o.state),
+                           "volume": float(o.volume_initial), "magic": int(o.magic), "comment": str(o.comment or "")[:60]})
+        return {"deals": deals, "orders": orders}
 
     def candles(self, symbol: str, timeframe: str, count: int) -> list[Candle]:
         """The ``count`` most recent closed candles, timestamps in UTC (bar open time)."""

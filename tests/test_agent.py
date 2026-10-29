@@ -26,7 +26,7 @@ EXPECTED_AGENT_ENDPOINTS = {
              "sim_sessions", "sim_session", "learn_overview", "system_jobs", "mt5_overview", "market_chart",
              "dashboard_overview"},
     "lab": {"market_ingest", "lab_backtest_create", "sim_create", "sim_action"},
-    "mt5": {"mt5_snapshot", "mt5_quotes", "mt5_candles"},
+    "mt5": {"mt5_snapshot", "mt5_quotes", "mt5_candles", "mt5_history"},
 }
 
 
@@ -155,6 +155,31 @@ class Mt5FlowTests(AgentTokenCase):
         too_big = {**SNAPSHOT, "risk": {"blob": "x" * 20_000}}
         self.assertEqual(self.send(token, "/api/mt5/snapshot", too_big).status_code, 400)
         self.assertEqual(self.send(token, "/api/mt5/snapshot", {**SNAPSHOT, "risk": [1]}).status_code, 400)
+
+    def test_dashboard_overview_serves_one_backend_accounting_and_separate_freshness(self):
+        from test_mt5_accounting import ACCOUNT, DEALS, ORDERS, POSITIONS
+
+        token = self.issue(scopes=("read", "mt5"))
+        history = {"server": "MetaQuotes-Demo", "deals": DEALS, "orders": ORDERS}
+        self.assertEqual(self.send(token, "/api/mt5/history", history).status_code, 200)
+        snap = {"account": ACCOUNT, "positions": POSITIONS, "actions": [], "bridge": {"stop_file": True, "last_error": None}}
+        self.assertEqual(self.send(token, "/api/mt5/snapshot", snap).status_code, 200)
+        board = self.bearer(token, "/api/dashboard/overview").get_json()
+        acc = board["accounting"]
+        self.assertEqual((acc["net_result"], acc["floating_total"], acc["realized_net"], acc["net_deposits"]),
+                         (-144.39, -144.27, -0.12, 100000.0))
+        self.assertTrue(acc["consistent"])
+        self.assertEqual(acc["counts"]["orders"], 7)
+        self.assertEqual(len(board["mt5"]["recent_deals"]), 7)  # the balance deposit is not a trade
+        self.assertEqual({p["origin"]["astra"] for p in board["mt5"]["snapshot"]["positions"]}, {True})
+        self.assertEqual([line["key"] for line in board["freshness"]],
+                         ["quote", "candle", "strategy_candle", "strategy_eval", "signal", "attempt", "confirmed", "bridge", "history"])
+        bridge = next(line for line in board["freshness"] if line["key"] == "bridge")
+        self.assertIn("STOP", bridge["note"])
+        self.assertNotIn("baseline_equity", board["performance"])
+        for name, scopes in (("reader", ("read",)), ("labber", ("read", "lab"))):
+            other, _ = self.tokens.issue("cli:test", name, "owner", list(scopes))
+            self.assertEqual(self.send(other, "/api/mt5/history", history).status_code, 403)
 
     def test_bad_quotes_and_candles_are_refused(self):
         token = self.issue(scopes=("read", "mt5"))

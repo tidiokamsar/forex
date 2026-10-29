@@ -37,6 +37,12 @@ class Mt5Position:
     astra: bool
     price_current: float | None = None
     time_open: str | None = None
+    swap: float = 0.0
+    tp: float = 0.0
+    magic: int = 0
+    comment: str = ""
+    identifier: int = 0
+    reason: int = 0
 
 
 class Mt5DemoTrader(Mt5DemoFeed):
@@ -70,7 +76,10 @@ class Mt5DemoTrader(Mt5DemoFeed):
             result.append(Mt5Position(p.ticket, p.symbol, "LONG" if p.type == mt5.POSITION_TYPE_BUY else "SHORT",
                                       p.volume, p.price_open, p.sl, p.profit, p.magic == MAGIC,
                                       getattr(p, "price_current", None),
-                                      self._utc(opened) if opened else None))
+                                      self._utc(opened) if opened else None, float(getattr(p, "swap", 0.0) or 0.0),
+                                      float(getattr(p, "tp", 0.0) or 0.0), int(p.magic),
+                                      str(getattr(p, "comment", "") or "")[:40],
+                                      int(getattr(p, "identifier", p.ticket) or p.ticket), int(getattr(p, "reason", 0) or 0)))
         return result
 
     def _filling(self, symbol_info: Any) -> int:

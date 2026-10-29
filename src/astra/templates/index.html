@@ -50,9 +50,16 @@
         <section class="board-bottom">
           <article class="panel"><div class="panel-heading"><div><h2>Décisions des stratégies</h2></div></div><div id="board-signals"></div></article>
           <article class="panel"><div class="panel-heading"><div><h2 id="board-positions-title">Positions ouvertes</h2></div></div><div id="board-positions"></div></article>
-          <article class="panel table-panel"><div class="panel-heading"><div><h2>Historique des ordres</h2></div></div>
-            <div class="table-scroll"><table><thead><tr><th>Date UTC</th><th>Paire</th><th>Type</th><th>Sens</th><th>Lot</th><th>Résultat</th></tr></thead><tbody id="board-history"></tbody></table></div></article>
-          <article class="panel"><div class="panel-heading"><div><h2>Performance (DÉMO, 7 jours)</h2></div></div><div id="board-perf"></div></article>
+          <article class="panel table-panel"><div class="panel-heading"><div><h2>Transactions du courtier</h2></div></div>
+            <div class="table-scroll"><table><thead><tr><th>Date UTC</th><th>Paire</th><th>Type</th><th>Sens</th><th>Lot</th><th>Résultat net</th><th>Origine</th></tr></thead><tbody id="board-history"></tbody></table></div></article>
+          <article class="panel"><div class="panel-heading"><div><h2>Performance (DÉMO)</h2></div></div><div id="board-perf"></div></article>
+        </section>
+        <section class="board-audit">
+          <article class="panel"><div class="panel-heading"><div><h2>Comptabilité du compte</h2></div><span id="board-accounting-pill" class="pill">—</span></div>
+            <div id="board-accounting"></div>
+            <p class="footnote">Chaque chiffre vient du courtier (compte, positions, historique des transactions) ou de la série de fonds propres enregistrée. Survolez un libellé pour sa définition.</p></article>
+          <article class="panel"><div class="panel-heading"><div><h2>Fraîcheur des données et des décisions</h2></div></div><div id="board-fresh"></div>
+            <p class="footnote">Une cotation récente ne signifie pas que la stratégie a été réévaluée : chaque étape a son propre horodatage.</p></article>
         </section>
       </div>
 

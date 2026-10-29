@@ -17,9 +17,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from . import mt5accounting
+
 SERVERS = frozenset({"MetaQuotes-Demo"})  # same set as brokers.mt5_demo.ALLOWED_SERVERS (checked by a test)
 CANDLE_TIMEFRAMES = ("M5", "M15", "H1", "H4", "D1")
 MAX_CANDLES = 2000
+ASTRA_MAGIC = 20261028  # the magic number of ASTRA's orders (same value as brokers.mt5_demo_orders.MAGIC, tested)
+MAX_HISTORY_ITEMS = 120
 MAX_PANEL_BYTES = 16_000
 MAX_POSITIONS = 50
 MAX_ACTIONS = 50
@@ -41,11 +45,31 @@ CREATE TABLE IF NOT EXISTS mt5_quotes (
     symbol TEXT PRIMARY KEY, bid REAL NOT NULL, ask REAL NOT NULL, tick_time TEXT NOT NULL, received_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS mt5_equity (ts TEXT PRIMARY KEY, equity REAL NOT NULL, balance REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS mt5_meta (key TEXT PRIMARY KEY, value REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS mt5_deals (
+    ticket INTEGER PRIMARY KEY, order_ticket INTEGER NOT NULL, position_id INTEGER NOT NULL, ts TEXT NOT NULL,
+    symbol TEXT NOT NULL, type INTEGER NOT NULL, entry INTEGER NOT NULL, volume REAL NOT NULL, price REAL NOT NULL,
+    commission REAL NOT NULL, swap REAL NOT NULL, fee REAL NOT NULL, profit REAL NOT NULL, magic INTEGER NOT NULL,
+    comment TEXT NOT NULL, reason INTEGER NOT NULL, received_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS mt5_orders (
+    ticket INTEGER PRIMARY KEY, position_id INTEGER NOT NULL, ts TEXT NOT NULL, symbol TEXT NOT NULL, type INTEGER NOT NULL,
+    state INTEGER NOT NULL, volume REAL NOT NULL, magic INTEGER NOT NULL, comment TEXT NOT NULL, received_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS mt5_sync (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS mt5_deals_position ON mt5_deals(position_id);
 """
 
 
 class Mt5ViewError(ValueError):
     pass
+
+
+def _history_time(value: Any, limit: datetime) -> str:
+    try:
+        moment = datetime.fromisoformat(_text(value, "ts", 40))
+    except ValueError as exc:
+        raise Mt5ViewError("ts : date ISO attendue") from exc
+    if moment.tzinfo is None or moment > limit:
+        raise Mt5ViewError("ts : date UTC passée attendue")
+    return moment.astimezone(UTC).isoformat()
 
 
 def _mean(items: list[dict[str, Any]], field: str) -> float | None:
@@ -134,6 +158,11 @@ def validate(payload: Any) -> dict[str, Any]:
             raise Mt5ViewError("sens de position invalide")
         for field in ("volume", "price_open", "sl", "profit"):
             item[field] = _number(p.get(field), field)
+        for field in ("swap", "tp"):
+            item[field] = _number(p.get(field, 0.0), field)
+        for field in ("magic", "identifier", "reason"):
+            item[field] = int(_number(p.get(field, 0), field))
+        item["comment"] = str(p.get("comment") or "")[:40]
         item["price_current"] = _number(p["price_current"], "price_current") if p.get("price_current") is not None else None
         item["time_open"] = _text(p["time_open"], "time_open", 40) if p.get("time_open") else None
         clean_positions.append(item)
@@ -148,7 +177,7 @@ def validate(payload: Any) -> dict[str, Any]:
             item[field] = _number(a[field], field) if a.get(field) is not None else None
         clean_actions.append(item)
     result = {"account": clean_account, "positions": clean_positions, "actions": clean_actions}
-    for name in ("risk", "reconciliation"):
+    for name in ("risk", "reconciliation", "bridge"):
         value = payload.get(name)
         if value is not None:
             if not isinstance(value, dict) or len(json.dumps(value)) > MAX_PANEL_BYTES:
@@ -198,11 +227,9 @@ class Mt5View:
         return {"positions": len(snapshot["positions"]), "events": len(actions)}
 
     def _track_equity(self, db: sqlite3.Connection, now: str, equity: float, balance: float) -> None:
-        """Baseline (first equity seen), peak equity and one curve point per minute at most."""
+        """One equity point per minute at most. No baseline is kept: the starting capital comes from the broker's
+        deposit deals, the peak and the drawdown from this series (mt5accounting)."""
 
-        db.execute("INSERT OR IGNORE INTO mt5_meta(key, value) VALUES ('baseline_equity', ?)", (equity,))
-        db.execute("INSERT INTO mt5_meta(key, value) VALUES ('peak_equity', ?) ON CONFLICT(key) DO UPDATE SET "
-                   "value = MAX(value, excluded.value)", (equity,))
         last = db.execute("SELECT ts FROM mt5_equity ORDER BY ts DESC LIMIT 1").fetchone()
         gap = None if last is None else (datetime.fromisoformat(now) - datetime.fromisoformat(last["ts"])).total_seconds()
         if gap is None or gap >= EQUITY_EVERY_SECONDS:
@@ -243,37 +270,104 @@ class Mt5View:
                               "received_at": r["received_at"], "live": age(r) <= QUOTES_STALE_AFTER_SECONDS}
                 for r in rows}
 
+    # -- broker history ---------------------------------------------------------------------------------
+
+    def record_history(self, payload: Any) -> dict[str, int]:
+        """Deals and orders as the broker reports them, keyed by the broker's tickets (idempotent)."""
+
+        if not isinstance(payload, dict):
+            raise Mt5ViewError("corps JSON attendu")
+        source_name(payload.get("server") if isinstance(payload.get("server"), str) else "")  # allowed server only
+        deals, orders = payload.get("deals", []), payload.get("orders", [])
+        if not isinstance(deals, list) or not isinstance(orders, list) or len(deals) > MAX_HISTORY_ITEMS \
+                or len(orders) > MAX_HISTORY_ITEMS:
+            raise Mt5ViewError(f"deals et orders : listes de {MAX_HISTORY_ITEMS} éléments au plus")
+        limit = _now() + timedelta(minutes=5)
+        clean_deals, clean_orders = [], []
+        for d in deals:
+            if not isinstance(d, dict):
+                raise Mt5ViewError("transaction invalide")
+            clean_deals.append((int(_number(d.get("ticket"), "ticket")), int(_number(d.get("order"), "order")),
+                                int(_number(d.get("position_id"), "position_id")), _history_time(d.get("ts"), limit),
+                                str(d.get("symbol") or "")[:12], int(_number(d.get("type"), "type")),
+                                int(_number(d.get("entry"), "entry")), _number(d.get("volume"), "volume"),
+                                _number(d.get("price"), "price"), _number(d.get("commission"), "commission"),
+                                _number(d.get("swap"), "swap"), _number(d.get("fee"), "fee"), _number(d.get("profit"), "profit"),
+                                int(_number(d.get("magic"), "magic")), str(d.get("comment") or "")[:60],
+                                int(_number(d.get("reason"), "reason"))))
+        for o in orders:
+            if not isinstance(o, dict):
+                raise Mt5ViewError("ordre invalide")
+            clean_orders.append((int(_number(o.get("ticket"), "ticket")), int(_number(o.get("position_id"), "position_id")),
+                                 _history_time(o.get("ts"), limit), str(o.get("symbol") or "")[:12],
+                                 int(_number(o.get("type"), "type")), int(_number(o.get("state"), "state")),
+                                 _number(o.get("volume"), "volume"), int(_number(o.get("magic"), "magic")),
+                                 str(o.get("comment") or "")[:60]))
+        now = _now().isoformat()
+        with self._connect() as db:
+            for row in clean_deals:
+                db.execute("INSERT OR REPLACE INTO mt5_deals VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (*row, now))
+            for row in clean_orders:
+                db.execute("INSERT OR REPLACE INTO mt5_orders VALUES (?,?,?,?,?,?,?,?,?,?)", (*row, now))
+            db.execute("INSERT OR REPLACE INTO mt5_sync(key, value) VALUES ('history_synced_at', ?)", (now,))
+        return {"deals": len(clean_deals), "orders": len(clean_orders)}
+
+    def last_event_at(self, kinds: tuple[str, ...]) -> str | None:
+        marks = ",".join("?" for _ in kinds)
+        with self._connect() as db:
+            row = db.execute(f"SELECT MAX(ts) FROM mt5_events WHERE kind IN ({marks})", kinds).fetchone()
+        return row[0]
+
+    def deals(self) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute("SELECT * FROM mt5_deals ORDER BY ts, ticket").fetchall()
+        return [{"ticket": r["ticket"], "order": r["order_ticket"], "position_id": r["position_id"], "ts": r["ts"],
+                 "symbol": r["symbol"], "type": r["type"], "entry": r["entry"], "volume": r["volume"], "price": r["price"],
+                 "commission": r["commission"], "swap": r["swap"], "fee": r["fee"], "profit": r["profit"],
+                 "magic": r["magic"], "comment": r["comment"], "reason": r["reason"]} for r in rows]
+
+    def orders(self) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute("SELECT * FROM mt5_orders ORDER BY ts, ticket").fetchall()
+        return [{"ticket": r["ticket"], "position_id": r["position_id"], "ts": r["ts"], "symbol": r["symbol"],
+                 "type": r["type"], "state": r["state"], "volume": r["volume"], "magic": r["magic"],
+                 "comment": r["comment"]} for r in rows]
+
+    def sync_info(self) -> dict[str, str]:
+        with self._connect() as db:
+            return {r["key"]: r["value"] for r in db.execute("SELECT key, value FROM mt5_sync")}
+
+    def equity_series(self, since: str | None = None) -> list[tuple[str, float]]:
+        with self._connect() as db:
+            rows = db.execute("SELECT ts, equity FROM mt5_equity WHERE ts >= ? ORDER BY ts", (since or "",)).fetchall()
+        return [(r["ts"], r["equity"]) for r in rows]
+
+    def accounting(self, snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+        """The single set of figures of the dashboard (mt5accounting), on the stored snapshot and history."""
+
+        if snapshot is None:
+            with self._connect() as db:
+                row = db.execute("SELECT payload_json FROM mt5_snapshot WHERE id = 1").fetchone()
+            snapshot = json.loads(row["payload_json"]) if row else None
+        return mt5accounting.accounting(snapshot, self.deals(), self.orders(), self.equity_series(), _now(), ASTRA_MAGIC)
+
     def performance(self, days: int = 7, curve_points: int = 240) -> dict[str, Any]:
         """Figures behind the dashboard cards and the performance curve, from the snapshots and closed trades."""
 
         now = _now()
         since = (now - timedelta(days=days)).isoformat()
-        today = now.date().isoformat()
         with self._connect() as db:
-            meta = {r["key"]: r["value"] for r in db.execute("SELECT key, value FROM mt5_meta")}
             curve = db.execute("SELECT ts, equity FROM mt5_equity WHERE ts >= ? ORDER BY ts", (since,)).fetchall()
-            closes = [json.loads(r["detail_json"]) | {"ts": r["ts"]} for r in db.execute(
-                "SELECT ts, detail_json FROM mt5_events WHERE kind = 'close' AND ts >= ? ORDER BY id", (since,))]
             rows_open = db.execute("SELECT detail_json FROM mt5_events WHERE kind = 'open' AND ts >= ?", (since,)).fetchall()
             refused = db.execute("SELECT COUNT(*) FROM mt5_events WHERE kind = 'refused' AND ts >= ?", (since,)).fetchone()[0]
-        profits = [c["profit"] for c in closes if c.get("profit") is not None]
         opens = [json.loads(r["detail_json"]) for r in rows_open]
-        today_profits = [c["profit"] for c in closes if c["ts"].startswith(today) and c.get("profit") is not None]
-        wins, losses = [p for p in profits if p > 0], [p for p in profits if p < 0]
         stride = max(1, len(curve) // curve_points)
         points = [{"ts": r["ts"], "equity": r["equity"]} for r in curve[::stride]]
         if curve and (len(curve) - 1) % stride:
             points.append({"ts": curve[-1]["ts"], "equity": curve[-1]["equity"]})
-        peak, baseline = meta.get("peak_equity"), meta.get("baseline_equity")
-        return {"days": days, "baseline_equity": baseline, "peak_equity": peak, "curve": points,
-                "trades": len(profits), "wins": len(wins), "losses": len(losses),
-                "win_rate_pct": round(len(wins) / len(profits) * 100, 1) if profits else None,
-                "profit_factor": round(sum(wins) / -sum(losses), 2) if losses else None,
-                "net_closed": round(sum(profits), 2),
+        return {"days": days, "curve": points,
                 "execution": {"orders": len(opens), "refused": refused, "avg_slippage_pips": _mean(opens, "slippage_pips"),
-                              "avg_spread_pips": _mean(opens, "spread_pips"), "avg_latency_ms": _mean(opens, "latency_ms")},
-                "today": {"trades": len(today_profits), "wins": sum(1 for p in today_profits if p > 0),
-                          "losses": sum(1 for p in today_profits if p < 0)}}
+                              "avg_spread_pips": _mean(opens, "spread_pips"), "avg_latency_ms": _mean(opens, "latency_ms")}}
 
     def overview(self, event_limit: int = 100) -> dict[str, Any]:
         with self._connect() as db:
@@ -287,9 +381,14 @@ class Mt5View:
             return result
         snapshot = json.loads(row["payload_json"])
         age = (_now() - datetime.fromisoformat(row["received_at"])).total_seconds()
-        positions = snapshot["positions"]
+        deals = self.deals()
+        positions = [{**p, "origin": mt5accounting.origin(p, deals, ASTRA_MAGIC)} for p in snapshot["positions"]]
+        accounting = self.accounting({**snapshot, "positions": positions})
+        recent = [{**d, "net": round(d["profit"] + d["commission"] + d["swap"] + d["fee"], 2),
+                   "astra": d["magic"] == ASTRA_MAGIC and str(d["comment"]).startswith("ASTRA")}
+                  for d in reversed(deals) if d["type"] in (0, 1)][:25]
         result.update(connected=age <= STALE_AFTER_SECONDS, age_seconds=int(age), received_at=row["received_at"],
-                      actor=row["actor"],
-                      snapshot={**snapshot, "open_profit": round(sum(p["profit"] for p in positions), 2),
-                                "astra_positions": sum(1 for p in positions if p["astra"])})
+                      actor=row["actor"], accounting=accounting, sync=self.sync_info(), recent_deals=recent,
+                      snapshot={**snapshot, "positions": positions, "open_profit": accounting["floating_total"],
+                                "astra_positions": sum(1 for p in positions if p["origin"]["astra"])})
         return result

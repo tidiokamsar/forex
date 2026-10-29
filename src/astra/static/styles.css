@@ -234,3 +234,5 @@ body.app .metric-card, body.app .panel { background: linear-gradient(145deg, #13
 .panel .empty-cell { padding: 14px 0; }
 @media (max-width: 1400px) { .board-grid { grid-template-columns: minmax(0, 1.8fr) minmax(0, 1fr); } .board-side { grid-column: 1 / -1; flex-direction: row; } .board-side > * { flex: 1; } .board-bottom { grid-template-columns: repeat(2, minmax(0, 1fr)); } .kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 1000px) { .app-shell { grid-template-columns: 1fr; } .sidebar { position: static; } .sidebar .tabs { flex-direction: row; flex-wrap: wrap; } .mode-card { display: none; } .board-grid, .board-bottom { grid-template-columns: 1fr; } .board-side { flex-direction: column; } .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.board-audit { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 14px; margin-top: 14px; }
+@media (max-width: 1000px) { .board-audit { grid-template-columns: 1fr; } }

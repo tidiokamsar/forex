@@ -14,6 +14,10 @@ unset key
 echo "Enregistré dans /etc/astra/massive.key (root 0600)."
 echo "Test de ce que la clé permet (aucune donnée stockée) :"
 cd /opt/astra/app
+if ! grep -q "massive" /opt/astra/app/src/astra/cli.py 2>/dev/null; then
+  echo "La commande de test n'est pas encore installée sur ce serveur : la clé est enregistrée, le test viendra avec le prochain déploiement."
+  exit 0
+fi
 systemd-run --quiet --wait --pipe --collect -p User=astra -p LoadCredential=massive-key:/etc/astra/massive.key \
   -p EnvironmentFile=/etc/astra/web.env -p Environment=PYTHONPATH=/opt/astra/app/src -p WorkingDirectory=/opt/astra/app \
   /opt/astra/venv/bin/python -m astra massive check

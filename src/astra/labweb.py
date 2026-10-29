@@ -11,12 +11,13 @@ from __future__ import annotations
 import secrets
 import sqlite3
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from flask import Flask, Response, g, jsonify, request
 
-from . import indicators, learning, marketdata, mt5view
+from . import boardstats, indicators, learning, marketdata, mt5view
 from .auth import WebRole
 from .jobs import JobStore, worker_health
 from .marketdata import CandleStore, MarketDataError
@@ -163,26 +164,46 @@ def register_lab_routes(app: Flask, *, database: Path, import_dir: Path, require
     @require(WebRole.READ_ONLY)
     def dashboard_overview() -> Response:
         def produce() -> dict[str, Any]:
+            now = datetime.now(UTC)
             account = mt5_view.overview(event_limit=40)
             perf = mt5_view.performance()
             quotes = mt5_view.quotes()
             source = mt5view.source_name("MetaQuotes-Demo")
+            newest_h1 = [rows[-1].timestamp + timedelta(hours=1) for symbol in quotes
+                         if (rows := candles.candles(symbol, "H1", source, limit=1, newest=True))]
             for symbol, quote in quotes.items():
                 quote["change_24h_pct"] = None
                 rows = candles.candles(symbol, "H1", source, limit=25, newest=True)  # oldest first
                 if len(rows) >= 25 and rows[0].close:
                     quote["change_24h_pct"] = round((quote["bid"] / rows[0].close - 1) * 100, 3)
-            signals = []
+            signals, processed, evaluated, signal_times = [], [], [], []
             for pair in learning.overview(learn_store, lab)["pairs"]:
                 session = pair.get("session")
                 detail = lab.session(session["id"], item_limit=1) if session else None
                 last = detail["signals"][-1] if detail and detail.get("signals") else None
+                if detail:
+                    processed += list((detail.get("last_processed") or {}).values())
+                    evaluated.append(detail["updated_at"])
+                if last:
+                    signal_times.append(last["ts"])
                 family = pair["champion"]["params"]["strategy"].get("family", "sma_trend")
                 signals.append({"symbol": pair["symbol"], "family": family, "version": pair["champion"]["version"],
                                 "decision": last["decision"] if last else None, "reason": last["reason"] if last else None,
                                 "since": last["ts"] if last else None})
-            return {"mode": "SIMULATION", "live_locked": True, "mt5": account, "performance": perf, "quotes": quotes,
-                    "signals": signals}
+            snapshot = account.get("snapshot") or {}
+            accounting = account.get("accounting") or {}
+            fresh = boardstats.freshness(
+                now, quote_at=max((q["received_at"] for q in quotes.values()), default=None),
+                snapshot_at=account.get("received_at"), history_synced_at=(account.get("sync") or {}).get("history_synced_at"),
+                mt5_candle_at=max(newest_h1).isoformat() if newest_h1 else None,
+                strategy_candle_at=max(processed) if processed else None,
+                strategy_evaluated_at=max(evaluated) if evaluated else None,
+                last_signal_at=max(signal_times) if signal_times else None,
+                last_attempt_at=mt5_view.last_event_at(("open", "close", "refused")),
+                last_confirmed_at=(accounting.get("history") or {}).get("last_deal"),
+                worker_state=worker_health(jobs)["state"], stop_file=bool((snapshot.get("bridge") or {}).get("stop_file")))
+            return {"mode": "SIMULATION", "live_locked": True, "generated_at": now.isoformat(), "mt5": account,
+                    "accounting": accounting, "performance": perf, "quotes": quotes, "signals": signals, "freshness": fresh}
 
         return answer(produce)
 
@@ -272,6 +293,20 @@ def register_lab_routes(app: Flask, *, database: Path, import_dir: Path, require
         def produce() -> dict[str, Any]:
             try:
                 return mt5_view.record_quotes(request.get_json(silent=True))
+            except mt5view.Mt5ViewError as exc:
+                raise MarketDataError(str(exc)) from exc
+
+        return answer(produce)
+
+    @app.post("/api/mt5/history")
+    @require(WebRole.OPERATOR)
+    def mt5_history() -> Response:
+        if g.get("agent") is None:
+            return error(403, "forbidden")
+
+        def produce() -> dict[str, Any]:
+            try:
+                return mt5_view.record_history(request.get_json(silent=True))
             except mt5view.Mt5ViewError as exc:
                 raise MarketDataError(str(exc)) from exc
 

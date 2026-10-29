@@ -44,24 +44,28 @@ function card(label, value, small, toneClass) {
 }
 
 function renderKpis(d) {
+  const acc = d.accounting || {};
   const snap = d.mt5.snapshot;
-  const a = snap && snap.account;
-  const perf = d.performance;
-  const base = perf.baseline_equity;
-  const net = a && base != null ? a.equity - base : null;
-  const dd = a && perf.peak_equity ? Math.max(0, (perf.peak_equity - a.equity) / perf.peak_equity * 100) : null;
+  const ok = acc.available;
+  const net = ok ? acc.net_result : null;
+  const dd = ok && acc.drawdown ? acc.drawdown.current_pct : null;
   const anyLive = Object.values(d.quotes || {}).some((q) => q.live);
-  const system = !snap ? ["EN ATTENTE", "Le pont MT5 n'a encore rien envoyé"]
-    : d.mt5.connected ? (anyLive ? ["OPÉRATIONNEL", "Cotations en continu"] : ["PARTIEL", "Compte lu, cotations anciennes"])
-      : ["PONT SILENCIEUX", `Dernier message ${ago(d.mt5.received_at)}`];
+  let system;
+  if (!snap) system = ["EN ATTENTE", "Le pont MT5 n'a encore rien envoyé", "warn"];
+  else if (!d.mt5.connected) system = ["PONT SILENCIEUX", `Dernier message ${ago(d.mt5.received_at)}`, "warn"];
+  else if (!acc.consistent) system = ["ÉCART DE COMPTABILITÉ", "voir « Comptabilité du compte »", "loss"];
+  else if (snap.bridge && snap.bridge.stop_file) system = ["ORDRES SUSPENDUS", "fichier STOP présent : aucune ouverture ni fermeture", "warn"];
+  else system = anyLive ? ["OPÉRATIONNEL", "Cotations en continu, comptabilité cohérente", "gain"] : ["PARTIEL", "Compte lu, cotations anciennes", "warn"];
   $("board-kpis").replaceChildren(
-    card("Capital total (DÉMO)", a ? usdText(a.equity) : "—",
-      net == null ? "Aucun compte lu" : `${percent(net / base * 100)} (${signed(net)} USD)`, net == null ? "" : tone(net)),
-    card("Positions ouvertes", snap ? String(snap.positions.length) : "—", snap ? `${snap.astra_positions} ouvertes par ASTRA` : ""),
-    card("Résultat net (DÉMO)", net == null ? "—" : `${signed(net)} USD`, "depuis le début du suivi", net == null ? "" : tone(net)),
-    card("Drawdown actuel", dd == null ? "—" : `${dd.toFixed(2).replace(".", ",")} %`, "depuis le sommet des fonds propres"),
-    card("Trades aujourd’hui", String(perf.today.trades), `${perf.today.wins} gagnants / ${perf.today.losses} perdants`),
-    card("Statut système", system[0], system[1], system[0] === "OPÉRATIONNEL" ? "gain" : "warn"));
+    card("Fonds propres (DÉMO)", ok ? usdText(acc.equity) : "—", ok ? `balance ${usdText(acc.balance)} · latent ${signed(acc.floating_total)} USD` : "Aucun compte lu"),
+    card("Positions ouvertes", ok ? String(acc.counts.open_positions) : "—", snap ? `${snap.astra_positions} d’origine ASTRA confirmée` : ""),
+    card("Résultat net depuis le début", net == null ? "—" : `${signed(net)} USD`,
+      ok ? (net == null ? "dépôts du courtier inconnus" : `réalisé ${signed(acc.realized_net)} · latent ${signed(acc.floating_total)}`) : "", net == null ? "" : tone(net)),
+    card("Drawdown actuel", dd == null ? "—" : `${dd.toFixed(2).replace(".", ",")} %`,
+      ok && acc.drawdown && acc.drawdown.max_pct != null ? `maximum ${acc.drawdown.max_pct.toFixed(2).replace(".", ",")} % depuis le ${day(acc.drawdown.since)}` : "série d’equity trop courte"),
+    card("Clôturées aujourd’hui", ok && acc.counts.closed_today != null ? String(acc.counts.closed_today) : "—",
+      ok ? `${acc.counts.closed_trades == null ? "—" : acc.counts.closed_trades} clôturées · ${acc.counts.orders} ordres · ${acc.counts.executions} exécutions` : ""),
+    card("Statut système", system[0], system[1], system[2]));
 }
 
 function renderTicker(d) {
@@ -340,41 +344,86 @@ function renderPositions(d) {
     const head = el("div", null, "signal-head");
     head.append(chip(p.symbol), el("strong", pairLabel(p.symbol)),
       el("span", p.side === "LONG" ? "ACHAT" : "VENTE", `badge ${p.side === "LONG" ? "badge-buy" : "badge-sell"}`),
-      el("small", `${fmt.format(p.volume)} lot`), el("span", `${signed(p.profit)} USD`, `position-profit ${tone(p.profit)}`));
+      el("small", `${fmt.format(p.volume)} lot`), el("span", `${signed(p.profit + (p.swap || 0))} USD`, `position-profit ${tone(p.profit + (p.swap || 0))}`));
     const grid = el("div", null, "position-grid");
     for (const [k, v] of [["Prix d’entrée", price(p.symbol, p.price_open)], ["Prix actuel", price(p.symbol, p.price_current)],
-      ["Stop", price(p.symbol, p.sl)]]) { const cell = el("div"); cell.append(el("small", k), el("strong", v)); grid.append(cell); }
-    item.append(head, grid);
+      ["Stop", price(p.symbol, p.sl)], ["Profit", `${signed(p.profit)} USD`], ["Swap", `${signed(p.swap || 0)} USD`],
+      ["Billet", String(p.ticket)]]) { const cell = el("div"); cell.append(el("small", k), el("strong", v)); grid.append(cell); }
+    const proof = el("small", `${p.origin ? p.origin.label : "origine non confirmée"}${p.origin && p.origin.proof ? ` · ${p.origin.proof}` : ""}`, p.origin && p.origin.astra ? "risk-ok" : "risk-muted");
+    item.append(head, grid, proof);
     return item;
   }));
 }
 
 function renderHistory(d) {
-  const events = (d.mt5.events || []).slice(0, 12);
-  fill("board-history", events.map((e) => row([when(e.ts).slice(0, 16), e.symbol ? pairLabel(e.symbol) : "—",
-    { open: "ouverture", close: "fermeture", refused: "refusé" }[e.kind] || e.kind, e.side ? (e.side === "LONG" ? "Achat" : "Vente") : "—",
-    num(e.lots), e.profit == null ? "—" : el("span", signed(e.profit), tone(e.profit))])), "Aucun ordre pour l’instant.", 6);
+  const deals = (d.mt5.recent_deals || []).slice(0, 12);
+  fill("board-history", deals.map((x) => row([when(x.ts).slice(0, 16), pairLabel(x.symbol), x.entry === 0 ? "ouverture" : "fermeture",
+    x.type === 0 ? "Achat" : "Vente", num(x.volume), el("span", signed(x.net), tone(x.net)), x.astra ? "ASTRA" : "autre"])),
+  "Aucune transaction dans l’historique du courtier reçu.", 7);
 }
 
 function renderPerformance(d) {
+  const acc = d.accounting || {};
   const p = d.performance;
-  const a = d.mt5.snapshot && d.mt5.snapshot.account;
-  const net = a && p.baseline_equity != null ? a.equity - p.baseline_equity : null;
   const stats = el("div", null, "perf-stats");
   const cell = (k, v, t) => { const c = el("div"); c.append(el("small", k), el("strong", v, t || "")); return c; };
-  stats.append(cell("Gain total (DÉMO)", net == null ? "—" : `${signed(net)} USD`, net == null ? "" : tone(net)),
-    cell("Trades fermés", String(p.trades)), cell("Taux de réussite", p.win_rate_pct == null ? "—" : `${String(p.win_rate_pct).replace(".", ",")} %`),
-    cell("Facteur de profit", p.profit_factor == null ? "—" : String(p.profit_factor).replace(".", ",")));
+  const closed = acc.closed_stats || {};
+  stats.append(cell("Résultat net (depuis le début)", acc.net_result == null ? "—" : `${signed(acc.net_result)} USD`, acc.net_result == null ? "" : tone(acc.net_result)),
+    cell("Transactions clôturées", acc.counts && acc.counts.closed_trades != null ? String(acc.counts.closed_trades) : "—"),
+    cell("Taux de réussite", closed.win_rate_pct == null ? "—" : `${String(closed.win_rate_pct).replace(".", ",")} %`),
+    cell("Facteur de profit", closed.profit_factor == null ? "—" : String(closed.profit_factor).replace(".", ",")));
   const x = p.execution;
   const quality = el("p", null, "footnote");
   quality.textContent = x && x.orders
-    ? `Qualité d’exécution : ${x.orders} ordre(s), ${x.refused} refusé(s) par le portail · glissement moyen ${x.avg_slippage_pips == null ? "—" : x.avg_slippage_pips} pip · spread moyen ${x.avg_spread_pips == null ? "—" : x.avg_spread_pips} pip · latence moyenne ${x.avg_latency_ms == null ? "—" : x.avg_latency_ms} ms`
-    : "Qualité d’exécution : aucun ordre envoyé sur la période.";
+    ? `Qualité d’exécution (ordres envoyés depuis la mise en service du suivi) : ${x.orders} ordre(s), ${x.refused} refusé(s) par le portail · glissement moyen ${x.avg_slippage_pips == null ? "—" : x.avg_slippage_pips} pip · spread moyen ${x.avg_spread_pips == null ? "—" : x.avg_spread_pips} pip · latence moyenne ${x.avg_latency_ms == null ? "—" : x.avg_latency_ms} ms`
+    : "Qualité d’exécution : aucun ordre envoyé depuis la mise en service du suivi (les ordres plus anciens ne sont connus que par l’historique du courtier).";
   const chart = el("div", null, "chart");
   $("board-perf").replaceChildren(stats, chart, quality);
-  const points = (p.curve || []).map((x) => ({ x: Date.parse(x.ts), y: x.equity }));
+  const points = (p.curve || []).map((q) => ({ x: Date.parse(q.ts), y: q.equity }));
   if (points.length >= 2) lineChart(chart, points, "Fonds propres du compte démo MT5");
   else chart.append(el("p", "La courbe se construit au fil des minutes.", "empty-cell"));
+}
+
+function renderAccounting(d) {
+  const a = d.accounting || {};
+  const box = $("board-accounting");
+  if (!a.available) { box.replaceChildren(el("p", "Aucun instantané du compte reçu.", "empty-cell")); return; }
+  const def = a.definitions || {};
+  const line = (label, value, key) => { const dt = el("dt", label); if (def[key]) dt.title = def[key]; return [dt, el("dd", value)]; };
+  const usd2 = (v) => (v == null ? "inconnu" : `${signed(v)} USD`);
+  const kv = el("dl", null, "kv");
+  const rows = [
+    ["Balance", usdText(a.balance), "balance"], ["Fonds propres", usdText(a.equity), "equity"],
+    ["Profit latent (positions ouvertes)", usd2(a.floating_profit), "floating_profit"], ["Swaps latents", usd2(a.floating_swap), "floating_swap"],
+    ["Résultat latent total", usd2(a.floating_total), "floating_total"], ["Résultat réalisé (hors frais)", usd2(a.realized_gross), "realized_gross"],
+    ["Commissions, swaps et frais réalisés", usd2(a.realized_costs), "realized_costs"], ["Résultat réalisé net", usd2(a.realized_net), "realized_net"],
+    ["Dépôts nets", a.net_deposits == null ? "inconnu" : usdText(a.net_deposits), "net_deposits"], ["Résultat net depuis le début", usd2(a.net_result), "net_result"],
+    ["Marge utilisée · libre", `${usdText(a.margin)} · ${usdText(a.margin_free)}`, "equity"],
+    ["Ordres", a.counts.orders, "orders"], ["Exécutions", a.counts.executions, "executions"],
+    ["Transactions clôturées", a.counts.closed_trades == null ? "inconnu" : a.counts.closed_trades, "closed_trades"],
+    ["Positions ouvertes", a.counts.open_positions, "open_positions"], ["Clôturées aujourd’hui", a.counts.closed_today == null ? "inconnu" : a.counts.closed_today, "closed_today"],
+  ];
+  for (const [label, value, key] of rows) kv.append(...line(label, String(value), key));
+  const checks = el("div", null, "risk-list");
+  for (const c of a.checks || []) checks.append(el("small", `${c.ok ? "OK" : "ÉCART"} · ${c.name.replaceAll("_", " ")} : ${c.detail}`, c.ok ? "risk-ok" : "risk-ko"));
+  for (const m of a.missing || []) checks.append(el("small", `DONNÉE MANQUANTE · ${m}`, "risk-ko"));
+  box.replaceChildren(kv, checks);
+  $("board-accounting-pill").textContent = a.consistent ? "Rapprochée" : "Écart";
+  $("board-accounting-pill").className = `pill ${a.consistent ? "pill-ok" : "pill-off"}`;
+}
+
+function renderFreshness(d) {
+  const lines = d.freshness || [];
+  const box = $("board-fresh");
+  const items = lines.map((l) => {
+    const item = el("div", null, "account-item");
+    const head = el("div", null, "account-head");
+    const kind = l.state === "ok" ? "ok" : l.state === "retard" ? "off" : "";
+    head.append(el("strong", l.label), el("span", l.state === "ok" ? "à jour" : l.state === "retard" ? "en retard" : l.state === "info" ? "info" : "inconnu", `pill ${kind ? `pill-${kind}` : ""}`));
+    item.append(head, el("small", `${l.at ? `${when(l.at)} UTC (${ago(l.at)})` : "jamais"} · ${l.note}`));
+    return item;
+  });
+  box.replaceChildren(...items);
 }
 
 function renderBoard() {
@@ -386,6 +435,8 @@ function renderBoard() {
   renderDecision(d);
   renderSignals(d);
   renderRisk(d);
+  renderAccounting(d);
+  renderFreshness(d);
   renderPositions(d);
   renderHistory(d);
   renderPerformance(d);
