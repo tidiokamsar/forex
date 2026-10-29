@@ -44,6 +44,6 @@ Statuts : `RÉUSSI`, `ÉCHEC`, `BLOQUÉ`, `NON TESTÉ`. Un test non exécuté n'
 | Doublon d'ordre empêché | RÉUSSI | état `mirrored` et test « pas de réouverture après un stop » |
 | Timeout puis rapprochement avant renvoi | NON TESTÉ | à compléter (tranche 6) |
 | Fills partiels, rejets, annulations | NON TESTÉ | à compléter (tranche 6) |
-| Arrêt d'urgence bloque les nouvelles entrées | RÉUSSI en test, NON TESTÉ en production | `test_mt5_bridge` ; essai réel à faire après déploiement |
+| Arrêt d'urgence bloque les nouvelles entrées | RÉUSSI | essai réel du 2026-10-29 06:31 UTC, autorisé par l'utilisateur : arrêt d'urgence activé, fichier STOP retiré, 1 cycle complet du pont exécuté, 0 ordre envoyé, panneau « Entrées bloquées » ; STOP remis ensuite ; aucune entrée en attente pendant l'essai, donc le refus d'une entrée précise reste couvert par les tests |
 | Sauvegarde et restauration | NON TESTÉ | sauvegarde quotidienne active ; restauration à tester sur une copie |
 | Responsive de la page | NON TESTÉ sur mobile | contrôle visuel desktop fait |
