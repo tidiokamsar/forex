@@ -148,7 +148,7 @@ def register_lab_routes(app: Flask, *, database: Path, import_dir: Path, require
                 limit = max(10, min(600, int(request.args.get("limit", "200") or 200)))
             except ValueError as exc:
                 raise MarketDataError("limit doit être un nombre") from exc
-            rows = list(reversed(candles.candles(symbol, timeframe, source, limit=limit + 120, newest=True)))
+            rows = candles.candles(symbol, timeframe, source, limit=limit + 120, newest=True)  # oldest first
             series = indicators.bundle([c.close for c in rows])
             keep = slice(max(0, len(rows) - limit), None)
             return {"symbol": symbol, "timeframe": timeframe, "source": source,
@@ -169,9 +169,9 @@ def register_lab_routes(app: Flask, *, database: Path, import_dir: Path, require
             source = mt5view.source_name("MetaQuotes-Demo")
             for symbol, quote in quotes.items():
                 quote["change_24h_pct"] = None
-                rows = candles.candles(symbol, "H1", source, limit=25, newest=True)
-                if len(rows) >= 25 and rows[-1].close:
-                    quote["change_24h_pct"] = round((quote["bid"] / rows[-1].close - 1) * 100, 3)
+                rows = candles.candles(symbol, "H1", source, limit=25, newest=True)  # oldest first
+                if len(rows) >= 25 and rows[0].close:
+                    quote["change_24h_pct"] = round((quote["bid"] / rows[0].close - 1) * 100, 3)
             signals = []
             for pair in learning.overview(learn_store, lab)["pairs"]:
                 session = pair.get("session")

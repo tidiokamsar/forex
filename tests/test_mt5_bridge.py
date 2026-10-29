@@ -173,6 +173,14 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(body["server"], "MetaQuotes-Demo")
         self.assertEqual(body["candles"][0]["ts"], "2025-12-15T08:00:00+00:00")
 
+    def test_a_large_backfill_is_sent_in_small_batches(self):
+        self.fake.rates = [{**self.fake.rates[0], "time": self.fake.rates[0]["time"] + 3600 * i} for i in range(600)]
+        with self.bridge.trader:
+            self.bridge.push_candles(("H1",), recent=False)
+        sizes = [len(b["candles"]) for p, b in self.server.posts if p == "/api/mt5/candles" and b["symbol"] == "EURUSD"]
+        self.assertEqual(sizes, [250, 250, 100])
+        self.assertTrue(all(len(json.dumps(b)) < 60_000 for p, b in self.server.posts))
+
     def test_flow_keeps_one_connection_and_trades_only_when_the_cycle_is_due(self):
         clock = {"t": 0.0}
         self.bridge.flow(300, lambda: clock["t"], lambda s: clock.update(t=clock["t"] + 5), rounds=3)

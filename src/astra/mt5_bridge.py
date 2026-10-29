@@ -42,6 +42,7 @@ STREAM_SECONDS = 5          # quotes, balance and open positions reach the dashb
 FAST_CANDLES_SECONDS = 60   # M5 and M15: the last bars, every minute
 SLOW_CANDLES_SECONDS = 600  # H1, H4 and D1: the last bars, every ten minutes
 BACKFILL_BARS = {"M5": 1500, "M15": 1500, "H1": 1500, "H4": 1500, "D1": 300}
+CANDLES_PER_POST = 250  # about 35 KB of JSON
 RECENT_BARS = {"M5": 12, "M15": 8, "H1": 8, "H4": 6, "D1": 4}
 
 
@@ -181,10 +182,12 @@ class Bridge:
                 bars = self.trader.candles(symbol, timeframe, count)
                 if not bars:
                     continue
-                self.client.post("/api/mt5/candles", {
-                    "server": server, "symbol": symbol, "timeframe": timeframe,
-                    "candles": [{"ts": c.timestamp.isoformat(), "open": c.open, "high": c.high, "low": c.low,
-                                 "close": c.close, "volume": c.volume} for c in bars]})
+                # The proxy refuses bodies above 64 KB on API routes: send small batches.
+                for start in range(0, len(bars), CANDLES_PER_POST):
+                    self.client.post("/api/mt5/candles", {
+                        "server": server, "symbol": symbol, "timeframe": timeframe,
+                        "candles": [{"ts": c.timestamp.isoformat(), "open": c.open, "high": c.high, "low": c.low,
+                                     "close": c.close, "volume": c.volume} for c in bars[start:start + CANDLES_PER_POST]]})
                 sent += len(bars)
         return sent
 

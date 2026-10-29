@@ -7,7 +7,7 @@ kill switch, route allowlist, halting on a refused token). Offline: Flask test c
 
 import json
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from _support import workspace_tempdir
@@ -114,6 +114,24 @@ class Mt5FlowTests(AgentTokenCase):
         self.assertEqual(board["quotes"]["EURUSD"]["bid"], 1.1)
         self.assertTrue(board["quotes"]["EURUSD"]["live"])
         self.assertEqual(len(board["signals"]), 7)
+
+    def test_chart_is_oldest_first_with_indicators_on_the_right_end_and_a_correct_24h_change(self):
+        token = self.issue(scopes=("read", "mt5"))
+        start = datetime(2026, 10, 1, tzinfo=UTC)
+        bars = [{"ts": (start + timedelta(hours=i)).isoformat(), "open": 1.1 + 0.001 * i, "high": 1.1015 + 0.001 * i,
+                 "low": 1.0995 + 0.001 * i, "close": 1.1005 + 0.001 * i, "volume": 1} for i in range(300)]
+        self.assertEqual(self.send(token, "/api/mt5/candles", {**CANDLES, "candles": bars}).status_code, 200)
+        chart = self.bearer(token, "/api/market/chart?symbol=EURUSD&timeframe=H1&source=MT5_METAQUOTES_DEMO&limit=50").get_json()
+        stamps = [c["ts"] for c in chart["candles"]]
+        self.assertEqual(stamps, sorted(stamps))
+        self.assertEqual(stamps[-1], bars[-1]["ts"])  # the newest bar is the last one
+        self.assertEqual(chart["indicators"]["rsi14"][-1], 100.0)  # a series that only rises
+        self.assertGreater(chart["indicators"]["sma20"][-1], chart["indicators"]["sma50"][-1])  # fast above slow
+        quotes = {"quotes": [{"symbol": "EURUSD", "bid": 1.5, "ask": 1.50002, "time": "2026-10-13T12:00:00+00:00"}]}
+        self.send(token, "/api/mt5/quotes", quotes)
+        change = self.bearer(token, "/api/dashboard/overview").get_json()["quotes"]["EURUSD"]["change_24h_pct"]
+        expected = round((1.5 / bars[-25]["close"] - 1) * 100, 3)  # 24 bars before the newest one
+        self.assertEqual(change, expected)
 
     def test_bad_quotes_and_candles_are_refused(self):
         token = self.issue(scopes=("read", "mt5"))
