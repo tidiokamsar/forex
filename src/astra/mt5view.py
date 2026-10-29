@@ -20,6 +20,7 @@ from typing import Any
 SERVERS = frozenset({"MetaQuotes-Demo"})  # same set as brokers.mt5_demo.ALLOWED_SERVERS (checked by a test)
 CANDLE_TIMEFRAMES = ("M5", "M15", "H1", "H4", "D1")
 MAX_CANDLES = 2000
+MAX_PANEL_BYTES = 16_000
 MAX_POSITIONS = 50
 MAX_ACTIONS = 50
 MAX_EVENTS_KEPT = 500
@@ -45,6 +46,11 @@ CREATE TABLE IF NOT EXISTS mt5_meta (key TEXT PRIMARY KEY, value REAL NOT NULL);
 
 class Mt5ViewError(ValueError):
     pass
+
+
+def _mean(items: list[dict[str, Any]], field: str) -> float | None:
+    values = [i[field] for i in items if i.get(field) is not None]
+    return round(sum(values) / len(values), 2) if values else None
 
 
 def source_name(server: str) -> str:
@@ -135,14 +141,20 @@ def validate(payload: Any) -> dict[str, Any]:
     for a in actions:
         if not isinstance(a, dict):
             raise Mt5ViewError("action invalide")
-        clean_actions.append({"kind": _text(a.get("kind"), "kind", 30), "symbol": _text(a.get("symbol"), "symbole", 12),
-                              "side": a.get("side") if a.get("side") in ("LONG", "SHORT") else None,
-                              "lots": _number(a["lots"], "lots") if a.get("lots") is not None else None,
-                              "price": _number(a["price"], "price") if a.get("price") is not None else None,
-                              "sl": _number(a["sl"], "sl") if a.get("sl") is not None else None,
-                              "profit": _number(a["profit"], "profit") if a.get("profit") is not None else None,
-                              "reason": _text(a["reason"], "motif", 200) if a.get("reason") else None})
-    return {"account": clean_account, "positions": clean_positions, "actions": clean_actions}
+        item = {"kind": _text(a.get("kind"), "kind", 30), "symbol": _text(a.get("symbol"), "symbole", 12),
+                "side": a.get("side") if a.get("side") in ("LONG", "SHORT") else None,
+                "reason": _text(a["reason"], "motif", 200) if a.get("reason") else None}
+        for field in ("lots", "price", "sl", "profit", "requested_price", "spread_pips", "slippage_pips", "latency_ms"):
+            item[field] = _number(a[field], field) if a.get(field) is not None else None
+        clean_actions.append(item)
+    result = {"account": clean_account, "positions": clean_positions, "actions": clean_actions}
+    for name in ("risk", "reconciliation"):
+        value = payload.get(name)
+        if value is not None:
+            if not isinstance(value, dict) or len(json.dumps(value)) > MAX_PANEL_BYTES:
+                raise Mt5ViewError(f"{name} : objet de moins de 16 Ko attendu")
+            result[name] = value
+    return result
 
 
 class Mt5View:
@@ -242,7 +254,10 @@ class Mt5View:
             curve = db.execute("SELECT ts, equity FROM mt5_equity WHERE ts >= ? ORDER BY ts", (since,)).fetchall()
             closes = [json.loads(r["detail_json"]) | {"ts": r["ts"]} for r in db.execute(
                 "SELECT ts, detail_json FROM mt5_events WHERE kind = 'close' AND ts >= ? ORDER BY id", (since,))]
+            rows_open = db.execute("SELECT detail_json FROM mt5_events WHERE kind = 'open' AND ts >= ?", (since,)).fetchall()
+            refused = db.execute("SELECT COUNT(*) FROM mt5_events WHERE kind = 'refused' AND ts >= ?", (since,)).fetchone()[0]
         profits = [c["profit"] for c in closes if c.get("profit") is not None]
+        opens = [json.loads(r["detail_json"]) for r in rows_open]
         today_profits = [c["profit"] for c in closes if c["ts"].startswith(today) and c.get("profit") is not None]
         wins, losses = [p for p in profits if p > 0], [p for p in profits if p < 0]
         stride = max(1, len(curve) // curve_points)
@@ -255,6 +270,8 @@ class Mt5View:
                 "win_rate_pct": round(len(wins) / len(profits) * 100, 1) if profits else None,
                 "profit_factor": round(sum(wins) / -sum(losses), 2) if losses else None,
                 "net_closed": round(sum(profits), 2),
+                "execution": {"orders": len(opens), "refused": refused, "avg_slippage_pips": _mean(opens, "slippage_pips"),
+                              "avg_spread_pips": _mean(opens, "spread_pips"), "avg_latency_ms": _mean(opens, "latency_ms")},
                 "today": {"trades": len(today_profits), "wins": sum(1 for p in today_profits if p > 0),
                           "losses": sum(1 for p in today_profits if p < 0)}}
 

@@ -223,6 +223,11 @@ body.app .metric-card, body.app .panel { background: linear-gradient(145deg, #13
 .position-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 6px; }
 .position-grid small { display: block; color: var(--muted); font-size: 10px; }
 .position-grid strong { font: 12px var(--mono); }
+.risk-list { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; }
+.risk-list small { font: 11px var(--mono); line-height: 1.4; }
+.risk-ok { color: #6fe3a1; }
+.risk-ko { color: #f58a82; }
+.risk-muted { color: var(--muted); }
 .perf-stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 8px; }
 .perf-stats small { display: block; color: var(--muted); font-size: 11px; }
 .perf-stats strong { font: 700 17px var(--mono); }

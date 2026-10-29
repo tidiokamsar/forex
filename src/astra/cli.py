@@ -91,6 +91,13 @@ def build_parser() -> argparse.ArgumentParser:
     agent_actions = agent_cmd.add_subparsers(dest="agent_action", required=True)
     agent_actions.add_parser("run", help="Boucle continue (ASTRA_AGENT_URL, ASTRA_AGENT_TOKEN_FILE)")
     agent_actions.add_parser("once", help="Un seul cycle, puis sortie")
+    massive_cmd = commands.add_parser("massive", help="Données Massive : tester l'accès de la clé, importer des bougies")
+    massive_actions = massive_cmd.add_subparsers(dest="massive_action", required=True)
+    massive_actions.add_parser("check", help="Dire ce que la clé permet réellement (aucune donnée stockée)")
+    massive_ingest = massive_actions.add_parser("ingest", help="Importer des bougies fermées dans la base ASTRA")
+    massive_ingest.add_argument("--timeframe", default="H1", choices=("M5", "M15", "H1", "H4", "D1"))
+    massive_ingest.add_argument("--days", type=int, default=30)
+    massive_ingest.add_argument("--symbol", default="all")
     mt5_cmd = commands.add_parser("mt5", help="Compte DEMO MetaTrader 5 en lecture (Windows, terminal MT5 connecté)")
     mt5_actions = mt5_cmd.add_subparsers(dest="mt5_action", required=True)
     mt5_actions.add_parser("check", help="Vérifier le compte DEMO du terminal (aucun ordre, aucun mot de passe)")
@@ -363,6 +370,32 @@ def _demo_command(args: argparse.Namespace, config: AppConfig) -> int:
     return 0
 
 
+def _massive(args: argparse.Namespace, config: AppConfig) -> int:
+    from datetime import timedelta
+
+    from . import massive
+    from .marketdata import PAIRS, CandleStore
+
+    try:
+        client = massive.MassiveClient(massive.load_key())
+        if args.massive_action == "check":
+            _write_json(massive.check(client))
+            return 0
+        if not 1 <= args.days <= 800:
+            raise massive.MassiveError("--days entre 1 et 800")
+        store = CandleStore(config.database_path)
+        store.initialize()
+        symbols = list(PAIRS) if args.symbol == "all" else [args.symbol.upper()]
+        end = datetime.now(UTC).date()
+        reports = [massive.ingest(store, client, s, args.timeframe, end - timedelta(days=args.days), end, actor="cli:massive")
+                   for s in symbols]
+        _write_json({"provider": "Massive", "reports": reports})
+        return 0 if all(r["status"] == "OK" for r in reports) else 1
+    except massive.MassiveError as exc:
+        _write_json({"status": "error", "reason": str(exc)})
+        return 2
+
+
 def _mt5(args: argparse.Namespace) -> int:
     from .brokers import mt5_demo
 
@@ -466,6 +499,9 @@ def _run(args: argparse.Namespace) -> int:
 
         if args.command == "mt5":
             return _mt5(args)
+
+        if args.command == "massive":
+            return _massive(args, config)
 
         if args.command == "ctrader-check":
             _write_json(ctrader_check(args.operator, config))

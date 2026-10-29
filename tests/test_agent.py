@@ -133,6 +133,29 @@ class Mt5FlowTests(AgentTokenCase):
         expected = round((1.5 / bars[-25]["close"] - 1) * 100, 3)  # 24 bars before the newest one
         self.assertEqual(change, expected)
 
+    def test_risk_panel_reconciliation_and_execution_quality_reach_the_dashboard(self):
+        token = self.issue(scopes=("read", "mt5"))
+        risk = {"entries_allowed": False, "checks": [{"name": "arret_d_urgence", "passed": False, "detail": "actif"}],
+                "limits": {"max_positions": 7}, "daily_loss_pct": 0.4, "drawdown_pct": 0.2}
+        recon = {"checked_at": "2026-10-29T09:00:00+00:00", "ok": False,
+                 "divergences": [{"level": "alerte", "symbol": "EURUSD", "code": "position_sans_stop", "detail": "x"}]}
+        actions = [{"kind": "open", "symbol": "EURUSD", "side": "LONG", "lots": 0.5, "price": 1.1, "slippage_pips": 0.4,
+                    "spread_pips": 0.2, "latency_ms": 120, "requested_price": 1.0999},
+                   {"kind": "open", "symbol": "GBPUSD", "side": "SHORT", "lots": 0.5, "price": 1.3, "slippage_pips": 0.2,
+                    "spread_pips": 0.4, "latency_ms": 80, "requested_price": 1.3},
+                   {"kind": "refused", "symbol": "USDJPY", "side": "LONG", "reason": "arret_d_urgence : actif"}]
+        body = {**SNAPSHOT, "risk": risk, "reconciliation": recon, "actions": actions}
+        self.assertEqual(self.send(token, "/api/mt5/snapshot", body).status_code, 200)
+        board = self.bearer(token, "/api/dashboard/overview").get_json()
+        self.assertFalse(board["mt5"]["snapshot"]["risk"]["entries_allowed"])
+        self.assertEqual(board["mt5"]["snapshot"]["reconciliation"]["divergences"][0]["code"], "position_sans_stop")
+        execution = board["performance"]["execution"]
+        self.assertEqual((execution["orders"], execution["refused"], execution["avg_slippage_pips"],
+                          execution["avg_spread_pips"], execution["avg_latency_ms"]), (2, 1, 0.3, 0.3, 100.0))
+        too_big = {**SNAPSHOT, "risk": {"blob": "x" * 20_000}}
+        self.assertEqual(self.send(token, "/api/mt5/snapshot", too_big).status_code, 400)
+        self.assertEqual(self.send(token, "/api/mt5/snapshot", {**SNAPSHOT, "risk": [1]}).status_code, 400)
+
     def test_bad_quotes_and_candles_are_refused(self):
         token = self.issue(scopes=("read", "mt5"))
         bad_quote = {"quotes": [{"symbol": "EURUSD", "bid": 1.2, "ask": 1.1, "time": "x"}]}

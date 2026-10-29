@@ -275,6 +275,52 @@ function renderAccounts(d, demo) {
   $("board-flow-pill").className = `pill ${live ? "pill-ok" : "pill-off"}`;
 }
 
+function renderRisk(d) {
+  const snap = d.mt5.snapshot;
+  const risk = snap && snap.risk;
+  const box = $("board-risk");
+  const pill = $("board-risk-pill");
+  if (!risk) {
+    box.replaceChildren(el("p", "Le pont n’a pas encore publié l’état du portail de risque.", "empty-cell"));
+    pill.textContent = "—";
+    pill.className = "pill";
+    return;
+  }
+  pill.textContent = risk.entries_allowed ? "Entrées autorisées" : "Entrées bloquées";
+  pill.className = `pill ${risk.entries_allowed ? "pill-ok" : "pill-off"}`;
+  const lim = risk.limits;
+  const kv = el("dl", null, "kv");
+  const rows = [
+    ["Perte du jour", risk.daily_loss_pct == null ? "—" : `${risk.daily_loss_pct.toFixed(2).replace(".", ",")} % (limite ${lim ? lim.daily_loss_limit_pct : "—"} %)`],
+    ["Drawdown", risk.drawdown_pct == null ? "—" : `${risk.drawdown_pct.toFixed(2).replace(".", ",")} % (limite ${lim ? lim.max_drawdown_pct : "—"} %)`],
+    ["Risque par ordre", lim ? `${lim.risk_per_trade_pct} % des fonds propres` : "profil invalide"],
+    ["Positions ASTRA", lim ? `${snap.astra_positions} sur ${lim.max_positions} au maximum` : "—"],
+  ];
+  for (const [k, v] of rows) kv.append(el("dt", k), el("dd", v));
+  const parts = [kv];
+  const refused = (risk.checks || []).filter((c) => !c.passed);
+  const checks = el("div", null, "risk-list");
+  if (refused.length) for (const c of refused) checks.append(el("small", `REFUS · ${c.name.replaceAll("_", " ")} : ${c.detail}`, "risk-ko"));
+  else checks.append(el("small", `${(risk.checks || []).length} contrôles passés : compte démo, fraîcheur, arrêt d’urgence, pertes, positions`, "risk-ok"));
+  parts.push(checks);
+  const rec = snap.reconciliation;
+  const recBox = el("div", null, "risk-list");
+  if (rec) {
+    const alerts = rec.divergences.filter((x) => x.level === "alerte");
+    recBox.append(el("small", alerts.length ? `Rapprochement MT5 : ${alerts.length} écart(s)` : "Rapprochement MT5 : positions conformes aux décisions", alerts.length ? "risk-ko" : "risk-ok"));
+    for (const x of rec.divergences.slice(0, 4)) recBox.append(el("small", `${x.level === "alerte" ? "ALERTE" : "info"} · ${pairLabel(x.symbol)} : ${x.detail}`, x.level === "alerte" ? "risk-ko" : "risk-muted"));
+  }
+  parts.push(recBox);
+  const lastRefusals = (d.mt5.events || []).filter((e) => e.kind === "refused").slice(0, 3);
+  if (lastRefusals.length) {
+    const log = el("div", null, "risk-list");
+    log.append(el("small", "Derniers ordres refusés :", "risk-muted"));
+    for (const e of lastRefusals) log.append(el("small", `${when(e.ts).slice(0, 16)} · ${pairLabel(e.symbol)} : ${e.reason}`, "risk-ko"));
+    parts.push(log);
+  }
+  box.replaceChildren(...parts);
+}
+
 function renderSignals(d) {
   $("board-signals").replaceChildren(...(d.signals || []).map((s) => {
     const item = el("div", null, "signal-item");
@@ -305,8 +351,8 @@ function renderPositions(d) {
 
 function renderHistory(d) {
   const events = (d.mt5.events || []).slice(0, 12);
-  fill("board-history", events.map((e) => row([when(e.ts).slice(0, 17), e.symbol ? pairLabel(e.symbol) : "—",
-    e.kind === "open" ? "ouverture" : e.kind === "close" ? "fermeture" : e.kind, e.side ? (e.side === "LONG" ? "Achat" : "Vente") : "—",
+  fill("board-history", events.map((e) => row([when(e.ts).slice(0, 16), e.symbol ? pairLabel(e.symbol) : "—",
+    { open: "ouverture", close: "fermeture", refused: "refusé" }[e.kind] || e.kind, e.side ? (e.side === "LONG" ? "Achat" : "Vente") : "—",
     num(e.lots), e.profit == null ? "—" : el("span", signed(e.profit), tone(e.profit))])), "Aucun ordre pour l’instant.", 6);
 }
 
@@ -319,8 +365,13 @@ function renderPerformance(d) {
   stats.append(cell("Gain total (DÉMO)", net == null ? "—" : `${signed(net)} USD`, net == null ? "" : tone(net)),
     cell("Trades fermés", String(p.trades)), cell("Taux de réussite", p.win_rate_pct == null ? "—" : `${String(p.win_rate_pct).replace(".", ",")} %`),
     cell("Facteur de profit", p.profit_factor == null ? "—" : String(p.profit_factor).replace(".", ",")));
+  const x = p.execution;
+  const quality = el("p", null, "footnote");
+  quality.textContent = x && x.orders
+    ? `Qualité d’exécution : ${x.orders} ordre(s), ${x.refused} refusé(s) par le portail · glissement moyen ${x.avg_slippage_pips == null ? "—" : x.avg_slippage_pips} pip · spread moyen ${x.avg_spread_pips == null ? "—" : x.avg_spread_pips} pip · latence moyenne ${x.avg_latency_ms == null ? "—" : x.avg_latency_ms} ms`
+    : "Qualité d’exécution : aucun ordre envoyé sur la période.";
   const chart = el("div", null, "chart");
-  $("board-perf").replaceChildren(stats, chart);
+  $("board-perf").replaceChildren(stats, chart, quality);
   const points = (p.curve || []).map((x) => ({ x: Date.parse(x.ts), y: x.equity }));
   if (points.length >= 2) lineChart(chart, points, "Fonds propres du compte démo MT5");
   else chart.append(el("p", "La courbe se construit au fil des minutes.", "empty-cell"));
@@ -334,6 +385,7 @@ function renderBoard() {
   renderChart();
   renderDecision(d);
   renderSignals(d);
+  renderRisk(d);
   renderPositions(d);
   renderHistory(d);
   renderPerformance(d);

@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from _support import workspace_tempdir
+from astra import mt5_risk
 from astra.agent import AgentHalt, AstraClient
 from astra.brokers.mt5_demo import Mt5DemoError
 from astra.brokers.mt5_demo_orders import MAGIC, Mt5DemoTrader
@@ -38,8 +39,13 @@ class TradingMt5(FakeMt5):
         return SimpleNamespace(filling_mode=1, volume_min=0.01, volume_step=0.01, volume_max=100.0, trade_stops_level=0,
                                point=0.00001, digits=5)
 
+    tick_time = server_seconds("2026-10-29 11:00")  # server clock UTC+2: 09:00 UTC, the bridge's test clock
+
     def symbol_info_tick(self, symbol):
-        return SimpleNamespace(bid=1.10000, ask=1.10002, time=server_seconds("2026-10-28 20:00"))
+        return SimpleNamespace(bid=1.10000, ask=1.10002, time=self.tick_time)
+
+    def order_calc_margin(self, kind, symbol, volume, price):
+        return 1000.0 * volume
 
     def order_calc_profit(self, kind, symbol, volume, price_open, price_close):
         move = (price_close - price_open) if kind == self.ORDER_TYPE_BUY else (price_open - price_close)
@@ -74,11 +80,14 @@ class FakeServer:
         self.status = {"mode": "SIMULATION", "live_locked": True}
         self.view = overview(SHORT)
         self.posts = []
+        self.controls = {"entries_allowed": True, "kill_switch": {"active": False}}
 
     def __call__(self, method, path, body):
         if method == "POST":
             self.posts.append((path, body))
             return 200, {}
+        if path == "/api/controls":
+            return 200, self.controls
         return 200, self.status if path == "/api/status" else self.view
 
 
@@ -147,7 +156,7 @@ class BridgeTests(unittest.TestCase):
         self.assertTrue(self.bridge.cycle()["halted"])
         (self.dir / "STOP").unlink()
         self.bridge.state.update({"day": "2026-10-29", "day_start_equity": 104000.0})  # -3.8 % today
-        self.assertEqual([a["kind"] for a in self.bridge.cycle()["actions"]], ["entry_skipped"])
+        self.assertEqual([a["kind"] for a in self.bridge.cycle()["actions"]], ["refused"])
         self.server.status = {"mode": "LIVE", "live_locked": False}
         with self.assertRaises(AgentHalt):
             self.bridge.cycle()
@@ -160,7 +169,7 @@ class BridgeTests(unittest.TestCase):
         paths = [p for p, _ in self.server.posts]
         self.assertEqual(paths, ["/api/mt5/quotes", "/api/mt5/snapshot"])
         quote = self.server.posts[0][1]["quotes"][0]
-        self.assertEqual((quote["bid"], quote["ask"], quote["time"]), (1.1, 1.10002, "2026-10-28T18:00:00+00:00"))
+        self.assertEqual((quote["bid"], quote["ask"], quote["time"]), (1.1, 1.10002, "2026-10-29T09:00:00+00:00"))
         self.assertEqual(self.fake.sent, [])
 
     def test_candles_go_to_the_server_in_utc_for_every_pair_and_timeframe(self):
@@ -180,6 +189,62 @@ class BridgeTests(unittest.TestCase):
         sizes = [len(b["candles"]) for p, b in self.server.posts if p == "/api/mt5/candles" and b["symbol"] == "EURUSD"]
         self.assertEqual(sizes, [250, 250, 100])
         self.assertTrue(all(len(json.dumps(b)) < 60_000 for p, b in self.server.posts))
+
+    def refused(self):
+        return [a for a in self.bridge.cycle()["actions"] if a["kind"] == "refused"]
+
+    def test_the_gateway_refuses_with_reasons_and_reports_each_refusal_once(self):
+        self.server.controls = {"entries_allowed": False, "kill_switch": {"active": True}}
+        first = self.refused()
+        self.assertEqual(len(first), 1)
+        self.assertIn("arret_d_urgence", first[0]["reason"])
+        self.assertEqual(self.fake.sent, [])
+        self.assertEqual(self.refused(), [])  # the same refusal is not repeated every cycle
+        self.server.controls = {"entries_allowed": True, "kill_switch": {"active": False}}
+        self.bridge._controls = None
+        self.assertEqual([a["kind"] for a in self.bridge.cycle()["actions"]], ["open"])  # allowed again once cleared
+
+    def test_unreadable_controls_stale_quotes_and_invalid_profiles_all_refuse(self):
+        self.server.controls = None  # the answer cannot be read
+        self.assertIn("arret_d_urgence", self.refused()[0]["reason"])
+        self.assertEqual(self.fake.sent, [])
+        self.server.controls = {"entries_allowed": True, "kill_switch": {"active": False}}
+        self.bridge._controls = None
+        self.bridge.state["last_refusal"].clear()
+        self.fake.tick_time = server_seconds("2026-10-29 10:30")  # 30 minutes old
+        self.assertIn("fraicheur_des_donnees", self.refused()[0]["reason"])
+        self.fake.tick_time = TradingMt5.tick_time
+        self.bridge.state["last_refusal"].clear()
+        self.bridge.limits = mt5_risk.RiskConfigError("profil cassé")
+        self.assertIn("profil_de_risque", self.refused()[0]["reason"])
+        self.assertEqual(self.fake.sent, [])
+
+    def test_exits_are_never_blocked_by_the_gateway(self):
+        self.bridge.cycle()  # opens the position
+        self.server.controls = {"entries_allowed": False, "kill_switch": {"active": True}}
+        self.bridge._controls = None
+        self.server.view = overview(SHORT, {"side": "FLAT", "label": "AUCUNE_POSITION"})
+        self.assertEqual([a["kind"] for a in self.bridge.cycle()["actions"]], ["close"])
+
+    def test_execution_quality_and_snapshots_carry_risk_and_reconciliation(self):
+        actions = self.bridge.cycle()["actions"]
+        opened = next(a for a in actions if a["kind"] == "open")
+        self.assertEqual((opened["requested_price"], opened["slippage_pips"], opened["spread_pips"]), (1.1, 0.0, 0.2))  # a sale: the bid
+        self.assertIsInstance(opened["latency_ms"], int)
+        snapshot = next(b for p, b in reversed(self.server.posts) if p == "/api/mt5/snapshot")
+        self.assertTrue(snapshot["risk"]["entries_allowed"])
+        self.assertEqual(snapshot["risk"]["limits"]["max_positions"], 7)
+        self.assertTrue(snapshot["reconciliation"]["ok"])
+
+    def test_reconciliation_flags_a_position_without_stop_and_an_unplanned_one(self):
+        self.bridge.cycle()
+        self.fake.open_positions[0].sl = 0.0
+        self.bridge.targets = {"EURUSD": {"side": "FLAT"}}
+        with self.bridge.trader:
+            report = self.bridge.reconcile(self.bridge.trader.positions())
+        codes = {d["code"] for d in report["divergences"]}
+        self.assertEqual(codes, {"position_sans_stop", "position_non_prevue"})
+        self.assertFalse(report["ok"])
 
     def test_flow_keeps_one_connection_and_trades_only_when_the_cycle_is_due(self):
         clock = {"t": 0.0}

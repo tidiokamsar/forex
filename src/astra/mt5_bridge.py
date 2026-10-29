@@ -33,11 +33,11 @@ from .agent import AgentHalt, ApiError, AstraClient, http_transport
 from .brokers import mt5_demo
 from .brokers.mt5_demo import DEFAULT_TERMINAL, Mt5DemoError
 from .brokers.mt5_demo_orders import Mt5DemoTrader
+from .marketdata import pip_size
+from .mt5_risk import AccountState, OrderRequest, RiskConfigError, RiskLimits, entries_state, evaluate_entry, load_limits
 
-RISK_PCT = 0.5
-DAILY_LOSS_PCT = 3.0
-MAX_POSITIONS = 7
 DEFAULT_INTERVAL_SECONDS = 300
+CONTROLS_CACHE_SECONDS = 15
 STREAM_SECONDS = 5          # quotes, balance and open positions reach the dashboard this often
 FAST_CANDLES_SECONDS = 60   # M5 and M15: the last bars, every minute
 SLOW_CANDLES_SECONDS = 600  # H1, H4 and D1: the last bars, every ten minutes
@@ -72,12 +72,17 @@ def targets(overview: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 class Bridge:
     def __init__(self, client: AstraClient, trader: Mt5DemoTrader, workdir: Path,
-                 clock: Callable[[], datetime] = lambda: datetime.now(UTC)) -> None:
+                 clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+                 limits: RiskLimits | RiskConfigError | None = None) -> None:
         self.client, self.trader, self.workdir, self.clock = client, trader, workdir, clock
+        self.limits: RiskLimits | RiskConfigError = limits if limits is not None else RiskLimits()
         self.workdir.mkdir(parents=True, exist_ok=True)
         self.state_path = workdir / "bridge-state.json"
         self.state = json.loads(self.state_path.read_text(encoding="utf-8")) if self.state_path.exists() else {}
         self.state.setdefault("mirrored", {})
+        self.state.setdefault("last_refusal", {})
+        self.targets: dict[str, dict[str, Any]] = {}
+        self._controls: tuple[datetime, bool | None, bool | None] | None = None
 
     def note(self, kind: str, **fields: Any) -> None:
         now = self.clock()
@@ -90,6 +95,81 @@ class Bridge:
         tmp.write_text(json.dumps(self.state, ensure_ascii=False, indent=1), encoding="utf-8")
         tmp.replace(self.state_path)
 
+    def controls(self) -> tuple[bool | None, bool | None]:
+        """(entries allowed, kill switch active) as the server reports them; (None, None) when unreadable."""
+
+        now = self.clock()
+        if self._controls is not None and (now - self._controls[0]).total_seconds() < CONTROLS_CACHE_SECONDS:
+            return self._controls[1], self._controls[2]
+        try:
+            answer = self.client.get("/api/controls")
+            allowed = answer.get("entries_allowed") is True
+            kill = bool((answer.get("kill_switch") or {}).get("active", False))
+        except (ApiError, OSError, AttributeError):
+            allowed, kill = None, None
+        self._controls = (now, allowed, kill)
+        return allowed, kill
+
+    def account_state(self, account: dict[str, Any], positions: list[Any]) -> AccountState:
+        """The gateway's view of the account. The day start and the equity peak are kept across restarts."""
+
+        today = self.clock().date().isoformat()
+        if self.state.get("day") != today or not self.state.get("day_start_equity"):
+            self.state["day"], self.state["day_start_equity"] = today, account["equity"]
+        self.state["peak_equity"] = max(self.state.get("peak_equity") or 0.0, account["equity"])
+        allowed, kill = self.controls()
+        if (self.workdir / "STOP").exists():
+            allowed, kill = False, True
+        return AccountState(
+            environment=account.get("environment"), login=account.get("login"), expected_login=self.trader.expected_login,
+            equity=account["equity"], margin=account.get("margin"), day_start_equity=self.state["day_start_equity"],
+            peak_equity=self.state["peak_equity"], positions=tuple({"symbol": p.symbol, "side": p.side, "volume": p.volume}
+                                                                    for p in positions if p.astra),
+            connector_ok=bool(account.get("terminal_connected", True)),
+            algo_trading_enabled=account.get("algo_trading_enabled"), entries_allowed_by_server=allowed,
+            kill_switch_active=kill)
+
+    def risk_panel(self, state: AccountState) -> dict[str, Any]:
+        decision = entries_state(state, self.limits)
+        limits = self.limits.public() if isinstance(self.limits, RiskLimits) else None
+        daily = ((state.day_start_equity - state.equity) / state.day_start_equity * 100) if state.day_start_equity else None
+        drawdown = ((state.peak_equity - state.equity) / state.peak_equity * 100) if state.peak_equity else None
+        return {"entries_allowed": decision.allowed, "checks": [c.public() for c in decision.checks], "limits": limits,
+                "daily_loss_pct": None if daily is None else round(max(daily, 0.0), 3),
+                "drawdown_pct": None if drawdown is None else round(max(drawdown, 0.0), 3)}
+
+    def reconcile(self, positions: list[Any]) -> dict[str, Any]:
+        """Compare the broker's ASTRA positions with what the paper accounts want. Alerts need a look;
+        information lines are normal waiting states."""
+
+        out: list[dict[str, str]] = []
+        mine: dict[str, list[Any]] = {}
+        for p in positions:
+            if p.astra:
+                mine.setdefault(p.symbol, []).append(p)
+        for symbol, held in sorted(mine.items()):
+            target = self.targets.get(symbol, {"side": "FLAT"})
+            if len(held) > 1:
+                out.append({"level": "alerte", "symbol": symbol, "code": "positions_multiples",
+                            "detail": f"{len(held)} positions ASTRA sur {symbol}"})
+            for p in held:
+                if not p.sl:
+                    out.append({"level": "alerte", "symbol": symbol, "code": "position_sans_stop",
+                                "detail": f"ticket {p.ticket} sans stop"})
+                if target["side"] != p.side:
+                    out.append({"level": "alerte", "symbol": symbol, "code": "position_non_prevue",
+                                "detail": f"{p.side} ouverte alors que la décision est {target['side']}"})
+        for symbol, target in sorted(self.targets.items()):
+            if target["side"] == "FLAT" or symbol in mine:
+                continue
+            closed = self.state["mirrored"].get(symbol) == target.get("entry_ts")
+            code = "stop_declenche_ou_ferme" if closed else "entree_en_attente"
+            detail = ("position fermée par le stop ou à la main : pas de réouverture pour la même entrée" if closed
+                      else "décision d'entrée pas encore exécutée (portail de risque)")
+            out.append({"level": "info", "symbol": symbol, "code": code, "detail": detail})
+        return {"checked_at": self.clock().isoformat(), "ok": not any(d["level"] == "alerte" for d in out),
+                "divergences": out}
+
     def cycle(self) -> dict[str, Any]:
         status = self.client.get("/api/status")
         if status.get("mode") != "SIMULATION" or not status.get("live_locked", False):
@@ -98,16 +178,10 @@ class Bridge:
             self.note("halted", reason="fichier STOP présent : aucun ordre")
             return {"halted": True, "actions": []}
         wanted = targets(self.client.get("/api/learn/overview"))
+        self.targets = wanted
         actions: list[dict[str, Any]] = []
         with self.trader as trader:
             account = trader.refresh_account()
-            today = self.clock().date().isoformat()
-            if self.state.get("day") != today:
-                self.state["day"], self.state["day_start_equity"] = today, account["equity"]
-            loss_pct = (self.state["day_start_equity"] - account["equity"]) / self.state["day_start_equity"] * 100
-            entries_allowed = loss_pct < DAILY_LOSS_PCT
-            if not entries_allowed:
-                self.note("entries_blocked", reason=f"perte du jour {loss_pct:.2f} % ≥ {DAILY_LOSS_PCT} %")
             positions = trader.positions()
             for symbol, target in sorted(wanted.items()):
                 mine = [p for p in positions if p.astra and p.symbol == symbol]
@@ -119,27 +193,42 @@ class Bridge:
                                         "price": report["price"]})
                 if target["side"] == "FLAT":
                     self.state["mirrored"].pop(symbol, None)
+                    self.state["last_refusal"].pop(symbol, None)
                     continue
                 if any(p.side == target["side"] for p in mine):
                     continue
                 if self.state["mirrored"].get(symbol) == target["entry_ts"]:
                     continue  # already mirrored once for this paper entry: stopped out on MT5, not reopened
-                held = sum(1 for p in trader.positions() if p.astra)
-                if not entries_allowed or held >= MAX_POSITIONS:
-                    actions.append({"kind": "entry_skipped", "symbol": symbol, "side": target["side"],
-                                    "reason": "limite journalière" if not entries_allowed else "positions maximales"})
+                state = self.account_state(trader.refresh_account(), trader.positions())
+                limits = self.limits
+                risk_pct = limits.risk_per_trade_pct if isinstance(limits, RiskLimits) else 0.0
+                risk_usd = state.equity * risk_pct / 100
+                entry = trader.prepare_entry(symbol, target["side"], target["stop_distance"], risk_usd)
+                age = None
+                if entry["tick_time"]:
+                    age = (self.clock() - datetime.fromisoformat(entry["tick_time"])).total_seconds()
+                order = OrderRequest(symbol, target["side"], entry["lots"], entry["loss_at_stop_usd"], entry["required_margin"],
+                                     entry["bid"], entry["ask"], age, entry["volume_min"], entry["volume_max"],
+                                     entry["volume_step"], entry["has_stop"])
+                decision = evaluate_entry(state, order, limits)
+                if not decision.allowed:
+                    key = f"{target['entry_ts']}|{'|'.join(decision.reasons)}"
+                    if self.state["last_refusal"].get(symbol) != key:  # one line per change, not one per cycle
+                        self.state["last_refusal"][symbol] = key
+                        actions.append({"kind": "refused", "symbol": symbol, "side": target["side"],
+                                        "lots": entry["lots"], "reason": "; ".join(decision.reasons)[:190]})
                     continue
-                risk_usd = account["equity"] * RISK_PCT / 100
-                lots, sl = trader.lots_for_risk(symbol, target["side"], target["stop_distance"], risk_usd)
-                if lots <= 0:
-                    actions.append({"kind": "entry_skipped", "symbol": symbol, "side": target["side"],
-                                    "reason": f"risque {risk_usd:.2f} USD inférieur au volume minimal"})
-                    continue
-                report = trader.open(symbol, target["side"], lots, sl)
+                report = trader.open(symbol, target["side"], entry["lots"], entry["sl"])
                 self.state["mirrored"][symbol] = target["entry_ts"]
-                actions.append({"kind": "open", "symbol": symbol, "side": target["side"], "lots": lots, "sl": sl,
-                                "price": report["price"], "order": report["order"], "risk_usd": round(risk_usd, 2),
-                                "reason": target["reason"]})
+                self.state["last_refusal"].pop(symbol, None)
+                pips = pip_size(symbol)
+                sign = 1 if target["side"] == "LONG" else -1
+                actions.append({"kind": "open", "symbol": symbol, "side": target["side"], "lots": entry["lots"],
+                                "sl": entry["sl"], "price": report["price"], "order": report["order"],
+                                "risk_usd": round(risk_usd, 2), "reason": target["reason"],
+                                "requested_price": report["requested_price"], "latency_ms": report["latency_ms"],
+                                "spread_pips": round((entry["ask"] - entry["bid"]) / pips, 2),
+                                "slippage_pips": round(sign * (report["price"] - report["requested_price"]) / pips, 2) + 0.0})
             everything = trader.positions()
             account = trader.refresh_account()
             manual_positions = [asdict(p) for p in everything if not p.astra]
@@ -149,14 +238,19 @@ class Bridge:
             self.note(action["kind"], **{k: v for k, v in action.items() if k != "kind"})
         self.note("cycle", actions=len(actions))
         self.save()
-        self.publish(account, summary["astra_positions"] + manual_positions, actions)
+        self.publish(account, summary["astra_positions"] + manual_positions, actions, everything)
         return summary
 
-    def publish(self, account: dict[str, Any], positions: list[dict[str, Any]], actions: list[dict[str, Any]]) -> None:
-        """Show the DEMO account on the dashboard. A failure here never stops trading: it is journaled."""
+    def publish(self, account: dict[str, Any], positions: list[dict[str, Any]], actions: list[dict[str, Any]],
+                objects: list[Any]) -> None:
+        """Show the DEMO account, the risk gateway and the reconciliation on the dashboard. A failure here never
+        stops trading: it is journaled."""
 
+        state = self.account_state(account, objects)
+        body = {"account": account, "positions": positions, "actions": actions, "risk": self.risk_panel(state),
+                "reconciliation": self.reconcile(objects)}
         try:
-            self.client.post("/api/mt5/snapshot", {"account": account, "positions": positions, "actions": actions})
+            self.client.post("/api/mt5/snapshot", body)
         except (ApiError, OSError) as exc:
             self.note("publish_failed", reason=str(exc)[:200])
 
@@ -167,8 +261,9 @@ class Bridge:
         if quotes:
             self.client.post("/api/mt5/quotes", {"quotes": quotes})
         account = self.trader.refresh_account()
-        positions = [asdict(p) for p in self.trader.positions()]
-        self.publish(account, positions, [])
+        objects = self.trader.positions()
+        positions = [asdict(p) for p in objects]
+        self.publish(account, positions, [], objects)
         return {"quotes": len(quotes), "positions": len(positions)}
 
     def push_candles(self, timeframes: tuple[str, ...], recent: bool) -> int:
@@ -274,5 +369,10 @@ def run_from_env(once: bool = False) -> int:
     trader = Mt5DemoTrader(os.environ.get("ASTRA_MT5_TERMINAL") or DEFAULT_TERMINAL, expected_login=int(login),
                            credentials=credentials)
     workdir = Path(_native(os.environ.get("ASTRA_MT5_DIR") or "var/mt5-bridge"))
+    risk_file = os.environ.get("ASTRA_MT5_RISK_FILE", "").strip()
+    try:
+        limits: RiskLimits | RiskConfigError = load_limits(_native(risk_file) if risk_file else None)
+    except RiskConfigError as exc:
+        limits = exc  # an invalid profile refuses every entry; exits and the dashboard keep working
     interval = max(60, int(os.environ.get("ASTRA_MT5_INTERVAL_SECONDS") or DEFAULT_INTERVAL_SECONDS))
-    return Bridge(client, trader, workdir).run(interval, once=once)
+    return Bridge(client, trader, workdir, limits=limits).run(interval, once=once)

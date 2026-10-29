@@ -12,6 +12,7 @@ in the terminal are listed but never modified or closed. There is no LIVE path i
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -101,6 +102,31 @@ class Mt5DemoTrader(Mt5DemoFeed):
         lots = round(min(lots, info.volume_max, MAX_LOTS), 2)
         return (lots if lots >= info.volume_min else 0.0), sl
 
+    def prepare_entry(self, symbol: str, side: str, stop_distance: float, risk_usd: float) -> dict[str, Any]:
+        """Everything the risk gateway needs about an entry that has not been sent: lots, stop, quote, loss at the
+        stop, required margin and the broker's volume rules. A figure that cannot be computed is None."""
+
+        mt5 = self.mt5
+        info, tick = mt5.symbol_info(symbol), mt5.symbol_info_tick(symbol)
+        if info is None or tick is None:
+            raise Mt5DemoError(f"symbole {symbol} indisponible : {mt5.last_error()}")
+        buy = side == "LONG"
+        price = tick.ask if buy else tick.bid
+        distance = max(stop_distance, (info.trade_stops_level + 1) * info.point)
+        sl = round(price - distance if buy else price + distance, info.digits)
+        kind = mt5.ORDER_TYPE_BUY if buy else mt5.ORDER_TYPE_SELL
+        loss_per_lot = -(mt5.order_calc_profit(kind, symbol, 1.0, price, sl) or 0.0)
+        lots = 0.0
+        if loss_per_lot > 0:
+            lots = math.floor(risk_usd / loss_per_lot / info.volume_step) * info.volume_step
+            lots = round(min(lots, info.volume_max, MAX_LOTS), 2)
+        margin = mt5.order_calc_margin(kind, symbol, lots, price) if lots > 0 else None
+        stamp = self._utc(tick.time) if getattr(tick, "time", 0) else None
+        return {"symbol": symbol, "side": side, "lots": lots, "sl": sl, "price": price, "bid": tick.bid, "ask": tick.ask,
+                "tick_time": stamp, "loss_at_stop_usd": loss_per_lot * lots if loss_per_lot > 0 and lots > 0 else None,
+                "required_margin": margin, "volume_min": info.volume_min, "volume_max": info.volume_max,
+                "volume_step": info.volume_step, "has_stop": bool(sl)}
+
     def open(self, symbol: str, side: str, lots: float, sl: float) -> dict[str, Any]:
         self._guard()
         mt5 = self.mt5
@@ -131,12 +157,15 @@ class Mt5DemoTrader(Mt5DemoFeed):
 
     def _send(self, request: dict[str, Any]) -> dict[str, Any]:
         mt5 = self.mt5
+        started = time.monotonic()
         result = mt5.order_send(request)
+        latency_ms = round((time.monotonic() - started) * 1000)
         if result is None:
             raise Mt5DemoError(f"ordre non transmis : {mt5.last_error()}")
         done = result.retcode == mt5.TRADE_RETCODE_DONE
         report = {"ok": done, "retcode": result.retcode, "comment": result.comment, "order": result.order,
-                  "deal": result.deal, "volume": result.volume, "price": result.price,
+                  "deal": result.deal, "volume": result.volume, "price": result.price, "latency_ms": latency_ms,
+                  "requested_price": request.get("price"),
                   "request": {k: request[k] for k in ("symbol", "volume", "type", "price") if k in request}
                   | {"sl": request.get("sl"), "position": request.get("position")}}
         if not done:

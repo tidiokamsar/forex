@@ -1,0 +1,19 @@
+#!/bin/bash
+# Stores the Massive API key for ASTRA, read from the keyboard (not echoed), into /etc/astra/massive.key
+# (root 0600). It is handed by systemd LoadCredential (massive-key) to the services that need it; ASTRA never
+# prints it, logs it or puts it in a URL. Then it tests what the key really allows (nothing is stored by the test).
+set -euo pipefail
+[ "$(id -u)" -eq 0 ] || { echo "Lancer en root"; exit 1; }
+read -r -s -p "Clé API Massive (invisible) : " key; echo
+[[ "$key" =~ ^[A-Za-z0-9_-]{16,128}$ ]] || { echo "Clé invalide (16 à 128 lettres, chiffres, tiret ou souligné)"; exit 2; }
+umask 077
+tmp=$(mktemp /etc/astra/.massive.XXXXXX)
+printf "%s" "$key" > "$tmp"
+chown root:root "$tmp"; chmod 0600 "$tmp"; mv "$tmp" /etc/astra/massive.key
+unset key
+echo "Enregistré dans /etc/astra/massive.key (root 0600)."
+echo "Test de ce que la clé permet (aucune donnée stockée) :"
+cd /opt/astra/app
+systemd-run --quiet --wait --pipe --collect -p User=astra -p LoadCredential=massive-key:/etc/astra/massive.key \
+  -p EnvironmentFile=/etc/astra/web.env -p Environment=PYTHONPATH=/opt/astra/app/src -p WorkingDirectory=/opt/astra/app \
+  /opt/astra/venv/bin/python -m astra massive check
