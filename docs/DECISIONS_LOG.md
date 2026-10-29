@@ -12,5 +12,6 @@
 | 2026-10-29 | Portail de risque propre aux ordres MT5, hors de la stratégie | la stratégie ne peut pas autoriser sa propre exécution ; les sorties ne passent jamais par lui |
 | 2026-10-29 | Comptabilité unique côté serveur, historique issu du courtier (`mt5accounting`) | le résultat net était calculé depuis le premier instantané reçu et ignorait les swaps ; l'historique vide venait du journal du pont |
 | 2026-10-29 | Fichier STOP sur le pont : ni ouverture ni fermeture automatique pendant l'audit | consigne de l'audit ; les positions existantes restent protégées par leurs stops chez le courtier |
+| 2026-10-29 | Chaque ordre du pont est enregistré sur disque avant l'envoi, avec un identifiant dans le commentaire (`ASTRA:<id>`) ; un résultat inconnu bloque la paire et se règle d'après les positions réelles | un nouvel envoi après une réponse perdue pouvait doubler une position ; la marque ASTRA du courtier reste vérifiable |
 | 2026-10-29 | Clés Massive lues dans l'en-tête `Authorization`, jamais dans l'adresse | une clé dans une adresse finit dans les journaux |
 | 2026-10-29 | Les agrégats Forex de Massive sont étiquetés « cotations, pas transactions » | la documentation du fournisseur le précise ; aucun volume centralisé n'est affiché |

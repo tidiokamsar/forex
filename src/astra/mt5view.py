@@ -173,6 +173,7 @@ def validate(payload: Any) -> dict[str, Any]:
         item = {"kind": _text(a.get("kind"), "kind", 30), "symbol": _text(a.get("symbol"), "symbole", 12),
                 "side": a.get("side") if a.get("side") in ("LONG", "SHORT") else None,
                 "reason": _text(a["reason"], "motif", 200) if a.get("reason") else None}
+        item["status"] = str(a["status"])[:20] if a.get("status") else None
         for field in ("lots", "price", "sl", "profit", "requested_price", "spread_pips", "slippage_pips", "latency_ms"):
             item[field] = _number(a[field], field) if a.get(field) is not None else None
         clean_actions.append(item)

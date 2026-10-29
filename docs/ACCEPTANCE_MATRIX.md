@@ -42,8 +42,8 @@ Statuts : `RÉUSSI`, `ÉCHEC`, `BLOQUÉ`, `NON TESTÉ`. Un test non exécuté n'
 | Sécurité : jeton d'agent limité aux routes autorisées | RÉUSSI | `test_agent` |
 | Portail de risque : refus par règle, profil invalide, données absentes | RÉUSSI | `test_mt5_risk` |
 | Doublon d'ordre empêché | RÉUSSI | état `mirrored` et test « pas de réouverture après un stop » |
-| Timeout puis rapprochement avant renvoi | NON TESTÉ | à compléter (tranche 6) |
-| Fills partiels, rejets, annulations | NON TESTÉ | à compléter (tranche 6) |
+| Timeout puis rapprochement avant renvoi | RÉUSSI (tests) | `test_mt5_bridge` : réponse perdue après exécution (retrouvée sur le compte, un seul ordre), réponse perdue sans exécution (blocage 2 minutes puis un seul nouvel essai), code de timeout traité comme inconnu, reprise après redémarrage ; non exercé sur le vrai compte |
+| Fills partiels, rejets, annulations | RÉUSSI (tests) pour partiel et rejet ; NON APPLICABLE pour l'annulation (ordres au marché seulement) | exécution partielle rapportée avec le volume réellement rempli ; rejet du courtier journalisé une fois, sans répétition à chaque cycle |
 | Arrêt d'urgence bloque les nouvelles entrées | RÉUSSI | essai réel du 2026-10-29 06:31 UTC, autorisé par l'utilisateur : arrêt d'urgence activé, fichier STOP retiré, 1 cycle complet du pont exécuté, 0 ordre envoyé, panneau « Entrées bloquées » ; STOP remis ensuite ; aucune entrée en attente pendant l'essai, donc le refus d'une entrée précise reste couvert par les tests |
 | Sauvegarde et restauration | NON TESTÉ | sauvegarde quotidienne active ; restauration à tester sur une copie |
 | Responsive de la page | NON TESTÉ sur mobile | contrôle visuel desktop fait |

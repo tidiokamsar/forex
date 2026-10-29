@@ -322,6 +322,18 @@ function renderRisk(d) {
     for (const e of lastRefusals) log.append(el("small", `${when(e.ts).slice(0, 16)} · ${pairLabel(e.symbol)} : ${e.reason}`, "risk-ko"));
     parts.push(log);
   }
+  const intents = (snap.bridge && snap.bridge.intents) || [];
+  if (intents.length) {
+    const STATES = { SOUMIS: "soumis, réponse attendue", INCONNU: "résultat inconnu : vérification du compte", EXECUTE: "exécuté",
+      PARTIEL: "exécution partielle", REJETE: "rejeté par le courtier", ABSENT: "non exécuté (vérifié)" };
+    const life = el("div", null, "risk-list");
+    life.append(el("small", "Cycle de vie des derniers ordres :", "risk-muted"));
+    for (const i of intents.slice(0, 5)) {
+      const bad = ["REJETE", "INCONNU", "ABSENT"].includes(i.status);
+      life.append(el("small", `${when(i.at).slice(0, 16)} · ${pairLabel(i.symbol)} ${i.side === "LONG" ? "achat" : "vente"} ${fmt.format(i.lots)} lot : ${STATES[i.status] || i.status}${i.lots_filled != null ? ` (${fmt.format(i.lots_filled)} lot rempli)` : ""}`, bad ? "risk-ko" : "risk-ok"));
+    }
+    parts.push(life);
+  }
   box.replaceChildren(...parts);
 }
 

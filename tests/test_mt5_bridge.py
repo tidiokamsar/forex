@@ -22,11 +22,12 @@ class TradingMt5(FakeMt5):
     ORDER_TYPE_BUY, ORDER_TYPE_SELL = 0, 1
     TRADE_ACTION_DEAL, ORDER_TIME_GTC = 1, 0
     ORDER_FILLING_FOK, ORDER_FILLING_IOC, ORDER_FILLING_RETURN = 0, 1, 2
-    TRADE_RETCODE_DONE = 10009
+    TRADE_RETCODE_DONE, TRADE_RETCODE_DONE_PARTIAL = 10009, 10010
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.algo, self.equity, self.sent, self.open_positions, self.next_ticket = True, 100000.0, [], [], 1
+        self.mode = "ok"  # ok, reject, lost (executed, no answer), lost_nothing (not executed, no answer), partial, timeout_code
 
     def account_info(self):
         info = super().account_info()
@@ -59,10 +60,22 @@ class TradingMt5(FakeMt5):
         if "position" in request:
             self.open_positions = [p for p in self.open_positions if p.ticket != request["position"]]
         else:
+            if self.mode == "reject":
+                return SimpleNamespace(retcode=10019, comment="No money", order=0, deal=0, volume=0.0, price=0.0)
+            if self.mode == "lost_nothing":
+                return None
+            if self.mode == "timeout_code":
+                return SimpleNamespace(retcode=10012, comment="Request canceled by timeout", order=0, deal=0, volume=0.0, price=0.0)
+            volume = request["volume"] / 2 if self.mode == "partial" else request["volume"]
             self.open_positions.append(SimpleNamespace(ticket=self.next_ticket, symbol=request["symbol"], type=request["type"],
-                                                       volume=request["volume"], price_open=request["price"],
-                                                       sl=request["sl"], profit=0.0, magic=request["magic"]))
+                                                       volume=volume, price_open=request["price"], sl=request["sl"], profit=0.0,
+                                                       magic=request["magic"], comment=request["comment"]))
             self.next_ticket += 1
+            if self.mode == "lost":
+                return None
+            if self.mode == "partial":
+                return SimpleNamespace(retcode=self.TRADE_RETCODE_DONE_PARTIAL, comment="partial", order=len(self.sent),
+                                       deal=len(self.sent), volume=volume, price=request["price"])
         return SimpleNamespace(retcode=self.TRADE_RETCODE_DONE, comment="done", order=len(self.sent), deal=len(self.sent),
                                volume=request["volume"], price=request["price"])
 
@@ -245,6 +258,75 @@ class BridgeTests(unittest.TestCase):
         codes = {d["code"] for d in report["divergences"]}
         self.assertEqual(codes, {"position_sans_stop", "position_non_prevue"})
         self.assertFalse(report["ok"])
+
+    def intent_states(self):
+        return [i["status"] for i in self.bridge.state["intents"].values()]
+
+    def test_every_order_is_recorded_before_it_is_sent_and_carries_its_intention_in_the_comment(self):
+        self.bridge.cycle()
+        (intent,) = self.bridge.state["intents"].values()
+        self.assertEqual(intent["status"], "EXECUTE")
+        self.assertEqual(self.fake.sent[0]["comment"], f"ASTRA:{intent['id']}")
+        saved = json.loads((self.dir / "bridge-state.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["intents"][intent["id"]]["status"], "EXECUTE")  # on disk, not only in memory
+
+    def test_a_refusal_by_the_broker_is_a_rejection_reported_once_and_not_retried_every_cycle(self):
+        self.fake.mode = "reject"
+        first = self.bridge.cycle()["actions"]
+        self.assertEqual([a["kind"] for a in first], ["refused"])
+        self.assertIn("10019", first[0]["reason"])
+        self.assertEqual(self.intent_states(), ["REJETE"])
+        self.assertEqual(self.bridge.cycle()["actions"], [])  # same refusal, nothing new to say
+        self.assertEqual(self.fake.open_positions, [])
+
+    def test_a_lost_answer_after_a_real_execution_is_found_on_the_account_and_never_sent_twice(self):
+        self.fake.mode = "lost"
+        self.assertEqual([a["kind"] for a in self.bridge.cycle()["actions"]], ["order_unknown"])
+        self.assertEqual(self.intent_states(), ["INCONNU"])
+        self.fake.mode = "ok"
+        later = self.bridge.cycle()["actions"]  # the position exists: the intention is settled, no second order
+        self.assertEqual([a["kind"] for a in later], ["intent_resolved"])
+        self.assertEqual(self.intent_states(), ["EXECUTE"])
+        self.assertEqual(len(self.fake.sent), 1)
+        self.assertEqual(len(self.fake.open_positions), 1)
+
+    def test_a_lost_answer_with_no_execution_blocks_for_the_grace_period_then_allows_one_new_attempt(self):
+        self.fake.mode = "lost_nothing"
+        self.assertEqual([a["kind"] for a in self.bridge.cycle()["actions"]], ["order_unknown"])
+        self.fake.mode = "ok"
+        self.assertEqual(self.bridge.cycle()["actions"], [])  # still inside the grace period: it only looks
+        self.assertEqual(len(self.fake.sent), 1)
+        self.bridge.clock = lambda: datetime(2026, 10, 29, 9, 5, tzinfo=UTC)  # five minutes later
+        self.fake.tick_time = server_seconds("2026-10-29 11:05")  # and the quote is fresh again (the gateway checks its age)
+        resolved = self.bridge.cycle()["actions"]
+        self.assertEqual([a["kind"] for a in resolved], ["intent_resolved", "open"])  # settled as absent, then one new order
+        self.assertEqual(sorted(self.intent_states()), ["ABSENT", "EXECUTE"])
+        self.assertEqual(len(self.fake.sent), 2)
+
+    def test_a_timeout_code_is_an_unknown_outcome_not_a_rejection(self):
+        self.fake.mode = "timeout_code"
+        self.assertEqual([a["kind"] for a in self.bridge.cycle()["actions"]], ["order_unknown"])
+        self.assertEqual(self.intent_states(), ["INCONNU"])
+
+    def test_a_partial_fill_is_reported_with_the_volume_really_filled(self):
+        self.fake.mode = "partial"
+        opened = next(a for a in self.bridge.cycle()["actions"] if a["kind"] == "open")
+        self.assertEqual((opened["status"], opened["lots"]), ("PARTIEL", self.fake.open_positions[0].volume))
+        self.assertEqual(self.intent_states(), ["PARTIEL"])
+        self.assertEqual(self.bridge.cycle()["actions"], [])  # the paper entry is mirrored: no top-up order
+
+    def test_a_restart_in_the_middle_of_an_order_is_settled_from_the_account(self):
+        self.fake.mode = "lost"
+        self.bridge.cycle()
+        restarted = Bridge(AstraClient(self.server), Mt5DemoTrader(module=self.fake, expected_login=LOGIN), self.dir,
+                           clock=lambda: datetime(2026, 10, 29, 9, 0, tzinfo=UTC))
+        self.assertEqual([i["status"] for i in restarted.state["intents"].values()], ["INCONNU"])  # kept across the restart
+        self.fake.mode = "ok"
+        restarted.cycle()
+        self.assertEqual([i["status"] for i in restarted.state["intents"].values()], ["EXECUTE"])
+        self.assertEqual(len(self.fake.sent), 1)
+        snapshot = next(b for p, b in reversed(self.server.posts) if p == "/api/mt5/snapshot")
+        self.assertEqual(snapshot["bridge"]["intents"][0]["status"], "EXECUTE")
 
     def test_flow_keeps_one_connection_and_trades_only_when_the_cycle_is_due(self):
         clock = {"t": 0.0}

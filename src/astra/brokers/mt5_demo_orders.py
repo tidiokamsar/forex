@@ -25,6 +25,23 @@ DEVIATION_POINTS = 20
 MAX_LOTS = 2.0  # hard cap per position, whatever the risk computation says
 
 
+class Mt5OrderRejected(Mt5DemoError):
+    """The terminal answered and refused the order: nothing was executed."""
+
+    def __init__(self, message: str, retcode: int) -> None:
+        super().__init__(message)
+        self.retcode = retcode
+
+
+class Mt5OrderUnknown(Mt5DemoError):
+    """No usable answer (no reply, timeout, lost connection): the order may or may not have been executed.
+    Never send it again before looking at the account."""
+
+
+UNKNOWN_RETCODES = frozenset({10012, 10031})  # request cancelled by timeout, no connection to the trade server
+RETCODE_PARTIAL = 10010
+
+
 @dataclass(frozen=True, slots=True)
 class Mt5Position:
     ticket: int
@@ -136,7 +153,7 @@ class Mt5DemoTrader(Mt5DemoFeed):
                 "required_margin": margin, "volume_min": info.volume_min, "volume_max": info.volume_max,
                 "volume_step": info.volume_step, "has_stop": bool(sl)}
 
-    def open(self, symbol: str, side: str, lots: float, sl: float) -> dict[str, Any]:
+    def open(self, symbol: str, side: str, lots: float, sl: float, comment: str = COMMENT) -> dict[str, Any]:
         self._guard()
         mt5 = self.mt5
         if symbol not in PAIRS or side not in ("LONG", "SHORT"):
@@ -147,7 +164,7 @@ class Mt5DemoTrader(Mt5DemoFeed):
         buy = side == "LONG"
         request = {"action": mt5.TRADE_ACTION_DEAL, "symbol": symbol, "volume": float(lots),
                    "type": mt5.ORDER_TYPE_BUY if buy else mt5.ORDER_TYPE_SELL, "price": tick.ask if buy else tick.bid,
-                   "sl": float(sl), "deviation": DEVIATION_POINTS, "magic": MAGIC, "comment": COMMENT,
+                   "sl": float(sl), "deviation": DEVIATION_POINTS, "magic": MAGIC, "comment": comment[:31],
                    "type_time": mt5.ORDER_TIME_GTC, "type_filling": self._filling(info)}
         return self._send(request)
 
@@ -167,16 +184,23 @@ class Mt5DemoTrader(Mt5DemoFeed):
     def _send(self, request: dict[str, Any]) -> dict[str, Any]:
         mt5 = self.mt5
         started = time.monotonic()
-        result = mt5.order_send(request)
+        try:
+            result = mt5.order_send(request)
+        except (OSError, RuntimeError, TimeoutError) as exc:
+            raise Mt5OrderUnknown(f"résultat de l'ordre inconnu : {type(exc).__name__}") from exc
         latency_ms = round((time.monotonic() - started) * 1000)
         if result is None:
-            raise Mt5DemoError(f"ordre non transmis : {mt5.last_error()}")
-        done = result.retcode == mt5.TRADE_RETCODE_DONE
-        report = {"ok": done, "retcode": result.retcode, "comment": result.comment, "order": result.order,
-                  "deal": result.deal, "volume": result.volume, "price": result.price, "latency_ms": latency_ms,
+            raise Mt5OrderUnknown(f"résultat de l'ordre inconnu : {mt5.last_error()}")
+        partial = result.retcode == getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", RETCODE_PARTIAL)
+        done = result.retcode == mt5.TRADE_RETCODE_DONE or partial
+        report = {"ok": done, "retcode": result.retcode, "partial": bool(partial and result.volume < request["volume"]),
+                  "comment": result.comment, "order": result.order, "deal": result.deal, "volume": result.volume,
+                  "price": result.price, "latency_ms": latency_ms,
                   "requested_price": request.get("price"),
                   "request": {k: request[k] for k in ("symbol", "volume", "type", "price") if k in request}
                   | {"sl": request.get("sl"), "position": request.get("position")}}
+        if result.retcode in UNKNOWN_RETCODES:
+            raise Mt5OrderUnknown(f"résultat de l'ordre inconnu (code {result.retcode}) : {result.comment}")
         if not done:
-            raise Mt5DemoError(f"ordre refusé par MT5 (code {result.retcode}) : {result.comment}")
+            raise Mt5OrderRejected(f"ordre refusé par MT5 (code {result.retcode}) : {result.comment}", result.retcode)
         return report

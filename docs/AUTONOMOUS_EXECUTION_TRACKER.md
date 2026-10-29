@@ -16,6 +16,7 @@
 | T-010 | 11 | Déploiement de la version suivante | T-008, T-009 | deploy_lab.sh | DONE | a4e227e en production, services actifs, autres applications 200/302 | — | a4e227e | — |
 | T-011 | 8 | Reprise des entrées automatiques | T-008, T-009, T-010 vérifiés | pont MT5 | BLOCKED | — | décision humaine souhaitable | — | proposer la levée du STOP après rapprochement |
 | T-012 | 10 | Contrôles de trading DEMO sur le site (ordre, modification, annulation, fermeture, arrêt d'urgence) | T-009 | webapp, à créer | TODO | — | agrandit la surface d'attaque : voir DECISIONS_LOG | — | décision à prendre : file de demandes exécutée par le pont, jamais d'appel direct du site au courtier |
+| T-015 | 7 | États d'ordre, intention enregistrée avant l'envoi, rapprochement après résultat inconnu, rejet, exécution partielle | T-009 | mt5_bridge, mt5_demo_orders | REVIEW | 7 tests de cycle de vie, tous OK ; suite complète en cours | non exercé sur le vrai compte (STOP en place) | à venir | déployer après la suite complète |
 | T-013 | 6 | Mesures de risque, cassure, régimes | — | papertrade, learning | TODO | — | — | — | — |
 | T-014 | 12 | Restauration de sauvegarde testée sur une copie | — | — | TODO | — | — | — | — |
 

@@ -19,6 +19,7 @@ Every decision goes to ``journal-<day>.jsonl`` in the work directory.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -32,12 +33,15 @@ from typing import Any
 from .agent import AgentHalt, ApiError, AstraClient, http_transport
 from .brokers import mt5_demo
 from .brokers.mt5_demo import DEFAULT_TERMINAL, Mt5DemoError
-from .brokers.mt5_demo_orders import Mt5DemoTrader
+from .brokers.mt5_demo_orders import COMMENT, MAGIC, Mt5DemoTrader, Mt5OrderRejected, Mt5OrderUnknown
 from .marketdata import pip_size
 from .mt5_risk import AccountState, OrderRequest, RiskConfigError, RiskLimits, entries_state, evaluate_entry, load_limits
 
 DEFAULT_INTERVAL_SECONDS = 300
 CONTROLS_CACHE_SECONDS = 15
+INTENT_GRACE_SECONDS = 120   # after an unknown outcome, look for the position this long before concluding "not executed"
+INTENTS_KEPT = 40
+PENDING = ("SOUMIS", "INCONNU")  # intention states that still block a new attempt on the same pair
 STREAM_SECONDS = 5          # quotes, balance and open positions reach the dashboard this often
 FAST_CANDLES_SECONDS = 60   # M5 and M15: the last bars, every minute
 SLOW_CANDLES_SECONDS = 600  # H1, H4 and D1: the last bars, every ten minutes
@@ -111,6 +115,7 @@ class Bridge:
         self.state = json.loads(self.state_path.read_text(encoding="utf-8")) if self.state_path.exists() else {}
         self.state.setdefault("mirrored", {})
         self.state.setdefault("last_refusal", {})
+        self.state.setdefault("intents", {})
         self.targets: dict[str, dict[str, Any]] = {}
         self.last_error: dict[str, str] | None = None
         self.history_synced_at: str | None = None
@@ -204,6 +209,52 @@ class Bridge:
         return {"checked_at": self.clock().isoformat(), "ok": not any(d["level"] == "alerte" for d in out),
                 "divergences": out}
 
+    # -- order intentions (idempotence) ------------------------------------------------------------------
+
+    def _intent(self, symbol: str, side: str, lots: float, sl: float, entry_ts: str) -> str:
+        """Record the intention on disk BEFORE the order leaves: a crash or a lost answer cannot cause a second order."""
+
+        key = hashlib.sha256(f"{symbol}|{side}|{entry_ts}|{self.clock().isoformat()}".encode()).hexdigest()[:8]
+        self.state["intents"][key] = {"id": key, "symbol": symbol, "side": side, "lots": lots, "sl": sl, "entry_ts": entry_ts,
+                                      "status": "SOUMIS", "at": self.clock().isoformat()}
+        for old in sorted(self.state["intents"])[:-INTENTS_KEPT]:
+            self.state["intents"].pop(old, None)
+        self.save()
+        return key
+
+    def _set_intent(self, key: str, status: str, **fields: Any) -> None:
+        self.state["intents"][key].update(status=status, updated_at=self.clock().isoformat(), **fields)
+        self.save()
+
+    def pending_intent(self, symbol: str) -> dict[str, Any] | None:
+        return next((i for i in self.state["intents"].values() if i["symbol"] == symbol and i["status"] in PENDING), None)
+
+    def resolve_intents(self, positions: list[Any]) -> list[dict[str, Any]]:
+        """Settle every intention left open (lost answer, crash, restart) from what the account really holds."""
+
+        settled = []
+        for intent in list(self.state["intents"].values()):
+            if intent["status"] not in PENDING:
+                continue
+            tag = f"{COMMENT}:{intent['id']}"
+            found = next((p for p in positions if p.comment == tag and p.magic == MAGIC and p.symbol == intent["symbol"]), None)
+            age = (self.clock() - datetime.fromisoformat(intent["at"])).total_seconds()
+            if found:
+                self.state["mirrored"][intent["symbol"]] = intent["entry_ts"]
+                self._set_intent(intent["id"], "EXECUTE", ticket=found.ticket, lots_filled=found.volume,
+                                 resolved="position retrouvée")
+            elif age >= INTENT_GRACE_SECONDS:
+                self._set_intent(intent["id"], "ABSENT", resolved="aucune position après le délai : ordre non exécuté")
+            else:
+                continue
+            settled.append(self.state["intents"][intent["id"]])
+        return settled
+
+    def intents_public(self) -> list[dict[str, Any]]:
+        keep = ("id", "symbol", "side", "lots", "status", "at", "ticket", "lots_filled", "retcode", "resolved", "error")
+        recent = sorted(self.state["intents"].values(), key=lambda i: i["at"], reverse=True)[:8]
+        return [{k: v for k, v in i.items() if k in keep} for i in recent]
+
     def cycle(self) -> dict[str, Any]:
         status = self.client.get("/api/status")
         if status.get("mode") != "SIMULATION" or not status.get("live_locked", False):
@@ -217,6 +268,9 @@ class Bridge:
         with self.trader as trader:
             account = trader.refresh_account()
             positions = trader.positions()
+            for settled in self.resolve_intents(positions):
+                actions.append({"kind": "intent_resolved", "symbol": settled["symbol"], "side": settled["side"],
+                                "reason": f"{settled['status']} : {settled['resolved']}"})
             for symbol, target in sorted(wanted.items()):
                 mine = [p for p in positions if p.astra and p.symbol == symbol]
                 for p in mine:
@@ -233,6 +287,8 @@ class Bridge:
                     continue
                 if self.state["mirrored"].get(symbol) == target["entry_ts"]:
                     continue  # already mirrored once for this paper entry: stopped out on MT5, not reopened
+                if self.pending_intent(symbol) is not None:
+                    continue  # an earlier order on this pair has no known outcome yet: look first, never send again
                 state = self.account_state(trader.refresh_account(), trader.positions())
                 limits = self.limits
                 risk_pct = limits.risk_per_trade_pct if isinstance(limits, RiskLimits) else 0.0
@@ -252,13 +308,32 @@ class Bridge:
                         actions.append({"kind": "refused", "symbol": symbol, "side": target["side"],
                                         "lots": entry["lots"], "reason": "; ".join(decision.reasons)[:190]})
                     continue
-                report = trader.open(symbol, target["side"], entry["lots"], entry["sl"])
+                intent = self._intent(symbol, target["side"], entry["lots"], entry["sl"], target["entry_ts"])
+                try:
+                    report = trader.open(symbol, target["side"], entry["lots"], entry["sl"], comment=f"{COMMENT}:{intent}")
+                except Mt5OrderRejected as exc:
+                    self._set_intent(intent, "REJETE", retcode=exc.retcode, error=str(exc)[:160])
+                    key = f"{target['entry_ts']}|rejet {exc.retcode}"
+                    if self.state["last_refusal"].get(symbol) != key:
+                        self.state["last_refusal"][symbol] = key
+                        actions.append({"kind": "refused", "symbol": symbol, "side": target["side"], "lots": entry["lots"],
+                                        "reason": f"refus du courtier : {exc}"[:190]})
+                    continue
+                except Mt5OrderUnknown as exc:
+                    self._set_intent(intent, "INCONNU", error=str(exc)[:160])
+                    actions.append({"kind": "order_unknown", "symbol": symbol, "side": target["side"], "lots": entry["lots"],
+                                    "reason": f"{exc} : vérification du compte avant tout nouvel essai"[:190]})
+                    continue
+                filled = report["volume"]
+                self._set_intent(intent, "PARTIEL" if report.get("partial") else "EXECUTE", ticket=report["order"],
+                                 lots_filled=filled, retcode=report["retcode"])
                 self.state["mirrored"][symbol] = target["entry_ts"]
                 self.state["last_refusal"].pop(symbol, None)
                 pips = pip_size(symbol)
                 sign = 1 if target["side"] == "LONG" else -1
-                actions.append({"kind": "open", "symbol": symbol, "side": target["side"], "lots": entry["lots"],
+                actions.append({"kind": "open", "symbol": symbol, "side": target["side"], "lots": filled,
                                 "sl": entry["sl"], "price": report["price"], "order": report["order"],
+                                "status": "PARTIEL" if report.get("partial") else "EXECUTE",
                                 "risk_usd": round(risk_usd, 2), "reason": target["reason"],
                                 "requested_price": report["requested_price"], "latency_ms": report["latency_ms"],
                                 "spread_pips": round((entry["ask"] - entry["bid"]) / pips, 2),
@@ -284,7 +359,7 @@ class Bridge:
         body = {"account": account, "positions": positions, "actions": actions, "risk": self.risk_panel(state),
                 "reconciliation": self.reconcile(objects),
                 "bridge": {"last_error": self.last_error, "history_synced_at": self.history_synced_at,
-                           "stop_file": (self.workdir / "STOP").exists()}}
+                           "stop_file": (self.workdir / "STOP").exists(), "intents": self.intents_public()}}
         try:
             self.client.post("/api/mt5/snapshot", body)
         except (ApiError, OSError) as exc:
