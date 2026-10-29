@@ -40,6 +40,8 @@ TIMESPANS = {"M5": (5, "minute"), "M15": (15, "minute"), "H1": (1, "hour"), "H4"
 MAX_PAGE = 50_000
 MAX_PAGES = 40
 MAX_BYTES = 30 * 1024 * 1024
+ATTEMPTS = 6
+THROTTLED_INTERVAL = 13.0  # seconds between requests once the provider has said "too many requests" (5 per minute)
 Opener = Callable[[urllib.request.Request, float], tuple[int, bytes]]
 
 
@@ -79,21 +81,37 @@ def _urlopen(request: urllib.request.Request, timeout: float) -> tuple[int, byte
 
 class MassiveClient:
     def __init__(self, key: str, *, base_url: str = BASE_URL, opener: Opener = _urlopen, timeout: float = 30.0,
-                 sleep: Callable[[float], None] = time.sleep) -> None:
+                 sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic) -> None:
         parsed = urllib.parse.urlsplit(base_url)
         if parsed.scheme != "https" and parsed.hostname not in ("127.0.0.1", "localhost"):
             raise MassiveError("Massive : HTTPS obligatoire")
         self._key, self._base, self._host = key, base_url.rstrip("/"), parsed.netloc
-        self._opener, self._timeout, self._sleep = opener, timeout, sleep
+        self._opener, self._timeout, self._sleep, self._clock = opener, timeout, sleep, clock
+        self._interval = 0.0           # minimum spacing between requests: raised for good after a first refusal
+        self._last: float | None = None
+
+    def _pace(self) -> None:
+        if self._interval and self._last is not None:
+            wait = self._interval - (self._clock() - self._last)
+            if wait > 0:
+                self._sleep(wait)
+        self._last = self._clock()
 
     def _get(self, url: str) -> dict[str, Any]:
         if urllib.parse.urlsplit(url).netloc != self._host:
             raise MassiveError("Massive : adresse de page suivante hors du fournisseur refusée")
         request = urllib.request.Request(url, headers={"Authorization": f"Bearer {self._key}", "Accept": "application/json",
                                                        "User-Agent": "astra-massive"})
-        for attempt in range(3):
+        status, raw = 0, b""
+        for attempt in range(ATTEMPTS):
+            self._pace()
             status, raw = self._opener(request, self._timeout)
-            if status == 429 or status >= 500:
+            if status == 429:
+                # The plan's request limit (the free plans allow a few requests a minute): slow down for good.
+                self._interval = THROTTLED_INTERVAL
+                self._sleep(THROTTLED_INTERVAL)
+                continue
+            if status >= 500:
                 self._sleep(min(30.0, 2.0 * 2 ** attempt))
                 continue
             break
@@ -184,7 +202,8 @@ def ingest(store: CandleStore, client: MassiveClient, symbol: str, timeframe: st
     except (MassiveError, MarketDataError) as exc:
         failures = store.source_failure(SOURCE, str(exc))
         store.finish_import(import_id, "FAILED", {"source": SOURCE, "error": str(exc), "consecutive_failures": failures})
-        return {"status": "FAILED", "import_id": import_id, "error": str(exc), "consecutive_failures": failures}
+        return {"status": "FAILED", "import_id": import_id, "symbol": symbol, "timeframe": timeframe, "error": str(exc),
+                "consecutive_failures": failures}
 
 
 def check(client: MassiveClient, *, today: date | None = None) -> dict[str, Any]:

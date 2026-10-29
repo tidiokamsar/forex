@@ -67,6 +67,40 @@ class ClientTests(unittest.TestCase):
         with self.assertRaises(massive.MassiveError):
             massive.MassiveClient(KEY, base_url="http://api.massive.com")
 
+    def test_a_request_limit_slows_the_client_down_for_good_and_gives_up_after_six_attempts(self):
+        class Throttled(FakeProvider):
+            def __init__(self, refusals, page):
+                super().__init__([page])
+                self.refusals = refusals
+
+            def __call__(self, request, timeout):
+                self.requests.append(request.full_url)
+                if self.refusals > 0:
+                    self.refusals -= 1
+                    return 429, b'{"status":"ERROR"}'
+                return 200, json.dumps(self.pages[0]).encode()
+
+        sleeps, now = [], {"t": 0.0}
+        page = {"status": "OK", "results": [bar("2026-10-27T10:00:00")]}
+        provider = Throttled(1, page)
+        client = massive.MassiveClient(KEY, opener=provider, sleep=lambda s: (sleeps.append(s), now.update(t=now["t"] + s)),
+                                       clock=lambda: now["t"])
+        self.assertEqual(len(client.aggregates("EURUSD", "H1", date(2026, 10, 27), date(2026, 10, 28))), 1)
+        self.assertEqual(sleeps, [massive.THROTTLED_INTERVAL])  # waited once, then succeeded
+        for symbol in ("GBPUSD", "USDJPY"):  # once refused, every request is spaced by the interval
+            sleeps.clear()
+            client.aggregates(symbol, "H1", date(2026, 10, 27), date(2026, 10, 28))
+            self.assertEqual(sleeps, [massive.THROTTLED_INTERVAL])
+        sleeps.clear()
+        now["t"] += 60  # a long pause: no need to wait any more
+        client.aggregates("AUDUSD", "H1", date(2026, 10, 27), date(2026, 10, 28))
+        self.assertEqual(sleeps, [])
+        hopeless = Throttled(99, page)
+        with self.assertRaises(massive.MassiveError) as caught:
+            massive.MassiveClient(KEY, opener=hopeless, sleep=lambda s: None).aggregates(
+                "EURUSD", "H1", date(2026, 10, 27), date(2026, 10, 28))
+        self.assertEqual((caught.exception.status, len(hopeless.requests)), (429, massive.ATTEMPTS))
+
     def test_check_reports_each_timeframe(self):
         pages = [{"status": "OK", "results": [bar("2026-10-29T09:00:00")]}]
         out = massive.check(self.client(FakeProvider(pages * 5)), today=date(2026, 10, 29))
