@@ -6,17 +6,17 @@ Statuts : `RÉUSSI`, `ÉCHEC`, `BLOQUÉ`, `NON TESTÉ`. Un test non exécuté n'
 
 | # | Exigence | Statut | Preuve ou cause |
 |---|---|---|---|
-| 1 | Massive fournit des données autorisées, stockées, qualifiées | BLOQUÉ | aucune clé déposée ; `massive.py` et ses 7 tests passent sur un faux fournisseur, jamais testé avec le vrai service |
+| 1 | Massive fournit des données autorisées, stockées, qualifiées | RÉUSSI (D1), EN COURS (H1) | clé déposée ; accès confirmé sur M5, M15, H1, H4, D1 ; D1 importé sur 7 paires (environ 622 bougies, 0 rejet) ; accès fin de journée ; limite de requêtes respectée |
 | 2 | Backtest reproductible | RÉUSSI | 41 backtests terminés en production ; tests de déterminisme dans `test_papertrade` |
 | 3 | Compte Forex DEMO vérifié et connecté | RÉUSSI | terminal MT5 : serveur MetaQuotes-Demo, mode DEMO, devise USD (audit du 2026-10-29) |
 | 4 | Cotations du courtier reçues | RÉUSSI | flux toutes les 5 s, 7 paires ; bougies M5 à D1 stockées |
 | 5 | Décision justifiée via le Risk Gateway | NON TESTÉ en production | portail codé et testé (`test_mt5_risk`, `test_mt5_bridge`) mais non déployé |
 | 6 | Ordre de test DEMO confirmé | RÉUSSI | 2026-10-28 21:22 UTC, achat puis vente de 0,01 lot EURUSD, ordres 11149214323/24, transactions 10896045589/90, code 10009 |
-| 7 | Ordres et positions rapprochés avec le courtier | RÉUSSI (lecture) | audit du 2026-10-29 : 5 positions, 8 transactions, 7 ordres ; les 4 équations comptables se vérifient ; correction à déployer |
+| 7 | Ordres et positions rapprochés avec le courtier | RÉUSSI | production du 2026-10-29 04:05 UTC : 5 positions d'origine confirmée, 7 ordres, 7 exécutions, 1 clôturée ; 4 contrôles comptables OK ; l'historique vient du terminal du PC (limite connue) |
 | 8 | Résultats conservés après redémarrage | RÉUSSI | tests `StoreTests.test_everything_survives_a_restart` ; bases conservées lors des déploiements |
 | 9 | Entrées automatiques activées seulement après validation des tranches de sécurité | ÉCHEC (corrigé) | les 5 positions ont été ouvertes le 2026-10-28 avant le portail de risque et le rapprochement ; ouvertures suspendues depuis le 2026-10-29 03:12 UTC |
 | 10 | LIVE reste verrouillé | RÉUSSI | `/api/status` : `live_locked: true`, mode SIMULATION ; connecteur MT5 limité au mode DEMO et au serveur autorisé |
-| 11 | Tableau de bord cohérent, attribué, non fictif | REVIEW | comptabilité unique côté serveur, tests sur les valeurs réelles ; en attente de déploiement |
+| 11 | Tableau de bord cohérent, attribué, non fictif | RÉUSSI (données) | version a4e227e en production : résultat net −185,04 USD = −0,12 réalisé − 184,92 latent ; contrôle visuel complet à refaire sur la page publiée |
 
 ## Rapprochement du 2026-10-29 (valeurs lues dans MT5)
 

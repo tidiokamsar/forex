@@ -108,6 +108,8 @@ def build_parser() -> argparse.ArgumentParser:
     mt5_export.add_argument("--terminal", default=None, help="Chemin de terminal64.exe")
     mt5_test = mt5_actions.add_parser("test-order", help="Ordre DEMO contrôlé : 0,01 lot EURUSD avec stop, refermé aussitôt")
     mt5_test.add_argument("--login", type=int, required=True, help="Compte DEMO attendu (tout autre compte est refusé)")
+    mt5_history = mt5_actions.add_parser("history-sync", help="Envoyer l'historique du courtier lu par le terminal de ce poste")
+    mt5_history.add_argument("--days", type=int, default=90)
     mt5_bridge = mt5_actions.add_parser("bridge", help="Recopier les comptes ASTRA auto sur le compte DEMO (ASTRA_MT5_*)")
     mt5_bridge.add_argument("bridge_action", choices=("run", "once"))
     replay = commands.add_parser(
@@ -403,6 +405,15 @@ def _mt5(args: argparse.Namespace) -> int:
         from .mt5_bridge import run_from_env
 
         return run_from_env(once=args.bridge_action == "once")
+    if args.mt5_action == "history-sync":
+        from .mt5_bridge import history_sync_once
+
+        try:
+            _write_json({"history": history_sync_once(args.days)})
+            return 0
+        except mt5_demo.Mt5DemoError as exc:
+            _write_json({"status": "error", "reason": str(exc)})
+            return 2
     if args.mt5_action == "test-order":
         return _mt5_test_order(args.login)
     try:

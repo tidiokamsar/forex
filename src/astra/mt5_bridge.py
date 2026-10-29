@@ -74,6 +74,32 @@ def targets(overview: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return result
 
 
+def post_history(client: AstraClient, history: dict[str, Any], server: str) -> dict[str, Any]:
+    """Send a broker history in small posts (the server keys it by the broker's tickets, so repeats are harmless)."""
+
+    sent: dict[str, Any] = {"deals": 0, "orders": 0, "answered": history["answered"], "terminal_error": history["last_error"]}
+    for kind in ("deals", "orders"):
+        items = history[kind]
+        for start in range(0, len(items), ITEMS_PER_POST):
+            client.post("/api/mt5/history", {"server": server, kind: items[start:start + ITEMS_PER_POST]})
+        sent[kind] = len(items)
+    return sent
+
+
+def history_sync_once(days: int = 90) -> dict[str, Any]:
+    """Read the broker's history from the signed-in terminal of this machine and send it to the server (read only)."""
+
+    url = os.environ.get("ASTRA_MT5_URL", "").strip()
+    token_file = os.environ.get("ASTRA_MT5_TOKEN_FILE", "").strip()
+    login = os.environ.get("ASTRA_MT5_LOGIN", "").strip()
+    if not (url and token_file and login.isdigit()):
+        raise Mt5DemoError("ASTRA_MT5_URL, ASTRA_MT5_TOKEN_FILE et ASTRA_MT5_LOGIN sont obligatoires")
+    client = AstraClient(http_transport(url, Path(_native(token_file)).read_text(encoding="utf-8").strip()))
+    with Mt5DemoTrader(os.environ.get("ASTRA_MT5_TERMINAL") or DEFAULT_TERMINAL, expected_login=int(login)) as trader:
+        history = trader.history(days)
+        return post_history(client, history, trader.account["server"])
+
+
 class Bridge:
     def __init__(self, client: AstraClient, trader: Mt5DemoTrader, workdir: Path,
                  clock: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -279,14 +305,7 @@ class Bridge:
     def sync_history(self, days: int) -> dict[str, int]:
         """Send the broker's deal and order history. Idempotent on the server (keyed by the broker's tickets)."""
 
-        history = self.trader.history(days)
-        server = self.trader.account["server"]
-        sent: dict[str, Any] = {"deals": 0, "orders": 0, "answered": history["answered"], "terminal_error": history["last_error"]}
-        for kind in ("deals", "orders"):
-            items = history[kind]
-            for start in range(0, len(items), ITEMS_PER_POST):
-                self.client.post("/api/mt5/history", {"server": server, kind: items[start:start + ITEMS_PER_POST]})
-            sent[kind] = len(items)
+        sent = post_history(self.client, self.trader.history(days), self.trader.account["server"])
         self.history_synced_at = self.clock().isoformat()
         return sent
 
