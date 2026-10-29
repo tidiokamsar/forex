@@ -281,7 +281,7 @@ class Bridge:
 
         history = self.trader.history(days)
         server = self.trader.account["server"]
-        sent = {"deals": 0, "orders": 0}
+        sent: dict[str, Any] = {"deals": 0, "orders": 0, "answered": history["answered"], "terminal_error": history["last_error"]}
         for kind in ("deals", "orders"):
             items = history[kind]
             for start in range(0, len(items), ITEMS_PER_POST):

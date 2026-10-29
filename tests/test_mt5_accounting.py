@@ -222,6 +222,48 @@ class ConnectorHistoryTests(unittest.TestCase):
         self.assertEqual((history["deals"][0]["commission"], history["orders"]), (-0.5, []))
 
 
+class HistoryFallbackTests(unittest.TestCase):
+    """A terminal that has not loaded its history answers empty: the connector asks three ways and says which answered."""
+
+    def deal(self, ticket, position_id):
+        return SimpleNamespace(ticket=ticket, order=ticket + 1, position_id=position_id, time=server_seconds("2026-10-28 23:22"),
+                               symbol="AUDUSD", type=1, entry=0, volume=0.88, price=0.70553, commission=0.0, swap=0.0, fee=0.0,
+                               profit=0.0, magic=MAGIC, comment="ASTRA", reason=3)
+
+    def feed(self, **handlers):
+        fake = FakeMt5()
+        for name, handler in handlers.items():
+            setattr(fake, name, handler)
+        return mt5_demo.Mt5DemoFeed(module=fake)
+
+    def test_recent_window_answers_first(self):
+        with self.feed(history_deals_get=lambda *a, **k: (self.deal(1, 7),) if a else ()) as feed:
+            self.assertEqual(feed.history(30)["answered"], "fenêtre récente")
+
+    def test_a_very_wide_window_is_tried_when_the_recent_one_is_empty(self):
+        def deals(*args, **kwargs):
+            return (self.deal(1, 7),) if args and args[0].year == 2015 else ()
+
+        with self.feed(history_deals_get=deals) as feed:
+            result = feed.history(30)
+        self.assertEqual((result["answered"], len(result["deals"])), ("fenêtre large", 1))
+
+    def test_each_open_position_is_asked_by_its_ticket_as_a_last_resort(self):
+        def deals(*args, **kwargs):
+            return (self.deal(11, kwargs["position"]),) if "position" in kwargs else ()
+
+        positions = lambda: (SimpleNamespace(ticket=1), SimpleNamespace(ticket=2))  # noqa: E731
+        with self.feed(history_deals_get=deals, positions_get=positions) as feed:
+            result = feed.history(30)
+        self.assertIn("par position", result["answered"])
+        self.assertEqual(len(result["deals"]), 1)  # both positions returned ticket 11: kept once, keyed by the broker's ticket
+
+    def test_an_empty_terminal_stays_empty_and_says_so(self):
+        with self.feed() as feed:
+            result = feed.history(30)
+        self.assertEqual((result["deals"], result["orders"], result["answered"]), ([], [], "aucune réponse"))
+
+
 class FreshnessTests(unittest.TestCase):
     def lines(self, **kwargs):
         base = dict(quote_at=NOW.isoformat(), snapshot_at=NOW.isoformat(), history_synced_at=NOW.isoformat(),

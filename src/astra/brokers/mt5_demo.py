@@ -144,26 +144,48 @@ class Mt5DemoFeed:
             out.append({"symbol": symbol, "bid": float(tick.bid), "ask": float(tick.ask), "time": stamp})
         return out
 
-    def history(self, days: int = 30) -> dict[str, list[dict[str, Any]]]:
-        """The broker's own deal and order history over the last ``days`` days (times in UTC). Nothing is invented:
-        an empty answer stays empty."""
+    def _deal(self, d: Any) -> dict[str, Any]:
+        return {"ticket": int(d.ticket), "order": int(d.order), "position_id": int(d.position_id), "ts": self._utc(d.time),
+                "symbol": d.symbol or "", "type": int(d.type), "entry": int(d.entry), "volume": float(d.volume),
+                "price": float(d.price), "commission": float(d.commission), "swap": float(d.swap), "fee": float(d.fee),
+                "profit": float(d.profit), "magic": int(d.magic), "comment": str(d.comment or "")[:60], "reason": int(d.reason)}
+
+    def _order(self, o: Any) -> dict[str, Any]:
+        return {"ticket": int(o.ticket), "position_id": int(o.position_id), "ts": self._utc(o.time_setup),
+                "symbol": o.symbol or "", "type": int(o.type), "state": int(o.state), "volume": float(o.volume_initial),
+                "magic": int(o.magic), "comment": str(o.comment or "")[:60]}
+
+    def history(self, days: int = 30) -> dict[str, Any]:
+        """The broker's own deal and order history (times in UTC). A terminal that has not loaded its history answers
+        empty, so three questions are asked in turn and the one that answered is reported: the recent window, a very
+        wide window, then each open position by its ticket. Nothing is invented: an empty answer stays empty."""
 
         mt5 = self.mt5
         end = datetime.now(UTC).replace(tzinfo=None) + timedelta(days=1)
-        start = end - timedelta(days=days + 1)
-        deals = []
-        for d in mt5.history_deals_get(start, end) or ():
-            deals.append({"ticket": int(d.ticket), "order": int(d.order), "position_id": int(d.position_id),
-                          "ts": self._utc(d.time), "symbol": d.symbol or "", "type": int(d.type), "entry": int(d.entry),
-                          "volume": float(d.volume), "price": float(d.price), "commission": float(d.commission),
-                          "swap": float(d.swap), "fee": float(d.fee), "profit": float(d.profit), "magic": int(d.magic),
-                          "comment": str(d.comment or "")[:60], "reason": int(d.reason)})
-        orders = []
-        for o in mt5.history_orders_get(start, end) or ():
-            orders.append({"ticket": int(o.ticket), "position_id": int(o.position_id), "ts": self._utc(o.time_setup),
-                           "symbol": o.symbol or "", "type": int(o.type), "state": int(o.state),
-                           "volume": float(o.volume_initial), "magic": int(o.magic), "comment": str(o.comment or "")[:60]})
-        return {"deals": deals, "orders": orders}
+        wide = datetime(2015, 1, 1, tzinfo=UTC).replace(tzinfo=None)
+        attempts = [("fenêtre récente", end - timedelta(days=days + 1)), ("fenêtre large", wide)]
+        deals: dict[int, dict[str, Any]] = {}
+        orders: dict[int, dict[str, Any]] = {}
+        answered = "aucune réponse"
+        for label, start in attempts:
+            for d in mt5.history_deals_get(start, end) or ():
+                deals[int(d.ticket)] = self._deal(d)
+            for o in mt5.history_orders_get(start, end) or ():
+                orders[int(o.ticket)] = self._order(o)
+            if deals or orders:
+                answered = label
+                break
+        if not deals:
+            for p in mt5.positions_get() or ():
+                for d in mt5.history_deals_get(position=int(p.ticket)) or ():
+                    deals[int(d.ticket)] = self._deal(d)
+                for o in mt5.history_orders_get(position=int(p.ticket)) or ():
+                    orders[int(o.ticket)] = self._order(o)
+            if deals or orders:
+                answered = "par position ouverte (le reste de l'historique n'est pas chargé par ce terminal)"
+        return {"deals": sorted(deals.values(), key=lambda d: (d["ts"], d["ticket"])),
+                "orders": sorted(orders.values(), key=lambda o: (o["ts"], o["ticket"])), "answered": answered,
+                "last_error": str(mt5.last_error())}
 
     def candles(self, symbol: str, timeframe: str, count: int) -> list[Candle]:
         """The ``count`` most recent closed candles, timestamps in UTC (bar open time)."""

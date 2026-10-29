@@ -44,10 +44,13 @@ class FakeMt5:
     def terminal_info(self):
         return SimpleNamespace(connected=True, trade_allowed=False)
 
-    def history_deals_get(self, start, end):
+    def positions_get(self, *args, **kwargs):
         return ()
 
-    def history_orders_get(self, start, end):
+    def history_deals_get(self, *args, **kwargs):
+        return ()
+
+    def history_orders_get(self, *args, **kwargs):
         return ()
 
     def symbol_select(self, symbol, enable):
