@@ -47,12 +47,12 @@ from .papertrade import (
 LEARNING_VERSION = "1.0.0"
 SOURCE, TIMEFRAME = "ECB_EXR", "D1"
 FINAL_CHECK_DAYS = 365
-CANDIDATES_PER_RUN = 24  # about eight per strategy family
+CANDIDATES_PER_RUN = 24  # about six per strategy family
 MIN_TRADES = 20
 MIN_SCORE_GAIN = 0.5
 MAX_DRAWDOWN_PCT = 15.0
 SPACE = {
-    "family": ("sma_trend", "momentum", "mean_reversion"),
+    "family": ("sma_trend", "momentum", "mean_reversion", "breakout"),
     "z_entry": (0.75, 1.0, 1.5, 2.0),  # mean_reversion only
     "fast": (5, 10, 15, 20, 30, 40),
     "slow": (20, 30, 50, 80, 120, 160),

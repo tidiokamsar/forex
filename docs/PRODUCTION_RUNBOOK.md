@@ -42,3 +42,13 @@ Déposés par l'utilisateur, saisie masquée : `astra-set-mt5-demo-password`, `a
 ## Sauvegarde
 
 Minuteur `astra-backup.timer` (quotidien). Restauration : à tester sur une copie avant toute dépendance (voir `ACCEPTANCE_MATRIX.md`).
+
+## Test de restauration (sur une copie)
+
+Dernier essai réussi le 2026-10-31. Ne jamais restaurer sur la base active pour un test.
+
+1. Copier la dernière sauvegarde et son manifeste dans un dossier de travail privé.
+2. `python -m astra backup verify <fichier>` : empreinte, intégrité et comptes de tables.
+3. `ASTRA_DATABASE=<dossier>/restored.sqlite3 python -m astra backup restore <fichier> --operator <nom> --reason "<raison>"` (le fichier cible ne doit pas exister).
+4. Comparer le nombre de lignes de chaque table : seule la ligne d'audit de la restauration doit différer.
+5. Supprimer le dossier de travail.

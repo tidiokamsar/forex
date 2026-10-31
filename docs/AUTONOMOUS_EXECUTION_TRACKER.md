@@ -17,8 +17,8 @@
 | T-011 | 8 | Reprise des entrées automatiques | T-008, T-009, T-010 vérifiés | pont MT5 | BLOCKED | — | décision humaine souhaitable | — | proposer la levée du STOP après rapprochement |
 | T-012 | 10 | Contrôles de trading DEMO sur le site : ordre, fermeture, resserrer le stop, suspendre, reprendre (annulation sans objet : ordres au marché ; arrêt d'urgence : ligne de commande) | T-009, T-015 | mt5view, labweb, mt5_bridge, board.js | REVIEW | suite complète 1236 tests OK ; tests SiteRequestTests et BridgeTests (13 tests), test_board_assets ; panneau non vérifié visuellement en rôle opérateur (la politique de sécurité de la page interdit le code dynamique) | non exercé sur le vrai compte (STOP et arrêt d'urgence actifs) | à venir | déployer, puis essai d'une fermeture sur demande de l'utilisateur |
 | T-015 | 7 | États d'ordre, intention enregistrée avant l'envoi, rapprochement après résultat inconnu, rejet, exécution partielle | T-009 | mt5_bridge, mt5_demo_orders | REVIEW | 7 tests de cycle de vie, tous OK ; suite complète 1236 tests OK (2026-10-29) | non exercé sur le vrai compte (STOP en place) | à venir | déployer après la suite complète |
-| T-013 | 6 | Mesures de risque, cassure, régimes | — | papertrade, learning | TODO | — | — | — | — |
-| T-014 | 12 | Restauration de sauvegarde testée sur une copie | — | — | TODO | — | — | — | — |
+| T-013 | 6 | Mesures de risque, cassure, régimes | — | riskmetrics, papertrade, learning, labweb, board.js | REVIEW | test_riskmetrics (9 tests), tests de la famille cassure ; 87 tests ciblés OK | historique de fonds propres court : ratios non affichés avant 10 jours ; cassure sans mémoire entre bougies | à venir | déployer après la suite complète |
+| T-014 | 12 | Restauration de sauvegarde testée sur une copie | — | src/astra/backup.py | DONE | 2026-10-31 : sauvegarde du jour (94 Mo) vérifiée, restaurée sur une copie : 42 tables identiques (une ligne d'audit en plus), intégrité ok, champion lu depuis la copie, base de production intacte | la clé MFA n'est pas dans la sauvegarde | — | — |
 
 ## Décision crypto (T-005)
 

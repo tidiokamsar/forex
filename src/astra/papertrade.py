@@ -34,11 +34,12 @@ from .marketdata import KIND_REFERENCE, PAIRS, TIMEFRAMES, Candle, CandleStore, 
 
 ENGINE_VERSION = "1.0.0"
 STRATEGY_NAME = "sma_atr_trend"
-STRATEGY_VERSION = "1.1.0"  # 1.1.0: momentum and mean-reversion families next to the SMA trend
+STRATEGY_VERSION = "1.2.0"  # 1.2.0: breakout family; 1.1.0: momentum and mean-reversion families next to the SMA trend
 FAMILIES = {
     "sma_trend": "tendance SMA",
     "momentum": "momentum",
     "mean_reversion": "retour à la moyenne",
+    "breakout": "cassure de canal",
 }
 BUY, SELL, FLAT = "ACHAT", "VENTE", "AUCUNE_POSITION"
 MIN_UNITS, UNIT_STEP = 1000, 1000
@@ -69,7 +70,8 @@ class StrategyParams:
 
     ``family`` picks the rule: ``sma_trend`` (fast SMA against slow SMA), ``momentum`` (close against the first
     close of the slow window, confirmed by the fast SMA) or ``mean_reversion`` (z-score of the close against the
-    slow SMA, entry beyond ``z_entry``)."""
+    slow SMA, entry beyond ``z_entry``) or ``breakout`` (close beyond the highest high or lowest low of the
+    ``slow`` previous bars)."""
 
     fast: int = 20
     slow: int = 50
@@ -93,7 +95,7 @@ class StrategyParams:
 
     @property
     def warmup(self) -> int:
-        return max(self.slow, self.atr_window + 1)
+        return max(self.slow + (1 if self.family == "breakout" else 0), self.atr_window + 1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +204,8 @@ def decide(history: Sequence[Candle], params: StrategyParams) -> Decision | None
         return _momentum(params, closes, fast, price, vol_ok, indicators, atr_pct)
     if params.family == "mean_reversion":
         return _mean_reversion(params, closes, slow, price, vol_ok, indicators, atr_pct)
+    if params.family == "breakout":
+        return _breakout(params, history, price, vol_ok, indicators, atr_pct)
     trend_up, trend_down = fast > slow, fast < slow
     conditions = {"moyenne_rapide_au_dessus": trend_up, "moyenne_rapide_au_dessous": trend_down,
                   "volatilite_dans_la_plage": vol_ok}
@@ -263,14 +267,39 @@ def _mean_reversion(params: StrategyParams, closes: list[float], mean: float, pr
     return Decision(FLAT, price, indicators, conditions, f"écart {z:.2f} dans la plage ±{params.z_entry} : pas de position")
 
 
+def _breakout(params: StrategyParams, history: Sequence[Candle], price: float, vol_ok: bool,
+              indicators: dict[str, float | None], atr_pct: float) -> Decision:
+    """Channel breakout: buy above the highest high of the ``slow`` previous bars, sell below the lowest low.
+
+    The current bar is excluded from the channel, so the rule only uses what was known before the close. Inside
+    the channel there is no position (no memory between bars: the rule is stateless like the other families)."""
+
+    channel = history[-(params.slow + 1):-1]
+    top = max(c.high if c.high is not None else c.close for c in channel)
+    bottom = min(c.low if c.low is not None else c.close for c in channel)
+    up, down = price > top, price < bottom
+    indicators = {**indicators, "canal_haut": round(top, 6), "canal_bas": round(bottom, 6)}
+    conditions = {"cassure_haussiere": up, "cassure_baissiere": down, "volatilite_dans_la_plage": vol_ok}
+    if not vol_ok:
+        return _quiet_or_wild(params, price, indicators, conditions, atr_pct)
+    if up:
+        return Decision(BUY, price, indicators, conditions,
+                        f"cours {price:.5f} au-dessus du plus haut des {params.slow} bougies précédentes ({top:.5f})")
+    if down:
+        return Decision(SELL, price, indicators, conditions,
+                        f"cours {price:.5f} au-dessous du plus bas des {params.slow} bougies précédentes ({bottom:.5f})")
+    return Decision(FLAT, price, indicators, conditions, f"cours dans le canal {bottom:.5f} à {top:.5f} : pas de cassure")
+
+
 STRATEGIES = {
     STRATEGY_NAME: {
         "version": STRATEGY_VERSION,
-        "label": "Tendance SMA, momentum ou retour à la moyenne + filtre ATR (expérimentales, non validées)",
-        "description": ("Trois familles. Tendance SMA : ACHAT si la moyenne rapide est au-dessus de la lente, VENTE "
+        "label": "Tendance SMA, momentum, retour à la moyenne ou cassure + filtre ATR (expérimentales, non validées)",
+        "description": ("Quatre familles. Tendance SMA : ACHAT si la moyenne rapide est au-dessus de la lente, VENTE "
                         "au-dessous. Momentum : ACHAT si le cours a monté sur la période lente et reste au-dessus de "
                         "la moyenne rapide, VENTE à l'inverse. Retour à la moyenne : ACHAT si le cours est à plus de "
-                        "z écarts-types sous la moyenne lente, VENTE au-dessus. AUCUNE POSITION si la volatilité "
+                        "z écarts-types sous la moyenne lente, VENTE au-dessus. Cassure : ACHAT au-dessus du plus haut du canal "
+                        "des bougies lentes précédentes, VENTE au-dessous du plus bas. AUCUNE POSITION si la volatilité "
                         "(ATR/prix) sort de la plage. Aucune performance n'est démontrée."),
         "params": asdict(StrategyParams()),
     },

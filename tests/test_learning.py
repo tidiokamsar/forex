@@ -131,6 +131,18 @@ class FamilyTests(unittest.TestCase):
         self.assertEqual(self.decide([*flat, 1.07], family="mean_reversion", z_entry=1.5).action, BUY)
         self.assertEqual(self.decide([*flat, 1.1005], family="mean_reversion").action, FLAT)
 
+    def test_breakout_buys_above_the_channel_sells_below_and_ignores_the_current_bar_in_it(self):
+        base = [1.10, 1.101] * 6
+        self.assertEqual(self.decide([*base, 1.12], family="breakout").action, BUY)
+        self.assertEqual(self.decide([*base, 1.08], family="breakout").action, SELL)
+        self.assertEqual(self.decide([*base, 1.1005], family="breakout").action, FLAT)
+        decision = self.decide([*base, 1.12], family="breakout")
+        self.assertEqual(decision.indicators["canal_haut"], 1.101)  # the 1.12 close is not part of its own channel
+
+    def test_breakout_needs_one_more_bar_than_the_window_before_deciding(self):
+        self.assertIsNone(self.decide([1.10, 1.101] * 5, family="breakout"))  # 10 bars: slow window only
+        self.assertIsNotNone(self.decide([1.10, 1.101] * 5 + [1.1], family="breakout"))
+
     def test_old_parameters_keep_the_sma_trend_and_unknown_families_are_refused(self):
         from astra.papertrade import SimulationError, StrategyParams, _build
 

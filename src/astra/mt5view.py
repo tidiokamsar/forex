@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import mt5accounting
+from . import mt5accounting, riskmetrics
 
 SERVERS = frozenset({"MetaQuotes-Demo"})  # same set as brokers.mt5_demo.ALLOWED_SERVERS (checked by a test)
 CANDLE_TIMEFRAMES = ("M5", "M15", "H1", "H4", "D1")
@@ -454,7 +454,9 @@ class Mt5View:
         points = [{"ts": r["ts"], "equity": r["equity"]} for r in curve[::stride]]
         if curve and (len(curve) - 1) % stride:
             points.append({"ts": curve[-1]["ts"], "equity": curve[-1]["equity"]})
-        return {"days": days, "curve": points,
+        with self._connect() as db:
+            history = [(r["ts"], r["equity"]) for r in db.execute("SELECT ts, equity FROM mt5_equity ORDER BY ts")]
+        return {"days": days, "curve": points, "risk": riskmetrics.measures(history),
                 "execution": {"orders": len(opens), "refused": refused, "avg_slippage_pips": _mean(opens, "slippage_pips"),
                               "avg_spread_pips": _mean(opens, "spread_pips"), "avg_latency_ms": _mean(opens, "latency_ms")}}
 

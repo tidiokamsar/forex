@@ -360,7 +360,7 @@ function renderJobs(payload) {
 function paramsText(p) {
   if (!p) return "—";
   const s = p.strategy || {};
-  const family = { momentum: "Momentum", mean_reversion: `Retour à la moyenne (z ${s.z_entry})` }[s.family] || "Tendance SMA";
+  const family = { momentum: "Momentum", mean_reversion: `Retour à la moyenne (z ${s.z_entry})`, breakout: "Cassure de canal" }[s.family] || "Tendance SMA";
   return `${family} · ${s.fast}/${s.slow} · ATR ${s.atr_window} · stop ${p.stop_atr_multiple} ATR · ATR min ${num((s.min_atr_pct || 0) * 100)} %`;
 }
 

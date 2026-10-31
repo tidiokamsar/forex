@@ -231,7 +231,7 @@ function badge(decision) {
   return el("span", text, `badge ${decision === "ACHAT" ? "badge-buy" : decision === "VENTE" ? "badge-sell" : "badge-wait"}`);
 }
 
-const FAMILY = { sma_trend: "tendance SMA", momentum: "momentum", mean_reversion: "retour à la moyenne" };
+const FAMILY = { sma_trend: "tendance SMA", momentum: "momentum", mean_reversion: "retour à la moyenne", breakout: "cassure de canal" };
 
 function renderDecision(d) {
   const s = (d.signals || []).find((x) => x.symbol === boardPair);
@@ -343,6 +343,8 @@ function renderSignals(d) {
     const head = el("div", null, "signal-head");
     head.append(chip(s.symbol), el("strong", pairLabel(s.symbol)), badge(s.decision), el("small", s.since ? ago(s.since) : "—"));
     item.append(head, el("small", `${FAMILY[s.family] || s.family} v${s.version} · ${s.reason || "pas encore de décision"}`));
+    const r = s.regime || {};
+    if (r.trend) item.append(el("small", `Régime du marché (D1) : ${r.trend === "tendance" ? `tendance ${r.direction}` : "sans tendance (range)"}${r.volatility ? `, volatilité ${r.volatility}` : ""} · efficacité ${String(r.efficiency).replace(".", ",")}`, "regime-line"));
     return item;
   }));
 }
@@ -398,13 +400,21 @@ function renderPerformance(d) {
     cell("Transactions clôturées", acc.counts && acc.counts.closed_trades != null ? String(acc.counts.closed_trades) : "—"),
     cell("Taux de réussite", closed.win_rate_pct == null ? "—" : `${String(closed.win_rate_pct).replace(".", ",")} %`),
     cell("Facteur de profit", closed.profit_factor == null ? "—" : String(closed.profit_factor).replace(".", ",")));
+  const rk = p.risk || {};
+  const ratio = (v) => (v == null ? "—" : String(v).replace(".", ","));
+  const risk = el("div", null, "perf-stats");
+  const rcell = (k, v, t) => { const c = el("div"); const small = el("small", k); if (t) small.title = t; c.append(small, el("strong", v)); return c; };
+  const rdef = rk.definitions || {};
+  risk.append(rcell("Sharpe", ratio(rk.sharpe), rdef.sharpe), rcell("Sortino", ratio(rk.sortino), rdef.sortino),
+    rcell("Calmar", ratio(rk.calmar), rdef.calmar), rcell("Baisse maximale", rk.max_drawdown_pct == null ? "—" : `${ratio(rk.max_drawdown_pct)} %`, rdef.max_drawdown_pct));
+  const riskNote = el("p", rk.computable ? `Ratios calculés sur ${rk.days} jour(s) de fonds propres, à titre descriptif (historique court : incertitude large).` : (rk.note || "Historique insuffisant pour les ratios."), "footnote");
   const x = p.execution;
   const quality = el("p", null, "footnote");
   quality.textContent = x && x.orders
     ? `Qualité d’exécution (ordres envoyés depuis la mise en service du suivi) : ${x.orders} ordre(s), ${x.refused} refusé(s) par le portail · glissement moyen ${x.avg_slippage_pips == null ? "—" : x.avg_slippage_pips} pip · spread moyen ${x.avg_spread_pips == null ? "—" : x.avg_spread_pips} pip · latence moyenne ${x.avg_latency_ms == null ? "—" : x.avg_latency_ms} ms`
     : "Qualité d’exécution : aucun ordre envoyé depuis la mise en service du suivi (les ordres plus anciens ne sont connus que par l’historique du courtier).";
   const chart = el("div", null, "chart");
-  $("board-perf").replaceChildren(stats, chart, quality);
+  $("board-perf").replaceChildren(stats, risk, riskNote, chart, quality);
   const points = (p.curve || []).map((q) => ({ x: Date.parse(q.ts), y: q.equity }));
   if (points.length >= 2) lineChart(chart, points, "Fonds propres du compte démo MT5");
   else chart.append(el("p", "La courbe se construit au fil des minutes.", "empty-cell"));

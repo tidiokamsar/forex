@@ -17,7 +17,7 @@ from typing import Any
 
 from flask import Flask, Response, g, jsonify, request
 
-from . import boardstats, indicators, learning, marketdata, mt5view
+from . import boardstats, indicators, learning, marketdata, mt5view, riskmetrics
 from .auth import WebRole
 from .jobs import JobStore, worker_health
 from .marketdata import CandleStore, MarketDataError
@@ -187,7 +187,9 @@ def register_lab_routes(app: Flask, *, database: Path, import_dir: Path, require
                 if last:
                     signal_times.append(last["ts"])
                 family = pair["champion"]["params"]["strategy"].get("family", "sma_trend")
-                signals.append({"symbol": pair["symbol"], "family": family, "version": pair["champion"]["version"],
+                daily = candles.candles(pair["symbol"], learning.TIMEFRAME, learning.SOURCE, limit=130, newest=True)
+                signals.append({"symbol": pair["symbol"], "family": family,
+                                "regime": riskmetrics.regime([c.close for c in daily]), "version": pair["champion"]["version"],
                                 "decision": last["decision"] if last else None, "reason": last["reason"] if last else None,
                                 "since": last["ts"] if last else None})
             snapshot = account.get("snapshot") or {}
