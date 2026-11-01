@@ -62,6 +62,8 @@ class TradingMt5(FakeMt5):
                 if p.ticket == request["position"]:
                     p.sl = request["sl"]
             return SimpleNamespace(retcode=self.TRADE_RETCODE_DONE, comment="done", order=0, deal=0, volume=0.0, price=0.0)
+        if "position" in request and self.mode == "market_closed":
+            return SimpleNamespace(retcode=10018, comment="Market closed", order=0, deal=0, volume=0.0, price=0.0)
         if "position" in request:
             self.open_positions = [p for p in self.open_positions if p.ticket != request["position"]]
         else:
@@ -289,6 +291,20 @@ class BridgeTests(unittest.TestCase):
         self.assertIn("10019", first[0]["reason"])
         self.assertEqual(self.intent_states(), ["REJETE"])
         self.assertEqual(self.bridge.cycle()["actions"], [])  # same refusal, nothing new to say
+        self.assertEqual(self.fake.open_positions, [])
+
+    def test_a_refused_automatic_close_keeps_the_position_is_reported_once_and_never_stops_the_cycle(self):
+        self.bridge.cycle()  # opens the short
+        self.server.view = overview(SHORT, {"side": "FLAT", "label": "AUCUNE_POSITION"})
+        self.fake.mode = "market_closed"  # the weekend
+        first = self.bridge.cycle()["actions"]
+        self.assertEqual([a["kind"] for a in first], ["refused"])
+        self.assertIn("10018", first[0]["reason"])
+        self.assertEqual(len(self.fake.open_positions), 1)  # still there, protected by its stop
+        self.assertEqual(self.bridge.cycle()["actions"], [])  # the same refusal is not repeated
+        self.assertEqual(self.server.posts[-1][0], "/api/mt5/snapshot")  # and the dashboard keeps its snapshots
+        self.fake.mode = "ok"  # the market reopens
+        self.assertEqual([a["kind"] for a in self.bridge.cycle()["actions"]], ["close"])
         self.assertEqual(self.fake.open_positions, [])
 
     def test_a_lost_answer_after_a_real_execution_is_found_on_the_account_and_never_sent_twice(self):

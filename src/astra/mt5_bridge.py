@@ -413,12 +413,29 @@ class Bridge:
                                 "reason": f"{settled['status']} : {settled['resolved']}"})
             for symbol, target in sorted(wanted.items()):
                 mine = [p for p in positions if p.astra and p.symbol == symbol]
+                close_failed = False
                 for p in mine:
                     if target["side"] != p.side:
-                        report = trader.close(p)
+                        try:
+                            report = trader.close(p)
+                        except (Mt5OrderRejected, Mt5OrderUnknown) as exc:
+                            # e.g. market closed at the weekend: the position stays, its stop protects it. One line per
+                            # change, and the cycle goes on so the dashboard keeps its snapshots.
+                            close_failed = True
+                            unknown = isinstance(exc, Mt5OrderUnknown)
+                            key = f"close:{p.ticket}|{getattr(exc, 'retcode', 'inconnu')}"
+                            if self.state["last_refusal"].get(symbol) != key:
+                                self.state["last_refusal"][symbol] = key
+                                actions.append({"kind": "order_unknown" if unknown else "refused", "symbol": symbol,
+                                                "side": p.side, "lots": p.volume,
+                                                "reason": f"fermeture non exécutée, la position reste ouverte : {exc}"[:190]})
+                            continue
+                        self.state["last_refusal"].pop(symbol, None)
                         actions.append({"kind": "close", "symbol": symbol, "ticket": p.ticket, "side": p.side,
                                         "volume": p.volume, "profit": p.profit, "reason": target["reason"],
                                         "price": report["price"]})
+                if close_failed:
+                    continue  # never open the opposite side while the old position is still there
                 if target["side"] == "FLAT":
                     self.state["mirrored"].pop(symbol, None)
                     self.state["last_refusal"].pop(symbol, None)
