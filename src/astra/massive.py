@@ -206,6 +206,39 @@ def ingest(store: CandleStore, client: MassiveClient, symbol: str, timeframe: st
                 "consecutive_failures": failures}
 
 
+SYNC_TIMEFRAMES = ("D1", "H1")
+FIRST_SYNC_DAYS = 30
+
+
+def sync_incremental(store: CandleStore, client: MassiveClient, *, symbols: tuple[str, ...] | None = None,
+                     timeframes: tuple[str, ...] = SYNC_TIMEFRAMES, today: date | None = None,
+                     now: datetime | None = None) -> dict[str, Any]:
+    """Bring every stored series up to yesterday: from the last stored day (re-read, the store is idempotent).
+
+    The plan delivers end-of-day data, so today is never requested. The first failure stops the run: the source
+    back-off applies and the remaining series are reported as not attempted instead of hammering the provider."""
+
+    today = today or (now or datetime.now(UTC)).date()
+    end = today - timedelta(days=1)
+    report: dict[str, Any] = {"source": SOURCE, "up_to": end.isoformat(), "series": [], "failed": None, "not_attempted": 0}
+    pairs = [(s, tf) for s in (symbols or tuple(SYMBOL_MAP)) for tf in timeframes]
+    for index, (symbol, timeframe) in enumerate(pairs):
+        last = store.candles(symbol, timeframe, SOURCE, limit=1, newest=True)
+        start = last[-1].timestamp.date() if last else end - timedelta(days=FIRST_SYNC_DAYS)
+        midnight = datetime(today.year, today.month, today.day, tzinfo=UTC)
+        if last and last[-1].timestamp + timedelta(seconds=TIMEFRAMES[timeframe]) >= midnight:
+            report["series"].append({"symbol": symbol, "timeframe": timeframe, "status": "A_JOUR"})
+            continue
+        result = ingest(store, client, symbol, timeframe, start, end, actor="worker:massive", now=now)
+        report["series"].append({k: result.get(k) for k in ("symbol", "timeframe", "status", "inserted", "already_stored",
+                                                           "conflicts", "rejected", "last", "error")})
+        if result["status"] != "OK":
+            report["failed"] = f"{symbol} {timeframe}: {result.get('error')}"
+            report["not_attempted"] = len(pairs) - index - 1
+            break
+    return report
+
+
 def check(client: MassiveClient, *, today: date | None = None) -> dict[str, Any]:
     """What this key really returns today: one small request per timeframe, nothing stored, nothing assumed."""
 

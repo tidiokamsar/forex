@@ -142,6 +142,56 @@ class IngestTests(unittest.TestCase):
             self.assertEqual(store.source(massive.SOURCE)["consecutive_failures"], 1)
 
 
+class SyncTests(unittest.TestCase):
+    TODAY = date(2026, 11, 1)
+    SYNC_NOW = datetime(2026, 11, 1, 4, 0, tzinfo=UTC)
+
+    def store(self, temp):
+        store = CandleStore(Path(temp) / "astra.sqlite3")
+        store.initialize()
+        return store
+
+    def test_each_series_resumes_from_its_last_stored_day_and_stops_at_yesterday(self):
+        with workspace_tempdir() as temp:
+            store = self.store(temp)
+            seed = FakeProvider([{"status": "OK", "results": [bar("2026-10-28T22:00:00"), bar("2026-10-28T23:00:00")]}])
+            massive.ingest(store, massive.MassiveClient(KEY, opener=seed, sleep=lambda s: None), "EURUSD", "H1",
+                           date(2026, 10, 28), date(2026, 10, 28), now=NOW)
+            page = {"status": "OK", "results": [bar("2026-10-29T10:00:00"), bar("2026-10-31T09:00:00")]}
+            provider = FakeProvider([page] * 14)
+            report = massive.sync_incremental(store, massive.MassiveClient(KEY, opener=provider, sleep=lambda s: None),
+                                              symbols=("EURUSD",), today=self.TODAY, now=self.SYNC_NOW)
+            urls = [u for u, _h in provider.requests]
+            self.assertEqual(report["up_to"], "2026-10-31")
+            self.assertIn("/range/1/hour/2026-10-28/2026-10-31", urls[1])  # H1 resumes at its last stored day
+            self.assertIn("/range/1/day/2026-10-01/2026-10-31", urls[0])  # D1 never imported: the last 30 days
+            self.assertIsNone(report["failed"])
+            self.assertEqual({s["status"] for s in report["series"]}, {"OK"})
+
+    def test_a_series_already_up_to_yesterday_is_not_requested(self):
+        with workspace_tempdir() as temp:
+            store = self.store(temp)
+            page = {"status": "OK", "results": [bar("2026-10-31T00:00:00")]}
+            client = massive.MassiveClient(KEY, opener=FakeProvider([page]), sleep=lambda s: None)
+            massive.ingest(store, client, "EURUSD", "D1", date(2026, 10, 31), date(2026, 10, 31), now=self.SYNC_NOW)
+            provider = FakeProvider([])
+            report = massive.sync_incremental(store, massive.MassiveClient(KEY, opener=provider, sleep=lambda s: None),
+                                              symbols=("EURUSD",), timeframes=("D1",), today=self.TODAY, now=self.SYNC_NOW)
+            self.assertEqual(report["series"][0]["status"], "A_JOUR")
+            self.assertEqual(provider.requests, [])
+
+    def test_the_first_failure_stops_the_run_without_hammering_the_provider(self):
+        with workspace_tempdir() as temp:
+            store = self.store(temp)
+            provider = FakeProvider([], status=401)
+            report = massive.sync_incremental(store, massive.MassiveClient(KEY, opener=provider, sleep=lambda s: None),
+                                              today=self.TODAY, now=self.SYNC_NOW)
+            self.assertIn("EURUSD", report["failed"])
+            self.assertEqual(report["not_attempted"], 13)
+            self.assertEqual(len(provider.requests), 1)
+            self.assertNotIn(KEY, json.dumps(report))
+
+
 class KeyFileTests(unittest.TestCase):
     def test_key_loading(self):
         with workspace_tempdir() as temp:

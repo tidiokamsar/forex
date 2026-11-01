@@ -1,4 +1,5 @@
-# ASTRA worker: CSV imports, ECB reference rates (every 6 h, with back-off), backtests and paper simulations.
+# ASTRA worker: CSV imports, ECB reference rates (every 6 h, with back-off), Massive daily catch-up (needs
+# /etc/astra/massive.key, see deploy/astra-set-massive-key), backtests and paper simulations.
 # SIMULATION only: it opens no broker connection and sends no order. Same account, data and environment as
 # astra-web; unlike astra-web it needs outbound HTTPS (data-api.ecb.europa.eu), so it has no IP deny list.
 [Unit]
@@ -26,6 +27,7 @@ MemoryMax=1G
 TasksMax=64
 StateDirectory=astra
 StateDirectoryMode=0700
+LoadCredential=massive-key:/etc/astra/massive.key
 
 NoNewPrivileges=yes
 CapabilityBoundingSet=

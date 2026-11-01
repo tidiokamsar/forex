@@ -1,16 +1,16 @@
 # Matrice d'acceptation
 
-Statuts : `RÉUSSI`, `ÉCHEC`, `BLOQUÉ`, `NON TESTÉ`. Un test non exécuté n'est jamais compté comme réussi. Dernière mise à jour : 2026-10-29.
+Statuts : `RÉUSSI`, `ÉCHEC`, `BLOQUÉ`, `NON TESTÉ`. Un test non exécuté n'est jamais compté comme réussi. Dernière mise à jour : 2026-11-01.
 
 ## Niveau opérationnel (définition de « terminé »)
 
 | # | Exigence | Statut | Preuve ou cause |
 |---|---|---|---|
-| 1 | Massive fournit des données autorisées, stockées, qualifiées | RÉUSSI (D1), EN COURS (H1) | clé déposée ; accès confirmé sur M5, M15, H1, H4, D1 ; D1 importé sur 7 paires (environ 622 bougies, 0 rejet) ; accès fin de journée ; limite de requêtes respectée |
+| 1 | Massive fournit des données autorisées, stockées, qualifiées | RÉUSSI (D1 et H1) | accès confirmé sur M5, M15, H1, H4, D1 ; D1 (4 359 bougies) et H1 (85 756 bougies) importés sur 7 paires, du 2024-10-29 au 2026-10-28 ; accès fin de journée ; limite de requêtes respectée ; rattrapage quotidien planifié (premier passage réel à observer) |
 | 2 | Backtest reproductible | RÉUSSI | 41 backtests terminés en production ; tests de déterminisme dans `test_papertrade` |
 | 3 | Compte Forex DEMO vérifié et connecté | RÉUSSI | terminal MT5 : serveur MetaQuotes-Demo, mode DEMO, devise USD (audit du 2026-10-29) |
 | 4 | Cotations du courtier reçues | RÉUSSI | flux toutes les 5 s, 7 paires ; bougies M5 à D1 stockées |
-| 5 | Décision justifiée via le Risk Gateway | NON TESTÉ en production | portail codé et testé (`test_mt5_risk`, `test_mt5_bridge`) mais non déployé |
+| 5 | Décision justifiée via le Risk Gateway | NON TESTÉ en production | portail déployé et couvert par les tests (`test_mt5_risk`, `test_mt5_bridge`) ; aucune entrée n'a été décidée en production depuis son déploiement, car le STOP et l'arrêt d'urgence sont actifs |
 | 6 | Ordre de test DEMO confirmé | RÉUSSI | 2026-10-28 21:22 UTC, achat puis vente de 0,01 lot EURUSD, ordres 11149214323/24, transactions 10896045589/90, code 10009 |
 | 7 | Ordres et positions rapprochés avec le courtier | RÉUSSI | production du 2026-10-29 04:05 UTC : 5 positions d'origine confirmée, 7 ordres, 7 exécutions, 1 clôturée ; 4 contrôles comptables OK ; l'historique vient du terminal du PC (limite connue) |
 | 8 | Résultats conservés après redémarrage | RÉUSSI | tests `StoreTests.test_everything_survives_a_restart` ; bases conservées lors des déploiements |
@@ -35,7 +35,7 @@ Statuts : `RÉUSSI`, `ÉCHEC`, `BLOQUÉ`, `NON TESTÉ`. Un test non exécuté n'
 
 | Domaine | Statut | Détail |
 |---|---|---|
-| Suite complète Windows | RÉUSSI (version précédente) | 1 179 tests, 15 échecs attendus des modules `test_lot4_` ; la version courante est en cours d'exécution |
+| Suite complète Windows | RÉUSSI | 1 247 tests sur la version 3ebfe80, 15 échecs attendus des modules `test_lot4_`, 5 ignorés ; la version courante est revérifiée avant chaque déploiement |
 | Suite complète Linux | RÉUSSI avec 1 échec connu | `test_init_admin…` : refusé volontairement quand il s'exécute en root |
 | Indicateurs (SMA, RSI, MACD) | RÉUSSI | RSI 70,46 sur l'exemple de référence de Wilder |
 | Sécurité : anonyme refusé, CSRF, rôles | RÉUSSI | `test_webapp` |
@@ -45,5 +45,6 @@ Statuts : `RÉUSSI`, `ÉCHEC`, `BLOQUÉ`, `NON TESTÉ`. Un test non exécuté n'
 | Timeout puis rapprochement avant renvoi | RÉUSSI (tests) | `test_mt5_bridge` : réponse perdue après exécution (retrouvée sur le compte, un seul ordre), réponse perdue sans exécution (blocage 2 minutes puis un seul nouvel essai), code de timeout traité comme inconnu, reprise après redémarrage ; non exercé sur le vrai compte |
 | Fills partiels, rejets, annulations | RÉUSSI (tests) pour partiel et rejet ; NON APPLICABLE pour l'annulation (ordres au marché seulement) | exécution partielle rapportée avec le volume réellement rempli ; rejet du courtier journalisé une fois, sans répétition à chaque cycle |
 | Arrêt d'urgence bloque les nouvelles entrées | RÉUSSI | essai réel du 2026-10-29 06:31 UTC, autorisé par l'utilisateur : arrêt d'urgence activé, fichier STOP retiré, 1 cycle complet du pont exécuté, 0 ordre envoyé, panneau « Entrées bloquées » ; STOP remis ensuite ; aucune entrée en attente pendant l'essai, donc le refus d'une entrée précise reste couvert par les tests |
-| Sauvegarde et restauration | NON TESTÉ | sauvegarde quotidienne active ; restauration à tester sur une copie |
-| Responsive de la page | NON TESTÉ sur mobile | contrôle visuel desktop fait |
+| Sauvegarde et restauration | RÉUSSI | 2026-10-31 : sauvegarde du jour (94 Mo) vérifiée puis restaurée sur une copie, 42 tables identiques (une ligne d'audit en plus), intégrité ok, base de production intacte ; la clé MFA n'est pas dans la sauvegarde |
+| Responsive de la page | RÉUSSI avec réserve | 2026-11-01, serveur local de test : disposition en une colonne, aucun débordement horizontal de la page ; le volet du navigateur impose une largeur minimale de 701 px, donc l'affichage à 375 px n'est pas vérifié |
+| Panneau d'actions du site | RÉUSSI (affichage), NON TESTÉ (exécution réelle) | vérifié en rôle administrateur sur le serveur local : panneau visible, boîte de confirmation avant tout envoi, aucune requête sans confirmation ; aucune fermeture n'a été exécutée sur le compte démo (la commande de dépôt de la demande a été refusée par le contrôle de sécurité de la session) |

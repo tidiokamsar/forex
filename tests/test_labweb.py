@@ -109,6 +109,44 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.scheduled_ecb_jobs(datetime(2026, 10, 29, 10, 0, tzinfo=UTC), 31, old), 0)  # before the window
         self.assertEqual(self.scheduled_ecb_jobs(datetime(2026, 10, 31, 15, 0, tzinfo=UTC), 31, "2026-10-30T13:15:00+00:00"), 0)  # weekend
 
+    def massive_jobs(self, now, *, imported=True, success_hours_ago=None, key=True):
+        from astra import massive
+        from astra.marketdata import KIND_OHLC, Candle
+
+        with workspace_tempdir() as temp:
+            root = Path(temp)
+            (root / "imports").mkdir()
+            worker = Worker(root / "astra.sqlite3", root / "imports", ecb_enabled=False, clock=lambda: now)
+            worker.initialize()
+            if imported:
+                stamp = datetime(2026, 10, 28, tzinfo=UTC)
+                worker.candles.store([Candle("EURUSD", "D1", stamp, 1.1, 1.2, 1.0, 1.1, 1.0, massive.SOURCE, KIND_OHLC)],
+                                     "HISTORICAL", worker.candles.begin_import(massive.SOURCE, "EURUSD", "D1", "HISTORICAL", "t"))
+                worker.candles.register_source(massive.SOURCE, "MASSIVE_REST", "HISTORICAL", "test")
+                worker.candles.source_attempt(massive.SOURCE)
+                if success_hours_ago is not None:
+                    ago = (now - timedelta(hours=success_hours_ago)).isoformat()
+                    with worker.candles._connect() as db:
+                        db.execute("UPDATE md_sources SET last_success_at = ?, last_attempt_at = ?, next_allowed_at = NULL "
+                                   "WHERE name = ?", (ago, ago, massive.SOURCE))
+                else:
+                    with worker.candles._connect() as db:
+                        db.execute("UPDATE md_sources SET last_attempt_at = NULL WHERE name = ?", (massive.SOURCE,))
+            from unittest import mock
+            loader = (lambda: "k" * 20) if key else mock.Mock(side_effect=massive.MassiveError("clé absente"))
+            with mock.patch.object(massive, "load_key", loader):
+                worker.maybe_schedule_massive()
+            return len([j for j in worker.jobs.jobs() if j["kind"] == "ingest_massive"])
+
+    def test_massive_is_caught_up_once_a_day_after_three_utc_only_when_imported_and_keyed(self):
+        morning = datetime(2026, 11, 1, 4, 0, tzinfo=UTC)
+        self.assertEqual(self.massive_jobs(morning), 1)  # imported before, never synchronised: catch up
+        self.assertEqual(self.massive_jobs(morning, success_hours_ago=30), 1)  # last success was yesterday
+        self.assertEqual(self.massive_jobs(morning, success_hours_ago=2), 0)  # already caught up today
+        self.assertEqual(self.massive_jobs(datetime(2026, 11, 1, 2, 0, tzinfo=UTC)), 0)  # before 03:00 UTC
+        self.assertEqual(self.massive_jobs(morning, imported=False), 0)  # the first import is a deliberate action
+        self.assertEqual(self.massive_jobs(morning, key=False), 0)  # no key on this host
+
     def test_interrupted_job_is_marked_failed_after_a_restart(self):
         worker = self.worker()
         worker.jobs.enqueue("ingest_ecb", {}, "test")

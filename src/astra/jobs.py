@@ -20,18 +20,21 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import learning, marketdata
+from . import learning, marketdata, massive
 from .marketdata import CandleStore, MarketDataError
 from .papertrade import LabStore, SimulationError, run_backtest
 
 LOG = logging.getLogger("astra.worker")
-JOB_KINDS = ("import_csv", "ingest_ecb", "backtest", "learn")
+JOB_KINDS = ("import_csv", "ingest_ecb", "ingest_massive", "backtest", "learn")
 LEARN_INTERVAL = timedelta(hours=20)  # one learning run per pair and day at most
 ECB_INTERVAL = timedelta(hours=6)
 # The ECB publishes the day's reference rates in the afternoon (about 14:15 CET). From 14:00 UTC on a weekday, until the day's
 # candle is stored, the worker asks every 30 minutes instead of every 6 hours, so the strategies see the new bar quickly.
 ECB_WINDOW_INTERVAL = timedelta(minutes=30)
 ECB_WINDOW_FROM_HOUR = 14
+# Massive delivers end-of-day data on the current plan: one catch-up a day, after 03:00 UTC, retried hourly on failure.
+MASSIVE_FROM_HOUR = 3
+MASSIVE_RETRY = timedelta(hours=1)
 POLL_SECONDS = 5.0
 
 
@@ -163,6 +166,7 @@ def worker_health(jobs: JobStore, now: datetime | None = None) -> dict[str, Any]
 class Worker:
     def __init__(self, database: str | Path, import_dir: str | Path, *,
                  ecb_fetch: marketdata.Fetcher | None = None, ecb_enabled: bool = True,
+                 massive_client: Callable[[], massive.MassiveClient] | None = None, massive_enabled: bool = True,
                  clock: Callable[[], datetime] = _now) -> None:
         self.database = Path(database)
         self.import_dir = Path(import_dir)
@@ -173,6 +177,8 @@ class Worker:
         self.learning_enabled = True
         self.ecb_fetch = ecb_fetch
         self.ecb_enabled = ecb_enabled
+        self.massive_client = massive_client or (lambda: massive.MassiveClient(massive.load_key()))
+        self.massive_enabled = massive_enabled
         self.clock = clock
         self.stop = threading.Event()
 
@@ -206,6 +212,11 @@ class Worker:
             if result["status"] == "FAILED":
                 raise MarketDataError(result["error"] or "BCE indisponible")
             return result
+        if job["kind"] == "ingest_massive":
+            report = massive.sync_incremental(self.candles, self.massive_client(), now=self.clock())
+            if report["failed"]:
+                raise MarketDataError(f"Massive : {report['failed']} ({report['not_attempted']} série(s) non tentée(s))")
+            return report
         if job["kind"] == "learn":
             symbol = str(params["symbol"])
             result = learning.learn(self.candles, self.learning, symbol)
@@ -247,6 +258,30 @@ class Worker:
             return
         self.jobs.enqueue("ingest_ecb", {"scheduled": True}, "worker:planification", dedupe_key="ingest_ecb")
 
+    def maybe_schedule_massive(self) -> None:
+        """Once a day, after 03:00 UTC, when the provider key is available: catch every stored series up to yesterday."""
+
+        if not self.massive_enabled:
+            return
+        now = self.clock()
+        if now.hour < MASSIVE_FROM_HOUR:
+            return
+        source = self.candles.source(massive.SOURCE) or {}
+        success, attempt = source.get("last_success_at"), source.get("last_attempt_at")
+        if success and datetime.fromisoformat(success).date() >= now.date():
+            return  # already caught up today
+        if source.get("next_allowed_at") and datetime.fromisoformat(source["next_allowed_at"]) > now:
+            return
+        if attempt and now - datetime.fromisoformat(attempt) < MASSIVE_RETRY:
+            return
+        if not any(c["source"] == massive.SOURCE for c in self.candles.coverage()):
+            return  # nothing imported yet: the first import is a deliberate operator action
+        try:
+            massive.load_key()
+        except massive.MassiveError:
+            return  # no key on this host: nothing to schedule
+        self.jobs.enqueue("ingest_massive", {"scheduled": True}, "worker:planification", dedupe_key="ingest_massive")
+
     def maybe_schedule_learning(self) -> None:
         """Continuous improvement: managed paper accounts exist, and each pair is re-evaluated once a day."""
 
@@ -265,6 +300,10 @@ class Worker:
 
         summary: dict[str, Any] = {"job": None, "sessions": {}}
         self.maybe_schedule_ecb()
+        try:
+            self.maybe_schedule_massive()
+        except Exception as exc:  # noqa: BLE001 - a provider problem must never stop the worker
+            LOG.error("massive schedule failed: %s", exc)
         try:
             self.maybe_schedule_learning()
         except Exception as exc:  # noqa: BLE001 - learning must never stop data, backtests or simulations
