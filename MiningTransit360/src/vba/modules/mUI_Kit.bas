@@ -203,7 +203,7 @@ Public Sub Kit_ReleaseAll(ByVal handlers As Collection)
     Dim ev As cCtlEvents
     If handlers Is Nothing Then Exit Sub
     For Each ev In handlers
-        ev.Release
+        ev.Unbind
     Next ev
 End Sub
 

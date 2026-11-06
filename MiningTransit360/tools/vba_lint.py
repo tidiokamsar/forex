@@ -572,6 +572,17 @@ def main():
             if re.search(r"optional[^,)]*=\s*(empty|nothing|null)\b", st, re.I):
                 errors.append("%s:%d valeur par défaut non constante pour un paramètre Optional" % (c.name, i))
 
+    # 11. noms reserves (IUnknown / IDispatch) dans les classes et formulaires
+    RESERVED_COM = {"queryinterface", "addref", "release", "gettypeinfocount", "gettypeinfo", "getidsofnames", "invoke"}
+    for c in comps:
+        if c.kind in ("class", "form", "document"):
+            for k, p in c.procs.items():
+                if k in RESERVED_COM:
+                    errors.append("%s.%s : nom réservé dans un module de classe" % (c.name, p["name"]))
+            for k in c.mod_vars:
+                if k in RESERVED_COM:
+                    errors.append("%s.%s : nom réservé dans un module de classe" % (c.name, k))
+
     # 6. macros referencees par chaine
     allprocs = set()
     for c in std:

@@ -45,7 +45,7 @@ Public Sub Bind(ByVal host As Object, ByVal ctlKey As String, ByVal ctl As Objec
     End Select
 End Sub
 
-Public Sub Release()
+Public Sub Unbind()
     Set mHost = Nothing
     Set Btn = Nothing: Set Lbl = Nothing: Set Lst = Nothing
     Set Txt = Nothing: Set Cbo = Nothing: Set Chk = Nothing
