@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+dist/src_export/
+dist/MINING_TRANSIT_360/
+dist/build_log.txt
+dist/test_results_vba.txt
+~$*
