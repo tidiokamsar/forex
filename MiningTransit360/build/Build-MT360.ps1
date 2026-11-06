@@ -139,8 +139,53 @@ try {
     if ($ctl -eq $null) { Say "ATTENTION : commande Compiler introuvable - compilation non verifiee" }
     else {
         if (-not $Visible) { $xl.Visible = $true }   # une erreur de compilation affiche une boite de dialogue
+        # Surveillant : lit le texte de la boite d'erreur VBA, la ferme et le renvoie (construction sans intervention)
+        $watcher = Start-Job -ScriptBlock {
+            Add-Type -TypeDefinition @"
+using System; using System.Text; using System.Runtime.InteropServices;
+public class VbeDlg {
+  public delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc f, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr h, EnumProc f, IntPtr l);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+  static string found;
+  static bool Child(IntPtr ch, IntPtr l) {
+    StringBuilder c = new StringBuilder(256); GetClassName(ch, c, 256);
+    StringBuilder t = new StringBuilder(2048); GetWindowText(ch, t, 2048);
+    if (c.ToString() == "Static" && t.Length > 0) found += t.ToString() + " ";
+    return true;
+  }
+  static bool Top(IntPtr h, IntPtr l) {
+    if (!IsWindowVisible(h)) return true;
+    StringBuilder c = new StringBuilder(256); GetClassName(h, c, 256);
+    StringBuilder t = new StringBuilder(512); GetWindowText(h, t, 512);
+    if (c.ToString() == "#32770" && t.ToString().Contains("Visual Basic")) {
+      found = "";
+      EnumChildWindows(h, Child, IntPtr.Zero);
+      SendMessage(h, 0x0010, IntPtr.Zero, IntPtr.Zero);
+      return false;
+    }
+    return true;
+  }
+  public static string Grab() { found = null; EnumWindows(Top, IntPtr.Zero); return found; }
+}
+"@
+            for ($i = 0; $i -lt 120; $i++) {
+                $r = [VbeDlg]::Grab()
+                if ($r -ne $null) { return $r.Trim() }
+                Start-Sleep -Milliseconds 250
+            }
+            return ""
+        }
+        Start-Sleep -Seconds 2
         $ctl.Execute()
         Start-Sleep -Milliseconds 500
+        $vbeMsg = ""
+        if ($watcher.State -eq "Completed") { $vbeMsg = [string](Receive-Job $watcher) }
+        Stop-Job $watcher -ErrorAction SilentlyContinue; Remove-Job $watcher -Force -ErrorAction SilentlyContinue
         $ctl = $xl.VBE.CommandBars.FindControl(1, 578)
         if ($ctl.Enabled) {
             try {
@@ -150,6 +195,9 @@ try {
                 $mod = $pane.CodeModule.Parent.Name
                 $txt = $pane.CodeModule.Lines($sl, 1).Trim()
                 Say ("ERREUR DE COMPILATION dans {0}, ligne {1} : {2}" -f $mod, $sl, $txt)
+                Say ("Message VBA : " + $vbeMsg)
+                $sel = $pane.CodeModule.Lines($sl, 1)
+                if ($sc -gt 0 -and $ec -gt $sc) { Say ("Element signale : " + $sel.Substring($sc - 1, [Math]::Min($ec - $sc, $sel.Length - $sc + 1))) }
             } catch { Say "Emplacement de l'erreur non determine." }
             Say "ECHEC DE COMPILATION : le classeur est conserve dans dist\MINING_TRANSIT_360 ; ouvrez-le, Alt+F11, Debogage > Compiler VBAProject pour voir le message."
             $exitCode = 2
