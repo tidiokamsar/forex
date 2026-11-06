@@ -118,9 +118,8 @@ try {
     foreach ($f in Get-ChildItem (Join-Path $Src "forms") -Filter "*.frm" | Sort-Object Name) {
         $c = $vbp.VBComponents.Add(3)
         $c.Name = $f.BaseName
-        $c.Properties.Item("Caption").Value = (Get-FormProp $f.FullName "Caption" "MINING TRANSIT 360")
-        $c.Properties.Item("Width").Value  = [double](Get-FormProp $f.FullName "ClientWidth" 9600) / 20 + 6
-        $c.Properties.Item("Height").Value = [double](Get-FormProp $f.FullName "ClientHeight" 6000) / 20 + 28
+        # Titre et dimensions : definis par le code de chaque fenetre a l'execution (Kit_SizeForm, Me.Caption).
+        # On ne les fixe pas ici : l'interface Properties du concepteur rejette certains types selon la version d'Excel.
         $cm = $c.CodeModule
         if ($cm.CountOfLines -gt 0) { $cm.DeleteLines(1, $cm.CountOfLines) }
         $cm.AddFromString((Get-Code $f.FullName))
