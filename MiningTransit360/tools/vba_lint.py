@@ -557,6 +557,21 @@ def main():
                             if at and at != prm["type"] and not (at in OBJ_TYPES and prm["type"] in ("object",)):
                                 errors.append("%s.%s:%d ByRef : argument %s (%s) passé au paramètre %s (%s) de %s" % (c.name, p["name"], no, a, at, prm["name"], prm["type"], nm))
 
+    # 10. declarations de module apres une procedure / valeurs par defaut non constantes
+    for c in comps:
+        seen = inside = False
+        for i, ln in enumerate(c.raw.split("\n"), 1):
+            st = re.sub(r"'.*$", "", ln).strip()
+            if re.match(r"^(public|private|friend)?\s*(static\s+)?(sub|function|property)\b", st, re.I):
+                seen = True
+                inside = not re.search(r"end\s+(sub|function|property)\s*$", st, re.I)
+            elif re.match(r"^end\s+(sub|function|property)\b", st, re.I):
+                inside = False
+            elif seen and not inside and st and not st.lower().startswith("attribute"):
+                errors.append("%s:%d instruction hors procédure après une procédure (interdit en VBA) : %s" % (c.name, i, st[:60]))
+            if re.search(r"optional[^,)]*=\s*(empty|nothing|null)\b", st, re.I):
+                errors.append("%s:%d valeur par défaut non constante pour un paramètre Optional" % (c.name, i))
+
     # 6. macros referencees par chaine
     allprocs = set()
     for c in std:

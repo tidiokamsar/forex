@@ -8,9 +8,6 @@ Option Explicit
 
 Public Const APP_NAME As String = "MINING TRANSIT 360"
 Public Const APP_VERSION As String = "1.0.0"
-Public Function APP_TAGLINE() As String
-    APP_TAGLINE = "Performance " & ChrW(8226) & " Sécurité " & ChrW(8226) & " Rentabilité"
-End Function
 
 ' --- Erreurs metier (levees par les couches metier, affichees par l'UI) -------
 Public Const ERR_BIZ As Long = vbObjectError + 1000      ' regle de gestion violee
@@ -47,6 +44,10 @@ Public Const PN_REFORME As String = "Réformé"
 ' Responsables contractuels
 Public Const RESP_ATIKO As String = "Atiko (contrat)"
 Public Const RESP_EXPL As String = "Exploitant"
+
+Public Function APP_TAGLINE() As String
+    APP_TAGLINE = "Performance " & ChrW(8226) & " Sécurité " & ChrW(8226) & " Rentabilité"
+End Function
 
 ' --- Charte graphique (reprise de la maquette) --------------------------------
 Public Function CLR_NAVY() As Long: CLR_NAVY = RGB(11, 42, 85): End Function

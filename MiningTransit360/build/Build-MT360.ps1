@@ -143,7 +143,15 @@ try {
         Start-Sleep -Milliseconds 500
         $ctl = $xl.VBE.CommandBars.FindControl(1, 578)
         if ($ctl.Enabled) {
-            Say "ECHEC DE COMPILATION : corrigez l'erreur signalee dans l'editeur VBA (Alt+F11)."
+            try {
+                $pane = $xl.VBE.ActiveCodePane
+                $sl = 0; $sc = 0; $el = 0; $ec = 0
+                $pane.GetSelection([ref]$sl, [ref]$sc, [ref]$el, [ref]$ec)
+                $mod = $pane.CodeModule.Parent.Name
+                $txt = $pane.CodeModule.Lines($sl, 1).Trim()
+                Say ("ERREUR DE COMPILATION dans {0}, ligne {1} : {2}" -f $mod, $sl, $txt)
+            } catch { Say "Emplacement de l'erreur non determine." }
+            Say "ECHEC DE COMPILATION : le classeur est conserve dans dist\MINING_TRANSIT_360 ; ouvrez-le, Alt+F11, Debogage > Compiler VBAProject pour voir le message."
             $exitCode = 2
             throw "Compilation VBA en echec"
         }

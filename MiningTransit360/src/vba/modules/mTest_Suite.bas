@@ -12,6 +12,8 @@ Option Explicit
 
 Private mRes As Collection
 Private mT0 As Double
+Private mTruck As Long
+Private mRot As Long
 
 Private Sub Check(ByVal area As String, ByVal name As String, ByVal ok As Boolean, Optional ByVal detail As String = "")
     mRes.Add Array(mRes.Count + 1, area, name, IIf(ok, "OK", "ÉCHEC"), detail)
@@ -171,7 +173,6 @@ Private Sub T_Pristine()
 End Sub
 
 '------------------------------------------------------------------ Flotte
-Private mTruck As Long
 Private Sub T_Fleet()
     Dim rec As Object, e As String, aff As Long
     Set rec = NewRecord("Code", "ATK-T01", "Immatriculation", "TEST-0001", "Marque", "Test", "Modele", "X", "CapaciteT", 40, _
@@ -203,7 +204,6 @@ Private Sub T_Fleet()
 End Sub
 
 '------------------------------------------------------------------ Rotations / pesees
-Private mRot As Long
 Private Sub T_Operations()
     Dim rec As Object, e As String, r2 As Long, ch As Long
     ch = IdOf("T_CHAUFFEURS", "CH-012")

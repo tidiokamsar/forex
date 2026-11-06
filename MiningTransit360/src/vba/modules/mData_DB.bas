@@ -294,7 +294,7 @@ Public Function DB_Value(ByVal tableName As String, ByVal id As Variant, ByVal c
 End Function
 
 Public Function DB_Exists(ByVal tableName As String, ByVal col As String, ByVal v As Variant, _
-                          Optional ByVal excludeId As Variant = Empty) As Boolean
+                          Optional ByVal excludeId As Variant) As Boolean
     Dim data As Variant, r As Long, c As Long, cid As Long
     data = DB_Data(tableName)
     If IsEmpty(data) Or IsBlank(v) Then Exit Function
@@ -302,7 +302,7 @@ Public Function DB_Exists(ByVal tableName As String, ByVal col As String, ByVal 
     If DB_HasCol(tableName, "ID") Then cid = DB_ColIdx(tableName, "ID")
     For r = 1 To UBound(data, 1)
         If CompareValues(data(r, c), v) = 0 Then
-            If cid = 0 Or IsBlank(excludeId) Then DB_Exists = True: Exit Function
+            If cid = 0 Or IsMissing(excludeId) Or IsBlank(excludeId) Then DB_Exists = True: Exit Function
             If CompareValues(data(r, cid), excludeId) <> 0 Then DB_Exists = True: Exit Function
         End If
     Next r
