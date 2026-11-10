@@ -159,6 +159,7 @@ class HourlyProfileTests(unittest.TestCase):
             1, learning.default_params(), count=200, profile=learning.H1_PROFILE)})
 
     def test_each_profile_keeps_its_own_champions_and_runs(self):
+        self.assertEqual(self.daily.champion("EURUSD")["version"], 1)  # the reference strategy is created on first read
         version = self.daily.promote("EURUSD", {**learning.default_params(), "stop_atr_multiple": 3.0}, None, "test")
         self.assertEqual(version, 2)
         self.assertEqual(self.hourly.champion("EURUSD")["version"], 1)
