@@ -42,6 +42,7 @@ class RiskLimits:
     daily_loss_limit_pct: float = 3.0
     max_drawdown_pct: float = 10.0
     max_margin_used_pct: float = 30.0      # of equity, including the new position
+    max_net_usd_exposure_x: float = 3.0    # |net USD notional| as a multiple of equity (every pair holds the dollar)
     allowed_symbols: tuple[str, ...] = field(default_factory=lambda: tuple(PAIRS))
 
     def validate(self) -> None:
@@ -57,6 +58,7 @@ class RiskLimits:
             (0 < self.daily_loss_limit_pct <= 10, "daily_loss_limit_pct entre 0 et 10"),
             (0 < self.max_drawdown_pct <= 30, "max_drawdown_pct entre 0 et 30"),
             (0 < self.max_margin_used_pct <= 60, "max_margin_used_pct entre 0 et 60"),
+            (0 < self.max_net_usd_exposure_x <= 20, "max_net_usd_exposure_x entre 0 et 20"),
             (bool(self.allowed_symbols) and all(s in PAIRS for s in self.allowed_symbols), "allowed_symbols inconnus"),
         )
         for ok, message in checks:
@@ -193,6 +195,18 @@ def account_checks(account: AccountState, limits: RiskLimits | RiskConfigError) 
     return out
 
 
+def usd_exposure(symbol: str, side: str, lots: float, price: float) -> float:
+    """Signed USD notional: positive when the position is long the dollar. Zero for a pair without the dollar."""
+
+    notional = lots * 100_000
+    if symbol.startswith("USD"):
+        return notional if side == "LONG" else -notional
+    if symbol.endswith("USD"):
+        value = notional * price
+        return -value if side == "LONG" else value
+    return 0.0
+
+
 def order_checks(account: AccountState, order: OrderRequest, limits: RiskLimits) -> list[Check]:
     out = [Check("instrument", order.symbol in limits.allowed_symbols and order.side in ("LONG", "SHORT"),
                  f"{order.symbol} {order.side}")]
@@ -225,6 +239,20 @@ def order_checks(account: AccountState, order: OrderRequest, limits: RiskLimits)
                          f"marge utilisée après l'ordre {used:.1f} % des fonds propres (maximum {limits.max_margin_used_pct} %)"))
     else:
         out.append(Check("marge", False, "marge requise inconnue"))
+    if _ok(account.equity) and account.equity > 0 and _ok(order.bid) and _ok(order.ask):
+        def priced(p: dict[str, Any]) -> float:
+            value = p.get("price_current") or p.get("price_open")
+            return float(value) if _ok(value) else (order.bid + order.ask) / 2
+
+        before = sum(usd_exposure(str(p.get("symbol")), str(p.get("side")), float(p.get("volume", 0) or 0), priced(p))
+                     for p in account.positions)
+        after = before + usd_exposure(order.symbol, order.side, order.lots, (order.bid + order.ask) / 2)
+        cap = limits.max_net_usd_exposure_x * account.equity
+        out.append(Check("exposition_nette_usd", abs(after) <= cap or abs(after) <= abs(before),
+                         f"exposition nette au dollar après l'ordre {after / account.equity:+.2f}x les fonds propres "
+                         f"(maximum {limits.max_net_usd_exposure_x}x)"))
+    else:
+        out.append(Check("exposition_nette_usd", False, "fonds propres ou cotation inconnus"))
     same = sum(1 for p in account.positions if p.get("symbol") == order.symbol)
     out.append(Check("exposition_par_instrument", same < limits.max_positions_per_symbol,
                      f"{same} position(s) déjà ouverte(s) sur {order.symbol} (maximum {limits.max_positions_per_symbol})"))

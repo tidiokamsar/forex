@@ -66,7 +66,7 @@ class UnitTests(LearningCase):
 
     def test_promotion_needs_every_criterion(self):
         def fake(scores):
-            def evaluate(candles, symbol, params, windows, cost_factor=1.0, purpose="selection", profile=None):
+            def evaluate(candles, symbol, params, windows, cost_factor=1.0, purpose="selection", profile=None, **_):
                 key = {"selection": "selection", "final_check": "check", "cost_stress": "stress"}[purpose]
                 return dict(scores[key](params))
             return evaluate
@@ -77,6 +77,9 @@ class UnitTests(LearningCase):
         with mock.patch.object(learning, "evaluate", fake({"selection": pick, "check": pick, "stress": pick})):
             self.assertEqual(learning.learn(self.candles, self.store, "EURUSD")["decision"], "PROMOTED")
         self.assertEqual(self.store.champion("EURUSD")["version"], 2)
+        promoted = self.store.champion("EURUSD")
+        self.assertEqual(promoted["params"]["tier"], "PROBATOIRE")  # no deflated Sharpe here: never full size at once
+        self.assertIn("probatoire", promoted["reason"])
         losing = {**good, "net_pnl": -1.0}
         with mock.patch.object(learning, "evaluate", fake({"selection": pick, "check": pick, "stress": lambda p: losing})):
             result = learning.learn(self.candles, self.store, "EURUSD")
@@ -125,6 +128,59 @@ def hourly_series(symbol="EURUSD", source="MASSIVE_FX_QUOTES", start=datetime(20
         out = [Candle(c.symbol, c.timeframe, c.timestamp + shift, c.open, c.high, c.low, c.close, c.volume, c.source, c.kind)
                for c in out]
     return out
+
+
+class DeflationAndGraduationTests(LearningCase):
+    STRONG = [0.02, 0.018, 0.022, 0.019, 0.021, -0.001] * 10
+    WEAK = [0.004, -0.003, 0.002, -0.004, 0.003, -0.001] * 10
+
+    def test_the_deflated_sharpe_probability_falls_as_the_number_of_trials_grows(self):
+        results = [{"selection": {"returns": self.STRONG}}, {"selection": {"returns": self.WEAK}},
+                   {"selection": {"returns": list(reversed(self.WEAK))[::2]}}]
+        best = results[0]
+        few = learning._deflated(results, best, 1)
+        many = learning._deflated(results, best, 10_000)
+        self.assertGreater(few["probability"], many["probability"])
+        self.assertTrue(0 <= many["probability"] <= few["probability"] <= 1)
+        self.assertEqual(few["n_trades"], len(self.STRONG))
+
+    def test_too_few_returns_give_no_deflated_sharpe(self):
+        self.assertIsNone(learning._deflated([{"selection": {"returns": [0.01]}}], {"selection": {"returns": [0.01]}}, 5))
+
+    def promote_probationary(self):
+        self.store.champion("EURUSD")
+        self.store.promote("EURUSD", {**learning.default_params(), "tier": "PROBATOIRE"}, 5, "test")
+        self.store.set_managed_session("EURUSD", 1)
+
+    def lab_with(self, trades):
+        lab = mock.Mock()
+        lab.session.return_value = {"trades": trades}
+        return lab
+
+    def test_a_probationary_champion_graduates_on_a_positive_live_record(self):
+        self.promote_probationary()
+        live = [{"exit_ts": "2999-01-01T00:00:00+00:00", "net_pnl": 5.0}] * learning.LIVE_MIN_TRADES
+        self.assertEqual(learning.graduate_or_demote(self.store, self.lab_with(live[:-1]), "EURUSD"), None)  # not enough yet
+        self.assertEqual(learning.graduate_or_demote(self.store, self.lab_with(live), "EURUSD"), "GRADUATED")
+        champion = self.store.champion("EURUSD")
+        self.assertEqual((champion["params"]["tier"], champion["run_id"]), ("VALIDE", 5))
+        self.assertIsNone(learning.graduate_or_demote(self.store, self.lab_with(live), "EURUSD"))  # nothing left to judge
+
+    def test_a_negative_live_record_puts_the_previous_version_back(self):
+        self.promote_probationary()
+        live = [{"exit_ts": "2999-01-01T00:00:00+00:00", "net_pnl": -5.0}] * learning.LIVE_MIN_TRADES
+        self.assertEqual(learning.graduate_or_demote(self.store, self.lab_with(live), "EURUSD"), "DEMOTED")
+        champion = self.store.champion("EURUSD")
+        self.assertEqual(champion["params"], learning.default_params())
+        self.assertIsNone(champion["run_id"])
+
+    def test_trades_before_the_promotion_and_validated_champions_are_never_judged(self):
+        self.promote_probationary()
+        old = [{"exit_ts": "2000-01-01T00:00:00+00:00", "net_pnl": 9.0}] * 50
+        self.assertIsNone(learning.graduate_or_demote(self.store, self.lab_with(old), "EURUSD"))
+        self.store.promote("EURUSD", {**learning.default_params(), "tier": "VALIDE"}, 5, "validé")
+        live = [{"exit_ts": "2999-01-01T00:00:00+00:00", "net_pnl": -9.0}] * 50
+        self.assertIsNone(learning.graduate_or_demote(self.store, self.lab_with(live), "EURUSD"))
 
 
 class HourlyProfileTests(unittest.TestCase):
@@ -245,6 +301,20 @@ class FamilyTests(unittest.TestCase):
     def test_breakout_needs_one_more_bar_than_the_window_before_deciding(self):
         self.assertIsNone(self.decide([1.10, 1.101] * 5, family="breakout"))  # 10 bars: slow window only
         self.assertIsNotNone(self.decide([1.10, 1.101] * 5 + [1.1], family="breakout"))
+
+    def test_the_regime_filter_keeps_trend_strategies_out_of_a_range_and_mean_reversion_out_of_a_trend(self):
+        climb = [1.10 + 0.002 * i for i in range(30)]
+        zigzag = [1.10 + (0.002 if i % 2 else 0.0) for i in range(30)]
+        self.assertEqual(self.decide(climb, family="sma_trend", regime="match").action, BUY)
+        blocked = self.decide(zigzag, family="sma_trend", regime="match")
+        self.assertEqual(blocked.action, FLAT)
+        self.assertIn("sans tendance", blocked.reason)
+        self.assertEqual(self.decide(climb, family="mean_reversion", regime="match").action, FLAT)
+        self.assertEqual(self.decide(zigzag, family="sma_trend").action in (BUY, SELL, FLAT), True)  # filter off: unchanged
+
+    def test_the_regime_filter_does_not_block_when_the_history_is_too_short_to_judge(self):
+        short = [1.10 + 0.002 * i for i in range(12)]
+        self.assertEqual(self.decide(short, family="momentum", regime="match", slow=10).action, BUY)
 
     def test_old_parameters_keep_the_sma_trend_and_unknown_families_are_refused(self):
         from astra.papertrade import SimulationError, StrategyParams, _build

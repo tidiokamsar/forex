@@ -30,6 +30,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from . import riskmetrics
 from .marketdata import KIND_REFERENCE, PAIRS, TIMEFRAMES, Candle, CandleStore, MarketDataError, find_gaps
 
 ENGINE_VERSION = "1.0.0"
@@ -41,6 +42,7 @@ FAMILIES = {
     "mean_reversion": "retour à la moyenne",
     "breakout": "cassure de canal",
 }
+REGIME_FILTERS = ("none", "match")
 BUY, SELL, FLAT = "ACHAT", "VENTE", "AUCUNE_POSITION"
 MIN_UNITS, UNIT_STEP = 1000, 1000
 MAX_EQUITY_POINTS = 600
@@ -80,10 +82,13 @@ class StrategyParams:
     max_atr_pct: float = 0.03     # ATR / price above this: too volatile, no position
     family: str = "sma_trend"
     z_entry: float = 1.0          # mean_reversion only
+    regime: str = "none"          # "match": trend families trade only in a trending market, mean reversion only in a range
 
     def validate(self) -> None:
         if self.family not in FAMILIES:
             raise SimulationError(f"famille de stratégie inconnue (valeurs : {', '.join(FAMILIES)})")
+        if self.regime not in REGIME_FILTERS:
+            raise SimulationError(f"filtre de régime inconnu (valeurs : {', '.join(REGIME_FILTERS)})")
         if not 0.25 <= self.z_entry <= 4:
             raise SimulationError("seuil d'écart (z) entre 0,25 et 4")
         if not (2 <= self.fast < self.slow <= 400):
@@ -200,6 +205,16 @@ def decide(history: Sequence[Candle], params: StrategyParams) -> Decision | None
     vol_ok = params.min_atr_pct <= atr_pct <= params.max_atr_pct
     indicators = {"sma_rapide": round(fast, 6), "sma_lente": round(slow, 6), "atr": round(atr, 6),
                   "atr_pct": round(atr_pct * 100, 4)}
+    if params.regime == "match":
+        market = riskmetrics.regime([c.close for c in history[-(riskmetrics.EFFICIENCY_WINDOW + 1):]])
+        if market["trend"] is not None:
+            indicators = {**indicators, "efficacite": market["efficiency"]}
+            wants_trend = params.family != "mean_reversion"
+            if (market["trend"] == "tendance") != wants_trend:
+                kind = "en tendance" if market["trend"] == "tendance" else "sans tendance"
+                needed = "tendance" if wants_trend else "range"
+                return Decision(FLAT, price, indicators, {"regime_adapte": False, "volatilite_dans_la_plage": vol_ok},
+                                f"marché {kind} (efficacité {market['efficiency']}) : cette stratégie n'agit qu'en {needed}")
     if params.family == "momentum":
         return _momentum(params, closes, fast, price, vol_ok, indicators, atr_pct)
     if params.family == "mean_reversion":

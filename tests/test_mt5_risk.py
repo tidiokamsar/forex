@@ -79,6 +79,39 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual([c.name for c in decision.checks], ["profil_de_risque"])
 
 
+class UsdExposureTests(unittest.TestCase):
+    def test_signs_follow_the_side_of_the_dollar(self):
+        self.assertEqual(mt5_risk.usd_exposure("EURUSD", "LONG", 1, 1.1), -110_000)
+        self.assertEqual(mt5_risk.usd_exposure("EURUSD", "SHORT", 1, 1.1), 110_000)
+        self.assertEqual(mt5_risk.usd_exposure("USDJPY", "LONG", 2, 150), 200_000)
+        self.assertEqual(mt5_risk.usd_exposure("USDJPY", "SHORT", 2, 150), -200_000)
+        self.assertEqual(mt5_risk.usd_exposure("EURGBP", "LONG", 1, 0.85), 0.0)
+
+    def held(self, *positions):
+        return replace(ACCOUNT, positions=tuple({"price_open": 1.0, **p} for p in positions))
+
+    def test_an_entry_that_piles_onto_the_same_side_of_the_dollar_is_refused(self):
+        account = self.held({"symbol": "USDJPY", "side": "LONG", "volume": 2.0}, {"symbol": "USDCAD", "side": "LONG", "volume": 2.0})
+        piling = replace(ORDER, symbol="USDCHF", side="LONG")
+        self.assertIn("exposition_nette_usd", failed(mt5_risk.evaluate_entry(account, piling, LIMITS)))
+        adding = replace(ORDER, symbol="EURUSD", side="SHORT")  # short EURUSD is long the dollar too
+        self.assertIn("exposition_nette_usd", failed(mt5_risk.evaluate_entry(account, adding, LIMITS)))
+
+    def test_an_entry_that_reduces_the_net_dollar_exposure_is_always_allowed_by_this_rule(self):
+        account = self.held({"symbol": "USDJPY", "side": "LONG", "volume": 2.0}, {"symbol": "USDCAD", "side": "LONG", "volume": 2.0})
+        reducing = replace(ORDER, symbol="EURUSD", side="LONG")  # long EURUSD is short the dollar
+        self.assertNotIn("exposition_nette_usd", failed(mt5_risk.evaluate_entry(account, reducing, LIMITS)))
+
+    def test_offsetting_positions_leave_room_and_the_limit_is_configurable(self):
+        account = self.held({"symbol": "USDJPY", "side": "LONG", "volume": 2.0}, {"symbol": "EURUSD", "side": "LONG", "volume": 1.0})
+        order = replace(ORDER, symbol="USDCAD", side="LONG")
+        self.assertNotIn("exposition_nette_usd", failed(mt5_risk.evaluate_entry(account, order, LIMITS)))
+        tight = replace(LIMITS, max_net_usd_exposure_x=0.5)
+        self.assertIn("exposition_nette_usd", failed(mt5_risk.evaluate_entry(account, order, tight)))
+        with self.assertRaises(RiskConfigError):
+            replace(LIMITS, max_net_usd_exposure_x=0.0).validate()
+
+
 class ProfileTests(unittest.TestCase):
     def setUp(self):
         self.temp = workspace_tempdir()

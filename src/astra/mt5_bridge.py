@@ -63,6 +63,18 @@ ITEMS_PER_POST = 80  # keeps a history post well under the proxy's 64 KB body li
 RECENT_BARS = {"M5": 12, "M15": 8, "H1": 8, "H4": 6, "D1": 4}
 
 
+PROBATION_RISK_SCALE = 0.5  # a probationary champion trades at half the usual risk until its live record graduates it
+
+
+def risk_scale(pair: dict[str, Any]) -> float:
+    """Full size for a validated champion and for daily champions that predate the tiers; half size otherwise."""
+
+    tier = ((pair.get("champion") or {}).get("params") or {}).get("tier")
+    if tier == "VALIDE" or (tier is None and pair.get("profile", "D1") != "H1"):
+        return 1.0
+    return PROBATION_RISK_SCALE
+
+
 def targets(overview: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Wanted MT5 side per pair from the managed paper accounts (FLAT when nothing should be held)."""
 
@@ -80,6 +92,7 @@ def targets(overview: dict[str, Any]) -> dict[str, dict[str, Any]]:
             result[symbol] = {"side": "FLAT", "reason": f"décision en attente : {pending['label']}"}
         elif position:
             result[symbol] = {"side": side, "entry_ts": position["entry_ts"], "session_id": session["id"],
+                              "risk_scale": risk_scale(pair),
                               "stop_distance": abs(position["entry_ref"] - position["stop"]),
                               "reason": f"position {side} du compte simulé depuis {position['entry_ts']}"}
         else:
@@ -265,7 +278,7 @@ class Bridge:
         return [{k: v for k, v in i.items() if k in keep} for i in recent]
 
     def _enter(self, trader: Mt5DemoTrader, symbol: str, side: str, stop_distance: float, entry_ts: str, reason: str,
-               manual: bool = False) -> tuple[str, list[dict[str, Any]]]:
+               manual: bool = False, scale: float = 1.0) -> tuple[str, list[dict[str, Any]]]:
         """One opening order through the gateway, the written intention and the outcome handling. Automatic and manual
         orders share this path. The volume always comes from the risk limit. Returns (outcome, actions) with outcome
         OUVERT, REFUSE, REJETE or INCONNU."""
@@ -273,7 +286,7 @@ class Bridge:
         state = self.account_state(trader.refresh_account(), trader.positions())
         limits = self.limits
         risk_pct = limits.risk_per_trade_pct if isinstance(limits, RiskLimits) else 0.0
-        risk_usd = state.equity * risk_pct / 100
+        risk_usd = state.equity * risk_pct / 100 * scale
         entry = trader.prepare_entry(symbol, side, stop_distance, risk_usd)
         age = None
         if entry["tick_time"]:
@@ -456,7 +469,7 @@ class Bridge:
                 if self.pending_intent(symbol) is not None:
                     continue  # an earlier order on this pair has no known outcome yet: look first, never send again
                 actions.extend(self._enter(trader, symbol, target["side"], target["stop_distance"], target["entry_ts"],
-                                           target["reason"])[1])
+                                           target["reason"], scale=target.get("risk_scale", 1.0))[1])
             everything = trader.positions()
             account = trader.refresh_account()
             manual_positions = [asdict(p) for p in everything if not p.astra]

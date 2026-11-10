@@ -225,6 +225,11 @@ class Worker:
             result = learning.learn(self.candles, store, symbol)
             if result["decision"] == "PROMOTED":
                 result["applied_to_simulation"] = learning.apply_champion(store, self.lab, symbol)
+            else:
+                outcome = learning.graduate_or_demote(store, self.lab, symbol)
+                if outcome:
+                    result["live_verdict"] = outcome
+                    learning.apply_champion(store, self.lab, symbol)
             return result
         if job["kind"] == "backtest":
             backtest_id = int(params["backtest_id"])

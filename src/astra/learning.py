@@ -31,6 +31,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from . import overfitting
 from .marketdata import PAIRS, CandleStore
 from .papertrade import (
     STRATEGY_NAME,
@@ -59,10 +60,13 @@ SPACE = {
     "atr_window": (10, 14, 20),
     "min_atr_pct": (0.0, 0.0001, 0.0003),
     "stop_atr_multiple": (1.5, 2.0, 3.0, 4.0),
+    "regime": ("none", "match"),
 }
 DEFAULT_RISK = RiskParams()
 DEFAULT_COSTS = CostParams()
 
+DSR_VALID = 0.80          # deflated Sharpe probability from which a promotion counts as statistically solid
+LIVE_MIN_TRADES = 20      # paper trades after a promotion before the live record can graduate or demote it
 SPACE_H1 = {  # bars are hours: 6 to 48 hours fast, 2 to 14 days slow (the strategy accepts up to 400 bars)
     "family": SPACE["family"],
     "z_entry": SPACE["z_entry"],
@@ -71,6 +75,7 @@ SPACE_H1 = {  # bars are hours: 6 to 48 hours fast, 2 to 14 days slow (the strat
     "atr_window": (14, 24),
     "min_atr_pct": (0.0, 0.00003, 0.0001),  # an hourly ATR is a small share of the price
     "stop_atr_multiple": SPACE["stop_atr_multiple"],
+    "regime": SPACE["regime"],
 }
 
 
@@ -259,12 +264,13 @@ def _request(symbol: str, params: dict[str, Any], start: datetime, end: datetime
 
 
 def evaluate(candles: CandleStore, symbol: str, params: dict[str, Any], windows: list[tuple[datetime, datetime]],
-             cost_factor: float = 1.0, purpose: str = "selection", profile: Profile = D1_PROFILE) -> dict[str, Any]:
+             cost_factor: float = 1.0, purpose: str = "selection", profile: Profile = D1_PROFILE,
+             keep_returns: bool = False) -> dict[str, Any]:
     """Out-of-sample metrics over the given windows (each simulated with earlier candles only as warm-up).
 
     ``purpose`` (selection, final_check, cost_stress) only labels the result."""
 
-    yearly, trades, worst_dd, net = [], 0, 0.0, 0.0
+    yearly, trades, worst_dd, net, returns = [], 0, 0.0, 0.0, []
     for start, end in windows:
         try:
             result = run_backtest(candles, _request(symbol, params, start, end, cost_factor, profile))
@@ -273,6 +279,7 @@ def evaluate(candles: CandleStore, symbol: str, params: dict[str, Any], windows:
         m = result["metrics"]
         yearly.append(m["net_pnl"] / m["initial_capital"] * 100)
         trades += m["trade_count"]
+        returns += [t["net_pnl"] / m["initial_capital"] for t in result["trades"]]
         worst_dd = max(worst_dd, m["max_drawdown_pct"])
         net += m["net_pnl"]
     if not yearly:
@@ -282,7 +289,8 @@ def evaluate(candles: CandleStore, symbol: str, params: dict[str, Any], windows:
             "worst_drawdown_pct": round(worst_dd, 3),
             "trades": trades, "net_pnl": round(net, 2), "positive_windows": sum(1 for y in yearly if y > 0),
             "score": round(mean - 0.5 * worst_dd, 3) if trades >= profile.min_trades else None,
-            "yearly_returns_pct": [round(y, 3) for y in yearly]}
+            "yearly_returns_pct": [round(y, 3) for y in yearly],
+            **({"returns": returns} if keep_returns else {})}
 
 
 def candidates(seed: int, champion: dict[str, Any], count: int = CANDIDATES_PER_RUN,
@@ -303,7 +311,8 @@ def candidates(seed: int, champion: dict[str, Any], count: int = CANDIDATES_PER_
         family = rng.choice(space["family"])
         strategy = {"fast": fast, "slow": slow, "atr_window": rng.choice(space["atr_window"]),
                     "min_atr_pct": rng.choice(space["min_atr_pct"]), "max_atr_pct": 0.03, "family": family,
-                    "z_entry": rng.choice(space["z_entry"]) if family == "mean_reversion" else 1.0}
+                    "z_entry": rng.choice(space["z_entry"]) if family == "mean_reversion" else 1.0,
+                    "regime": rng.choice(space["regime"])}
         params = {"strategy": strategy, "stop_atr_multiple": rng.choice(space["stop_atr_multiple"])}
         key = json.dumps(params, sort_keys=True)
         if key not in seen:
@@ -335,6 +344,47 @@ def windows_for(first: datetime, last: datetime,
     return selection, (check_start, last)
 
 
+def _deflated(results: list[dict[str, Any]], best: dict[str, Any], trials: int) -> dict[str, Any] | None:
+    """Deflated Sharpe ratio of the promoted candidate's trade returns, against every trial made so far (all runs)."""
+
+    returns = best["selection"].get("returns") or []
+    sharpes = [overfitting.sharpe_like(r["selection"]["returns"]) for r in results
+               if len(r["selection"].get("returns") or []) >= 3]
+    try:
+        outcome = overfitting.deflated_sharpe_ratio(returns, n_trials=max(1, trials),
+                                                    trial_sharpe_variance=overfitting.cross_sectional_variance(sharpes))
+    except ValueError:
+        return None
+    return {"probability": round(outcome.probability, 4), "observed_sharpe": round(outcome.observed_sharpe, 4),
+            "expected_max_sharpe": round(outcome.expected_max_sharpe, 4), "n_trials": trials, "n_trades": len(returns)}
+
+
+def graduate_or_demote(store: LearningStore, lab: LabStore, symbol: str) -> str | None:
+    """Judge a probationary champion on what its own paper account did live since the promotion.
+
+    At least ``LIVE_MIN_TRADES`` closed paper trades: a positive net result graduates it to full size, a negative one
+    puts the previous version back. Returns "GRADUATED", "DEMOTED" or None (not enough evidence yet)."""
+
+    champion = store.champion(symbol)
+    params = champion["params"]
+    session_id = store.managed_session(symbol)
+    if params.get("tier") != "PROBATOIRE" or champion.get("run_id") is None or session_id is None:
+        return None
+    session = lab.session(session_id, item_limit=1000)
+    since = champion.get("promoted_at") or ""
+    live = [t for t in (session or {}).get("trades", []) if t["exit_ts"] >= since]
+    if len(live) < LIVE_MIN_TRADES:
+        return None
+    net = sum(t["net_pnl"] for t in live)
+    if net > 0:
+        store.promote(symbol, {**params, "tier": "VALIDE"}, champion["run_id"],
+                      f"diplômé : {len(live)} transactions simulées en direct, résultat net {net:+.2f} USD")
+        return "GRADUATED"
+    store.rollback(symbol)
+    apply_champion(store, lab, symbol)
+    return "DEMOTED"
+
+
 def learn(candles: CandleStore, store: LearningStore, symbol: str) -> dict[str, Any]:
     """One learning run for a pair; returns the decision (promoted or kept) with its evidence."""
 
@@ -354,7 +404,8 @@ def learn(candles: CandleStore, store: LearningStore, symbol: str) -> dict[str, 
         results = []
         for label, params in [("champion", champion["params"]), *[(f"candidat {i + 1}", p) for i, p in enumerate(pool)]]:
             results.append({"label": label, "params": params,
-                            "selection": evaluate(candles, symbol, params, selection, profile=profile)})
+                            "selection": evaluate(candles, symbol, params, selection, profile=profile,
+                                                  keep_returns=True)})
         champ = results[0]
         scored = [r for r in results[1:] if r["selection"]["score"] is not None]
         best = max(scored, key=lambda r: r["selection"]["score"], default=None)
@@ -389,8 +440,19 @@ def learn(candles: CandleStore, store: LearningStore, symbol: str) -> dict[str, 
                               f"contrôle final {final_best['net_pnl']:+.2f} USD, coûts doublés {stressed['net_pnl']:+.2f} USD")
         decision["reason"] = reason
         decision["trials_so_far"] = store.trials(symbol) + len(results)
+        tier = None
         if verdict == "PROMOTED":
-            decision["new_version"] = store.promote(symbol, best["params"], run_id, reason)
+            dsr = _deflated(results, best, decision["trials_so_far"])
+            decision["dsr"] = dsr
+            tier = "VALIDE" if dsr and dsr["probability"] >= DSR_VALID else "PROBATOIRE"
+            solid = f", Sharpe dégonflé {dsr['probability']:.2f}" if dsr else ", Sharpe dégonflé incalculable"
+            reason += f" ; niveau {tier.lower()}{solid}"
+            decision["reason"], decision["tier"] = reason, tier
+        for r in results:
+            r["selection"].pop("returns", None)
+        if verdict == "PROMOTED":
+            promoted = {**best["params"], "tier": tier, "dsr": decision["dsr"]["probability"] if decision["dsr"] else None}
+            decision["new_version"] = store.promote(symbol, promoted, run_id, reason)
         data = {"source": profile.source, "timeframe": profile.timeframe, "profile": profile.name,
                 "candles": len(series), "first": _iso(series[0].timestamp),
                 "last": _iso(series[-1].timestamp), "selection_windows": len(selection),

@@ -287,6 +287,21 @@ class BridgeTests(unittest.TestCase):
         saved = json.loads((self.dir / "bridge-state.json").read_text(encoding="utf-8"))
         self.assertEqual(saved["intents"][intent["id"]]["status"], "EXECUTE")  # on disk, not only in memory
 
+    def test_a_probationary_champion_trades_at_half_the_usual_risk(self):
+        from astra.mt5_bridge import risk_scale
+
+        def pair(tier, profile="D1"):
+            return {"champion": {"params": {"tier": tier} if tier else {}}, "profile": profile}
+
+        self.assertEqual([risk_scale(pair("VALIDE")), risk_scale(pair(None)), risk_scale(pair("PROBATOIRE")),
+                          risk_scale(pair(None, "H1")), risk_scale(pair("VALIDE", "H1"))], [1.0, 1.0, 0.5, 0.5, 1.0])
+        full = self.bridge.cycle()["actions"][0]["lots"]
+        self.fake.open_positions.clear()
+        self.bridge.state["mirrored"].clear()
+        self.server.view = {"pairs": [{**overview(SHORT)["pairs"][0], "champion": {"params": {"tier": "PROBATOIRE"}}}]}
+        half = self.bridge.cycle()["actions"][0]["lots"]
+        self.assertAlmostEqual(half / full, 0.5, delta=0.03)
+
     def test_the_hourly_pipeline_decides_only_for_a_pair_whose_hourly_champion_was_promoted(self):
         hourly_short = {**SHORT, "entry_ts": "2026-10-29T08:00:00+00:00"}
         daily_flat = {"pairs": [{"symbol": "EURUSD", "session": {"id": 1, "status": "RUNNING",
