@@ -104,3 +104,15 @@ Martingale and loss recovery are refused by construction. After a negative reali
 
 - futures: initial and maintenance margin (per tier, provider-sourced), mark and index price sources and staleness, funding sign convention and cost, liquidation distance with a buffer (ASTRA never computes a liquidation price), margin mode (isolated or cross), cross-contract and cross-venue exposure, leverage schedule, auto-deleverage, position mode and reduce-only semantics;
 - fixed-expiry options: expiry schedule and settlement source, payout and premium terms including the tie rule, premium budget, product restrictions or prohibitions for retail clients in the user's jurisdiction, expected value net of the payout asymmetry, early close and requote rules.
+
+## MT5 DEMO gateway (addendum of 2026-11-10, Lot 0)
+
+This section documents `mt5_risk.py`, which the bridge calls before every opening order on the DEMO account. It is a different path from the `OrderGateway` described above: the MT5 bridge does not use the HMAC permits or the `governance` roles.
+
+- **Independence.** Limits come from a local profile (`ASTRA_MT5_RISK_FILE`), bounded in code. A strategy, a promotion, a site request or an agent cannot change them. A probationary champion can only trade at a reduced fraction of the risk (`risk_scale`: 0.5), never above the profile.
+- **Fail closed.** A missing or unreadable figure fails its check. An invalid profile refuses every entry. A check that cannot be computed refuses the order.
+- **Defaults (DEMO profile, v1).** 0.5 % of equity at the stop, 7 positions, one per symbol, 8 lots in total, spread at most 3 pips, quote age at most 30 s, daily loss 3 %, drawdown 10 %, margin 30 %, net USD exposure at most 3 times equity.
+- **Net USD exposure (`exposition_nette_usd`).** Every allowed pair contains the dollar, so the pairs are not independent bets. The check sums, per position, the signed USD notional (lots x 100 000, converted at the position's own price for pairs quoted in USD) and refuses an order that raises the absolute net above the limit; an order that reduces it is allowed. It refuses when a price, a side or the account currency (must be USD) is unknown.
+- **Status of the 3x limit: provisional and not derived.** It is a conservative placeholder, not the output of a risk study. It has to be replaced by a limit derived from a documented analysis (leverage and margin limit, historical correlated drawdown scenarios) and versioned with the profile.
+- **Assumption not yet verified.** The contract size is assumed to be 100 000 for every allowed pair; it is not read from the broker's specifications.
+- **Not implemented yet.** Per-currency limits (EUR, JPY, CHF...), volatility- or VaR-based limits, an entry freeze on a failed reconciliation, scenario stress.

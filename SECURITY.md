@@ -106,3 +106,10 @@ An agent never signs in with a person's password or TOTP codes: that would store
 ## Reporting a security issue
 
 Do not include credentials, account numbers, or production trading data in issue reports or test fixtures. Disable the local process and preserve the relevant log/database copy for review.
+
+## Addendum of 2026-11-10 (Lot 0): MT5 scope and queued orders
+
+- The agent scope `mt5` exists next to `read` and `lab` (`webapp.AGENT_ENDPOINTS`): it lets the MT5 bridge post its snapshots, quotes, candles and history, and read and answer site requests.
+- A signed-in OPERATOR with MFA can queue an order, a close or a stop move from the dashboard (`POST /api/mt5/requests`). It is not an order to a broker: the bridge executes it, after its own checks (no volume chosen by the page, refused under the STOP file or the kill switch, risk gateway, 120-second validity). An agent token can never create such a request. The earlier statements that no web route can lead to an order are therefore to be read as "no web route reaches a broker directly".
+- The MT5 path does not use the `OrderGateway`, the HMAC permits or the `governance` roles. Its protections are those of `mt5_risk.py` and the bridge. Bringing it under the same governance is a recommendation of the Lot 0 audit, not done.
+- The only outgoing network connections of the server are now: the ECB, Massive, and the dashboard calls of the bridge on the PC and on the server.

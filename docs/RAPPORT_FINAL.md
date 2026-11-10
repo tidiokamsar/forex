@@ -20,12 +20,12 @@ Date : 2026-11-01. Branche : `feat/auth-deploy` (la branche principale n'est pas
 | Portail de risque | RÉUSSI (tests), NON TESTÉ en production | `test_mt5_risk`, `test_mt5_bridge` ; aucune entrée décidée en production depuis son déploiement |
 | Arrêt d'urgence | RÉUSSI | essai réel du 2026-10-29 : 1 cycle complet, 0 ordre envoyé ; état revérifié après chaque redémarrage |
 | Massive | RÉUSSI | D1 (4 359 bougies) et H1 (85 756 bougies) sur 7 paires, du 2024-10-29 au 2026-10-28 ; rattrapage quotidien planifié |
-| Apprentissage champion/challenger | RÉUSSI | 4 familles (tendance SMA, momentum, retour à la moyenne, cassure) ; promotions journalières tracées |
+| Apprentissage champion/challenger | RÉUSSI (fonctionnement), NON PROUVÉ (performance) | 6 familles (tendance SMA, momentum, retour à la moyenne, cassure, force relative des devises en suivi et en inverse), filtre de régime et objectif de profit appris ; promotions tracées ; promotion automatique sans revue humaine : écart au cadre, voir `docs/LOT0_AUDIT.md` |
 | Mesures de risque et régimes | RÉUSSI | Sharpe, Sortino, Calmar, baisse maximale, régime par paire ; ratios masqués sous 10 jours d'historique |
 | Tableau de bord | RÉUSSI | données réelles, horodatages séparés, aucune valeur fictive ; panneau d'actions vérifié visuellement (rôle administrateur, serveur local) |
 | Contrôles de trading du site | RÉUSSI (affichage et tests), NON TESTÉ (exécution réelle) | file de demandes, confirmation avant envoi, volume jamais choisi par la page |
 | Sauvegarde et restauration | RÉUSSI | restauration de la sauvegarde du jour sur une copie : 42 tables identiques, intégrité ok, production intacte |
-| Tests | RÉUSSI | suite complète Windows verte (15 échecs attendus des modules `test_lot4_`, 5 ignorés) ; Linux : un seul échec connu, voulu sous root |
+| Tests | RÉUSSI avec réserves | suite complète Linux de la version `915da73` (1290 tests, seul échec connu : `test_init_admin` sous root) ; dernière suite complète Windows : version `3ebfe80` (1247 tests, 15 échecs attendus, 5 ignorés), non refaite depuis : le disque F: est défaillant |
 
 ## Ce qui reste BLOQUÉ ou NON TESTÉ
 
