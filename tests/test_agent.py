@@ -213,7 +213,7 @@ class Mt5FlowTests(AgentTokenCase):
         token = self.issue(scopes=("read", "mt5"))
         bad_quote = {"quotes": [{"symbol": "EURUSD", "bid": 1.2, "ask": 1.1, "time": "x"}]}
         self.assertEqual(self.send(token, "/api/mt5/quotes", bad_quote).status_code, 400)
-        for change in ({"server": "Broker-Live"}, {"timeframe": "M1"}, {"symbol": "XAUUSD"},
+        for change in ({"server": "Broker-Live"}, {"timeframe": "M1"}, {"symbol": "FOOBAR"},
                        {"candles": [{**CANDLES["candles"][0], "high": 1.0}]},
                        {"candles": [{**CANDLES["candles"][0], "ts": "2999-01-01T00:00:00+00:00"}]},
                        {"candles": [{**CANDLES["candles"][0], "ts": "2026-10-28T10:00:00"}]}):

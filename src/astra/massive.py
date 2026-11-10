@@ -27,14 +27,15 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from .marketdata import KIND_OHLC, TIMEFRAMES, Candle, CandleStore, MarketDataError, canonical_symbol
+from .marketdata import INSTRUMENTS, KIND_OHLC, TIMEFRAMES, Candle, CandleStore, MarketDataError, canonical_symbol
 
 BASE_URL = "https://api.massive.com"
 SOURCE = "MASSIVE_FX_QUOTES"
 SYMBOL_MAP_VERSION = "1"
 # ASTRA canonical symbol -> Massive ticker. Versioned: two similar tickers are not necessarily the same instrument.
-SYMBOL_MAP = {"EURUSD": "C:EURUSD", "GBPUSD": "C:GBPUSD", "USDJPY": "C:USDJPY", "AUDUSD": "C:AUDUSD",
-              "USDCHF": "C:USDCHF", "USDCAD": "C:USDCAD", "NZDUSD": "C:NZDUSD"}
+# Every instrument has a forex-style ticker (C:EURUSD, C:EURGBP, C:XAUUSD). Gold and silver were checked on the plan;
+# the crosses are unchecked until their first import, which reports each series that the plan refuses.
+SYMBOL_MAP = {symbol: f"C:{symbol}" for symbol in INSTRUMENTS}
 # ASTRA timeframe -> (multiplier, timespan)
 TIMESPANS = {"M5": (5, "minute"), "M15": (15, "minute"), "H1": (1, "hour"), "H4": (4, "hour"), "D1": (1, "day")}
 MAX_PAGE = 50_000

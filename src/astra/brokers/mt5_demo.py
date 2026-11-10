@@ -28,7 +28,7 @@ from types import ModuleType
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from ..marketdata import KIND_OHLC, PAIRS, Candle, MarketDataError, canonical_symbol, canonical_timeframe
+from ..marketdata import INSTRUMENTS, KIND_OHLC, PAIRS, Candle, MarketDataError, canonical_symbol, canonical_timeframe
 
 DEFAULT_TERMINAL = r"C:\Program Files\MetaTrader 5\terminal64.exe"
 SERVER_ZONES = {"MetaQuotes-Demo": "Europe/Athens"}  # server -> IANA zone with the same offsets and switch dates
@@ -218,7 +218,7 @@ class Mt5DemoFeed:
             symbol, timeframe = canonical_symbol(symbol), canonical_timeframe(timeframe)
         except MarketDataError as exc:
             raise Mt5DemoError(str(exc)) from exc
-        if symbol not in PAIRS or timeframe not in TIMEFRAMES:
+        if symbol not in INSTRUMENTS or timeframe not in TIMEFRAMES:
             raise Mt5DemoError(f"série non prise en charge : {symbol} {timeframe}")
         if not 1 <= count <= MAX_BARS:
             raise Mt5DemoError(f"nombre de bougies entre 1 et {MAX_BARS}")

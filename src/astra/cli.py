@@ -394,7 +394,7 @@ def _massive(args: argparse.Namespace, config: AppConfig) -> int:
     from datetime import timedelta
 
     from . import massive
-    from .marketdata import PAIRS, CandleStore
+    from .marketdata import CandleStore
 
     try:
         client = massive.MassiveClient(massive.load_key())
@@ -405,7 +405,7 @@ def _massive(args: argparse.Namespace, config: AppConfig) -> int:
             raise massive.MassiveError("--days entre 1 et 800")
         store = CandleStore(config.database_path)
         store.initialize()
-        symbols = list(PAIRS) if args.symbol == "all" else [args.symbol.upper()]
+        symbols = list(massive.SYMBOL_MAP) if args.symbol == "all" else [args.symbol.upper()]
         end = datetime.now(UTC).date()
         reports = [massive.ingest(store, client, s, args.timeframe, end - timedelta(days=args.days), end, actor="cli:massive")
                    for s in symbols]

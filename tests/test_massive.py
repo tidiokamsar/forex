@@ -63,7 +63,7 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(caught.exception.status, 403)
         self.assertNotIn(KEY, str(caught.exception))
         with self.assertRaises(massive.MassiveError):
-            self.client(FakeProvider([])).aggregates("XAUUSD", "H1", date(2026, 10, 28), date(2026, 10, 29))
+            self.client(FakeProvider([])).aggregates("FOOBAR", "H1", date(2026, 10, 28), date(2026, 10, 29))
         with self.assertRaises(massive.MassiveError):
             massive.MassiveClient(KEY, base_url="http://api.massive.com")
 
@@ -187,7 +187,7 @@ class SyncTests(unittest.TestCase):
             report = massive.sync_incremental(store, massive.MassiveClient(KEY, opener=provider, sleep=lambda s: None),
                                               today=self.TODAY, now=self.SYNC_NOW)
             self.assertIn("EURUSD", report["failed"])
-            self.assertEqual(report["not_attempted"], 13)
+            self.assertEqual(report["not_attempted"], 2 * len(massive.SYMBOL_MAP) - 1)
             self.assertEqual(len(provider.requests), 1)
             self.assertNotIn(KEY, json.dumps(report))
 

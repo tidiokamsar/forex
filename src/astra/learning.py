@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from . import overfitting
-from .marketdata import PAIRS, CandleStore
+from .marketdata import INSTRUMENTS, PAIRS, CandleStore
 from .papertrade import (
     STRATEGY_NAME,
     CostParams,
@@ -110,15 +110,16 @@ class Profile:
     space: dict
     selection_text: str
     demo_feed: bool        # True: its managed account feeds the DEMO bridge (frozen until a human authorizes a change)
+    universe: tuple[str, ...] = ()  # the instruments this pipeline learns on
 
 
 D1_PROFILE = Profile("D1", TIMEFRAME, SOURCE, SOURCE, "", "ASTRA auto", MIN_TRADES, 4 * 260, FINAL_CHECK_DAYS, None, SPACE,
-                     "walk-forward annuel hors échantillon, coûts inclus", True)
+                     "walk-forward annuel hors échantillon, coûts inclus", True, tuple(PAIRS))
 H1_WINDOW_DAYS, H1_FINAL_CHECK_DAYS, H1_MIN_WINDOWS = 90, 120, 3
 H1_PROFILE = Profile("H1", "H1", "MASSIVE_FX_QUOTES", "MT5_METAQUOTES_DEMO", "h1_", "ASTRA H1", 30, 6000, H1_FINAL_CHECK_DAYS,
                      H1_WINDOW_DAYS, SPACE_H1,
                      "walk-forward par blocs de 90 jours hors échantillon, coûts inclus, "
-                     "contrôle final sur les 120 derniers jours", False)
+                     "contrôle final sur les 120 derniers jours", False, tuple(INSTRUMENTS))
 PROFILES = {"D1": D1_PROFILE, "H1": H1_PROFILE}
 
 _SCHEMA = """
@@ -326,8 +327,8 @@ def _request(symbol: str, params: dict[str, Any], start: datetime, end: datetime
              profile: Profile = D1_PROFILE) -> dict[str, Any]:
     risk = replace(DEFAULT_RISK, stop_atr_multiple=float(params["stop_atr_multiple"]),
                    take_profit_r=float(params.get("take_profit_r", 0.0)))
-    costs = replace(DEFAULT_COSTS, spread_pips=DEFAULT_COSTS.spread_pips * cost_factor,
-                    slippage_pips=DEFAULT_COSTS.slippage_pips * cost_factor)
+    spec = INSTRUMENTS[symbol]  # the costs of the instrument (hypotheses, doubled in the stress test)
+    costs = replace(DEFAULT_COSTS, spread_pips=spec.spread_pips * cost_factor, slippage_pips=spec.slippage_pips * cost_factor)
     strategy = _build(StrategyParams, params["strategy"])
     return {"symbol": symbol, "timeframe": profile.timeframe, "source": profile.source, "start": _iso(start), "end": _iso(end),
             "strategy": STRATEGY_NAME, "strategy_params": asdict(strategy), "risk": asdict(risk), "costs": asdict(costs)}
@@ -582,9 +583,9 @@ def revoke_demo(store: LearningStore, symbol: str, operator: str, reason: str) -
 def learn(candles: CandleStore, store: LearningStore, symbol: str) -> dict[str, Any]:
     """One learning run for a pair; returns the decision (promoted or kept) with its evidence."""
 
-    if symbol not in PAIRS:
-        raise SimulationError(f"paire inconnue {symbol}")
     profile = store.profile
+    if symbol not in profile.universe:
+        raise SimulationError(f"instrument {symbol} hors de l'univers du profil {profile.name}")
     run_id = store.start_run(symbol)
     try:
         series = candles.candles(symbol, profile.timeframe, profile.source)
@@ -695,7 +696,7 @@ def ensure_managed_sessions(candles: CandleStore, store: LearningStore, lab: Lab
     available = {(c["symbol"], c["timeframe"], c["source"]) for c in candles.coverage()}
     # The daily accounts replay a year; the hourly ones start now, so no old bar is ever traded after the fact.
     begin = MANAGED_START if profile is D1_PROFILE else _now().replace(minute=0, second=0, microsecond=0)
-    for symbol in PAIRS:
+    for symbol in store.profile.universe:
         if (symbol, profile.timeframe, profile.live_source) not in available or store.managed_session(symbol) is not None:
             continue
         champion = store.champion(symbol)
@@ -724,7 +725,7 @@ def ensure_shadow_sessions(candles: CandleStore, store: LearningStore, lab: LabS
     created = []
     available = {(c["symbol"], c["timeframe"], c["source"]) for c in candles.coverage()}
     begin = _now().replace(hour=0, minute=0, second=0, microsecond=0)
-    for symbol in PAIRS:
+    for symbol in store.profile.universe:
         if (symbol, profile.timeframe, profile.live_source) not in available or store.shadow_session(symbol) is not None:
             continue
         champion = store.champion(symbol)
@@ -756,7 +757,7 @@ def apply_champion(store: LearningStore, lab: LabStore, symbol: str) -> bool:
 
 def overview(store: LearningStore, lab: LabStore) -> dict[str, Any]:
     pairs = []
-    for symbol in PAIRS:
+    for symbol in store.profile.universe:
         champion = store.champion(symbol)
         session_id = store.managed_session(symbol)
         session = lab.session(session_id, item_limit=0) if session_id else None

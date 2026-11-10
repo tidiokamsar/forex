@@ -31,7 +31,16 @@ from pathlib import Path
 from typing import Any
 
 from . import riskmetrics
-from .marketdata import KIND_REFERENCE, PAIRS, TIMEFRAMES, Candle, CandleStore, MarketDataError, find_gaps
+from .marketdata import (
+    INSTRUMENTS,
+    KIND_REFERENCE,
+    PAIRS,
+    TIMEFRAMES,
+    Candle,
+    CandleStore,
+    MarketDataError,
+    find_gaps,
+)
 
 ENGINE_VERSION = "1.0.0"
 STRATEGY_NAME = "sma_atr_trend"
@@ -125,8 +134,8 @@ class RiskParams:
             (0.5 <= self.stop_atr_multiple <= 10, "stop entre 0,5 et 10 ATR"),
             (0 <= self.take_profit_r <= 10, "objectif de profit entre 0 et 10 fois le stop (0 : aucun)"),
             (MIN_UNITS <= self.max_position_units <= 10_000_000, "taille maximale entre 1 000 et 10 000 000 unités"),
-            (isinstance(self.max_positions, int) and 1 <= self.max_positions <= len(PAIRS),
-             f"positions simultanées entre 1 et {len(PAIRS)}"),
+            (isinstance(self.max_positions, int) and 1 <= self.max_positions <= len(INSTRUMENTS),
+             f"positions simultanées entre 1 et {len(INSTRUMENTS)}"),
             (0.1 <= self.daily_loss_limit_pct <= 10, "limite de perte journalière entre 0,1 % et 10 %"),
             (1 <= self.max_drawdown_pct <= 50, "drawdown maximal entre 1 % et 50 %"),
             (1 <= self.leverage <= 50, "levier entre 1 et 50"),
@@ -190,6 +199,13 @@ class Decision:
     reason: str
 
 
+def uses_peers(strategy: StrategyParams, symbols: Sequence[str]) -> bool:
+    """Whether the simulation reads the dollar pairs too: a currency strategy, or a cross whose P&L is converted with them."""
+
+    return strategy.family in CROSS_FAMILIES or any(
+        INSTRUMENTS[s].kind == "forex" and "USD" not in (INSTRUMENTS[s].base, INSTRUMENTS[s].quote) for s in symbols)
+
+
 class PeerPrices:
     """Closes of every pair by timestamp, for the strategies that compare currencies with one another."""
 
@@ -239,13 +255,18 @@ def _currency(params: StrategyParams, history: Sequence[Candle], peers: PeerPric
     lookback = params.fast
     if peers is None or len(history) <= lookback:
         return None
-    strengths = currency_strengths(peers, history[-1 - lookback].timestamp, history[-1].timestamp)
     symbol = history[-1].symbol
-    base, quote = PAIRS[symbol][0], PAIRS[symbol][1]
-    currency = quote if base == "USD" else base
-    if strengths is None or currency not in strengths:
+    spec = INSTRUMENTS[symbol]
+    if spec.kind != "forex":
+        return None  # a metal has no currency strength
+    strengths = currency_strengths(peers, history[-1 - lookback].timestamp, history[-1].timestamp)
+    base, quote = spec.base, spec.quote
+    cross = "USD" not in (base, quote)
+    currency = f"{base}/{quote}" if cross else (quote if base == "USD" else base)
+    if strengths is None or any(c not in strengths for c in (base, quote) if c != "USD"):
         return None
-    strength = strengths[currency]
+    # A pair with the dollar: the strength of its other currency. A cross: the strength of its base minus its quote.
+    strength = (strengths[base] - strengths[quote]) if cross else strengths[currency]
     threshold = params.z_entry * atr_pct * math.sqrt(lookback)
     strong, weak = strength > threshold, strength < -threshold
     follow = params.family == "currency_momentum"
@@ -407,20 +428,12 @@ STRATEGIES = {
 # -- engine ---------------------------------------------------------------------------------------
 
 def _cost_per_side(symbol: str, costs: CostParams) -> float:
-    return (costs.spread_pips / 2 + costs.slippage_pips) * PAIRS[symbol][2]
+    return (costs.spread_pips / 2 + costs.slippage_pips) * INSTRUMENTS[symbol].pip
 
 
-def _to_usd(symbol: str, amount_quote: float, price: float) -> float:
-    base, quote = PAIRS[symbol][0], PAIRS[symbol][1]
-    if quote == "USD":
-        return amount_quote
-    if base == "USD":
-        return amount_quote / price
-    raise SimulationError(f"conversion USD non définie pour {symbol}")
-
-
-def _notional_usd(symbol: str, units: float, price: float) -> float:
-    return units * price if PAIRS[symbol][1] == "USD" else units
+# USD per unit of each non-dollar currency, read from the dollar pairs: (pair, quoted the other way round).
+RATE_PAIRS = {"EUR": ("EURUSD", False), "GBP": ("GBPUSD", False), "AUD": ("AUDUSD", False), "NZD": ("NZDUSD", False),
+              "JPY": ("USDJPY", True), "CHF": ("USDCHF", True), "CAD": ("USDCAD", True)}
 
 
 @dataclass(slots=True)
@@ -447,6 +460,46 @@ class Engine:
 
     # -- helpers --------------------------------------------------------------------------------
 
+    def _rate(self, currency: str) -> float | None:
+        """USD per unit of ``currency``: known for the dollar, and for the others once the dollar pairs have been seen."""
+
+        return 1.0 if currency == "USD" else self.state.setdefault("usd_rates", {}).get(currency)
+
+    def _refresh_rates(self, ts: datetime) -> None:
+        if self.peers is None:
+            return
+        rates = self.state.setdefault("usd_rates", {})
+        for currency, (pair, inverse) in RATE_PAIRS.items():
+            price = self.peers.closes.get(pair, {}).get(ts)
+            if price and price > 0:
+                rates[currency] = 1 / price if inverse else price
+
+    def _rates_ready(self, symbol: str) -> bool:
+        spec = INSTRUMENTS[symbol]
+        return all(self._rate(c) for c in (spec.base, spec.quote) if c != "USD" and spec.kind == "forex")
+
+    def _usd(self, symbol: str, amount_quote: float, price: float) -> float:
+        spec = INSTRUMENTS[symbol]
+        if spec.quote == "USD":
+            return amount_quote
+        if spec.base == "USD":
+            return amount_quote / price
+        rate = self._rate(spec.quote)  # a cross: the profit is in its quote currency
+        if not rate:
+            raise SimulationError(f"taux de conversion en USD inconnu pour {spec.quote}")
+        return amount_quote * rate
+
+    def _notional(self, symbol: str, units: float, price: float) -> float:
+        spec = INSTRUMENTS[symbol]
+        if spec.quote == "USD":
+            return units * price
+        if spec.base == "USD":
+            return units
+        rate = self._rate(spec.base)
+        if not rate:
+            raise SimulationError(f"taux de conversion en USD inconnu pour {spec.base}")
+        return units * rate
+
     def _mark(self, symbol: str, price: float) -> float:
         position = self.state["positions"].get(symbol)
         if not position:
@@ -454,14 +507,14 @@ class Engine:
         direction = 1 if position["side"] == "LONG" else -1
         exit_fill = price - direction * _cost_per_side(symbol, self.costs)
         commission = 2 * position["units"] / 100_000 * self.costs.commission_per_100k
-        return _to_usd(symbol, (exit_fill - position["entry_fill"]) * position["units"] * direction, price) - commission
+        return self._usd(symbol, (exit_fill - position["entry_fill"]) * position["units"] * direction, price) - commission
 
     def equity(self) -> float:
         return self.state["cash"] + sum(self._mark(symbol, self.state["last_close"].get(symbol, p["entry_ref"]))
                                         for symbol, p in self.state["positions"].items())
 
     def _used_margin(self) -> float:
-        return sum(_notional_usd(s, p["units"], self.state["last_close"].get(s, p["entry_ref"])) / self.risk.leverage
+        return sum(self._notional(s, p["units"], self.state["last_close"].get(s, p["entry_ref"])) / self.risk.leverage
                    for s, p in self.state["positions"].items())
 
     def _order(self, rec: Recorder, ts: datetime, symbol: str, kind: str, side: str, units: float, status: str,
@@ -476,8 +529,8 @@ class Engine:
         direction = 1 if position["side"] == "LONG" else -1
         exit_fill = reference - direction * _cost_per_side(symbol, self.costs)
         units = position["units"]
-        gross = _to_usd(symbol, (reference - position["entry_ref"]) * units * direction, reference)
-        net_before_commission = _to_usd(symbol, (exit_fill - position["entry_fill"]) * units * direction, reference)
+        gross = self._usd(symbol, (reference - position["entry_ref"]) * units * direction, reference)
+        net_before_commission = self._usd(symbol, (exit_fill - position["entry_fill"]) * units * direction, reference)
         commission = 2 * units / 100_000 * self.costs.commission_per_100k
         net = net_before_commission - commission
         self.state["cash"] += net
@@ -502,20 +555,24 @@ class Engine:
             code, refusal = "daily", f"limite de perte journalière atteinte ({self.risk.daily_loss_limit_pct} %)"
         elif len(self.state["positions"]) >= self.risk.max_positions:
             code, refusal = "positions", f"nombre maximal de positions simultanées atteint ({self.risk.max_positions})"
+        elif not self._rates_ready(symbol):
+            code, refusal = "rate", "taux de conversion en USD inconnu : entrée refusée"
         stop_distance = self.risk.stop_atr_multiple * atr
         if refusal is None and (not math.isfinite(stop_distance) or stop_distance <= 0):
             code, refusal = "stop", "distance de stop nulle (ATR nul) : pas de stop possible"
         units = 0.0
         if refusal is None:
             risk_usd = equity * self.risk.risk_per_trade_pct / 100
-            loss_per_unit = _to_usd(symbol, stop_distance + 2 * _cost_per_side(symbol, self.costs), reference)
+            spec = INSTRUMENTS[symbol]
+            loss_per_unit = self._usd(symbol, stop_distance + 2 * _cost_per_side(symbol, self.costs), reference)
             raw_units = risk_usd / loss_per_unit
             capped = min(raw_units, self.risk.max_position_units)
-            units = math.floor(capped / UNIT_STEP) * UNIT_STEP
-            if units < MIN_UNITS:
+            units = math.floor(capped / spec.unit_step) * spec.unit_step
+            if units < spec.min_units:
                 code = "size"
-                refusal = f"taille calculée {raw_units:.0f} unités < minimum {MIN_UNITS} (capital ou stop trop petit)"
-            elif self._used_margin() + _notional_usd(symbol, units, reference) / self.risk.leverage > equity:
+                refusal = (f"taille calculée {raw_units:.0f} unités < minimum {spec.min_units:g} "
+                           "(capital ou stop trop petit)")
+            elif self._used_margin() + self._notional(symbol, units, reference) / self.risk.leverage > equity:
                 code = "margin"
                 refusal = f"marge insuffisante au levier 1:{self.risk.leverage:g}"
         if refusal:
@@ -543,6 +600,7 @@ class Engine:
         """Process one candle; ``history`` ends with ``candle`` (same symbol, oldest first)."""
 
         s, symbol, ts = self.state, candle.symbol, candle.timestamp
+        self._refresh_rates(ts)
         day = ts.date().isoformat()
         if s["day"] is None or day > s["day"]:
             if s["daily_halt"]:
@@ -924,7 +982,7 @@ class LabStore:
                     history = [*history[-(engine.strategy.warmup + 2):], candle]
                     work.append((candle.timestamp, candle, history))
             work.sort(key=lambda item: (item[0], item[1].symbol))
-            if work and engine.strategy.family in CROSS_FAMILIES:
+            if work and uses_peers(engine.strategy, symbols):
                 engine.peers = PeerPrices.load(candles_store, row["timeframe"], row["source"],
                                                min(h[0].timestamp for _, _, h in work), max(w[0] for w in work))
             rec = Recorder()
@@ -1008,7 +1066,7 @@ def run_backtest(candles_store: CandleStore, request: dict[str, Any]) -> dict[st
     warm = candles_store.candles(sym, tf, src, end=period[0].timestamp, limit=strategy.warmup + 1, newest=True)
     warm = [c for c in warm if c.timestamp < period[0].timestamp]
     engine, rec = Engine(strategy, risk, costs), Recorder()
-    if strategy.family in CROSS_FAMILIES:
+    if uses_peers(strategy, [sym]):
         engine.peers = PeerPrices.load(candles_store, tf, src, (warm or period)[0].timestamp, period[-1].timestamp)
     history: list[Candle] = list(warm)
     for candle in period:
@@ -1024,6 +1082,9 @@ def run_backtest(candles_store: CandleStore, request: dict[str, Any]) -> dict[st
     gaps = find_gaps([c.timestamp for c in period], tf)
     data_nature = (candles_store.source(src) or {}).get("nature") or "UNKNOWN"
     assumptions = list(ASSUMPTIONS)
+    if uses_peers(strategy, [sym]):
+        assumptions.append("Cette simulation lit aussi les prix des paires contre le dollar, aux mêmes instants : pour "
+                           "convertir le résultat des croisées en USD, et pour comparer les devises entre elles.")
     if strategy.family in CROSS_FAMILIES:
         assumptions.append("Cette stratégie compare les devises entre elles : elle lit aussi les prix des autres paires "
                            "de la même source, aux mêmes instants.")

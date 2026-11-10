@@ -45,6 +45,47 @@ PAIRS: dict[str, tuple[str, str, float, int]] = {
     "USDCAD": ("USD", "CAD", 0.0001, 5),
     "NZDUSD": ("NZD", "USD", 0.0001, 5),
 }
+
+
+@dataclass(frozen=True)
+class Instrument:
+    """What the research and the simulation need to know about a market. ``PAIRS`` stays the set the DEMO bridge may
+    trade (7 dollar pairs); every other instrument is for data, research and simulation only.
+
+    Costs are documented hypotheses, not measured values (the broker catalogue reports a spread of 0 for symbols that
+    are not subscribed): the learning stresses them by doubling. ``min_units`` and ``unit_step`` come from the
+    catalogue (minimum volume 0.01 lot times the contract size)."""
+
+    symbol: str
+    base: str
+    quote: str
+    pip: float
+    decimals: int
+    kind: str                 # "forex" or "metal"
+    min_units: float = 1000.0
+    unit_step: float = 1000.0
+    spread_pips: float = 1.0
+    slippage_pips: float = 0.2
+
+
+def _forex(symbol: str, spread: float) -> Instrument:
+    jpy = symbol.endswith("JPY")
+    return Instrument(symbol, symbol[:3], symbol[3:], 0.01 if jpy else 0.0001, 3 if jpy else 5, "forex", spread_pips=spread)
+
+
+INSTRUMENTS: dict[str, Instrument] = {
+    **{symbol: Instrument(symbol, spec[0], spec[1], spec[2], spec[3], "forex") for symbol, spec in PAIRS.items()},
+    # Crosses (no dollar leg): the P&L currency is the quote currency, converted with the dollar pairs.
+    "EURGBP": _forex("EURGBP", 1.0), "EURCHF": _forex("EURCHF", 1.5), "EURAUD": _forex("EURAUD", 2.0),
+    "EURCAD": _forex("EURCAD", 2.0), "AUDCAD": _forex("AUDCAD", 2.0), "EURJPY": _forex("EURJPY", 1.2),
+    "GBPJPY": _forex("GBPJPY", 2.0), "AUDJPY": _forex("AUDJPY", 1.8), "CADJPY": _forex("CADJPY", 2.2),
+    "CHFJPY": _forex("CHFJPY", 2.5),
+    # Metals quoted in dollars: gold 100 oz and silver 5 000 oz per lot, minimum 0.01 lot.
+    "XAUUSD": Instrument("XAUUSD", "XAU", "USD", 0.01, 2, "metal", min_units=1.0, unit_step=1.0, spread_pips=30.0,
+                         slippage_pips=5.0),
+    "XAGUSD": Instrument("XAGUSD", "XAG", "USD", 0.001, 3, "metal", min_units=50.0, unit_step=50.0, spread_pips=30.0,
+                         slippage_pips=5.0),
+}
 TIMEFRAMES: dict[str, int] = {"M5": 300, "M15": 900, "H1": 3600, "H4": 14400, "D1": 86400}
 KIND_OHLC = "OHLC"
 KIND_REFERENCE = "REFERENCE_FIX"
@@ -76,8 +117,8 @@ def _parse_iso(value: str) -> datetime:
 
 def canonical_symbol(value: str) -> str:
     symbol = (value or "").strip().upper().replace("/", "").replace("_", "").replace("-", "")
-    if symbol not in PAIRS:
-        raise MarketDataError(f"paire non prise en charge : {value!r} (paires : {', '.join(PAIRS)})")
+    if symbol not in INSTRUMENTS:
+        raise MarketDataError(f"instrument non pris en charge : {value!r} (instruments : {', '.join(INSTRUMENTS)})")
     return symbol
 
 
@@ -91,11 +132,11 @@ def canonical_timeframe(value: str) -> str:
 
 
 def price_decimals(symbol: str) -> int:
-    return PAIRS[symbol][3]
+    return INSTRUMENTS[symbol].decimals
 
 
 def pip_size(symbol: str) -> float:
-    return PAIRS[symbol][2]
+    return INSTRUMENTS[symbol].pip
 
 
 def trading_day(moment: datetime) -> date:

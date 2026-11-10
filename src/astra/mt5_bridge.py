@@ -42,13 +42,14 @@ from .brokers.mt5_demo_orders import (
     Mt5OrderRejected,
     Mt5OrderUnknown,
 )
-from .marketdata import pip_size
+from .marketdata import INSTRUMENTS, pip_size
 from .mt5_risk import AccountState, OrderRequest, RiskConfigError, RiskLimits, entries_state, evaluate_entry, load_limits
 
 DEFAULT_INTERVAL_SECONDS = 300
 CONTROLS_CACHE_SECONDS = 15
 INTENT_GRACE_SECONDS = 120   # after an unknown outcome, look for the position this long before concluding "not executed"
 INTENTS_KEPT = 40
+EXTENDED_TIMEFRAMES = ("H1", "D1")  # the research instruments beyond the seven tradable pairs: only these bars
 CATALOGUE_SECONDS = 24 * 3600   # the instrument catalogue is read once a day (it changes rarely)
 CATALOGUE_RETRY_SECONDS = 3600  # and again an hour later when sending failed
 HANDLED_KEPT = 50  # site requests remembered: a request is executed once, whatever happens to its answer
@@ -571,8 +572,15 @@ class Bridge:
         server = self.trader.account["server"]
         for timeframe in timeframes:
             count = RECENT_BARS[timeframe] if recent else BACKFILL_BARS[timeframe]
-            for symbol in mt5_demo.PAIRS:
-                bars = self.trader.candles(symbol, timeframe, count)
+            universe = INSTRUMENTS if timeframe in EXTENDED_TIMEFRAMES else mt5_demo.PAIRS
+            for symbol in universe:
+                try:
+                    bars = self.trader.candles(symbol, timeframe, count)
+                except Mt5DemoError as exc:
+                    if symbol in mt5_demo.PAIRS:
+                        raise  # a tradable pair must answer
+                    self.note("candles_unavailable", symbol=symbol, timeframe=timeframe, reason=str(exc)[:120])
+                    continue  # a research instrument may be missing at the broker: it never stops the flow
                 if not bars:
                     continue
                 # The proxy refuses bodies above 64 KB on API routes: send small batches.
