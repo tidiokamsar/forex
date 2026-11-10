@@ -111,6 +111,7 @@ class RiskParams:
     initial_capital: float = 10_000.0
     risk_per_trade_pct: float = 0.5        # % of equity lost if the stop is hit
     stop_atr_multiple: float = 2.0
+    take_profit_r: float = 0.0             # profit target in multiples of the stop distance (0: none, the signal exits)
     max_position_units: float = 1_000_000
     max_positions: int = 1
     daily_loss_limit_pct: float = 2.0
@@ -122,6 +123,7 @@ class RiskParams:
             (100 <= self.initial_capital <= 100_000_000, "capital initial entre 100 et 100 000 000 USD"),
             (0.01 <= self.risk_per_trade_pct <= 2.0, "risque par transaction entre 0,01 % et 2 %"),
             (0.5 <= self.stop_atr_multiple <= 10, "stop entre 0,5 et 10 ATR"),
+            (0 <= self.take_profit_r <= 10, "objectif de profit entre 0 et 10 fois le stop (0 : aucun)"),
             (MIN_UNITS <= self.max_position_units <= 10_000_000, "taille maximale entre 1 000 et 10 000 000 unités"),
             (isinstance(self.max_positions, int) and 1 <= self.max_positions <= len(PAIRS),
              f"positions simultanées entre 1 et {len(PAIRS)}"),
@@ -526,11 +528,14 @@ class Engine:
         self.state.setdefault("last_refusal", {}).pop(symbol, None)
         entry_fill = reference + direction * _cost_per_side(symbol, self.costs)
         stop = reference - direction * stop_distance
+        target = reference + direction * self.risk.take_profit_r * stop_distance if self.risk.take_profit_r > 0 else None
         self.state["positions"][symbol] = {"side": side, "units": units, "entry_ts": _iso(ts), "entry_ref": reference,
-                                           "entry_fill": round(entry_fill, 6), "stop": round(stop, 6)}
+                                           "entry_fill": round(entry_fill, 6), "stop": round(stop, 6),
+                                           "target": round(target, 6) if target is not None else None}
         note = " (plafonnée)" if units >= self.risk.max_position_units else ""
         self._order(rec, ts, symbol, "ENTREE", label, units, "EXECUTE", reference, round(entry_fill, 6),
-                    f"signal {label} ; stop {stop:.5f} ({self.risk.stop_atr_multiple:g} ATR){note}")
+                    f"signal {label} ; stop {stop:.5f} ({self.risk.stop_atr_multiple:g} ATR)"
+                    + (f" ; objectif {target:.5f} ({self.risk.take_profit_r:g} R)" if target is not None else "") + note)
 
     # -- the step -------------------------------------------------------------------------------
 
@@ -569,6 +574,11 @@ class Engine:
                 self._close(rec, ts, symbol, opening if opening < stop else stop, "stop-loss")
             elif position["side"] == "SHORT" and high >= stop:
                 self._close(rec, ts, symbol, opening if opening > stop else stop, "stop-loss")
+            elif position.get("target") and position["side"] == "LONG" and high >= position["target"]:
+                # The stop was checked first: a candle touching both counts as a loss. A gap past the target fills at the open.
+                self._close(rec, ts, symbol, max(opening, position["target"]), "objectif de profit")
+            elif position.get("target") and position["side"] == "SHORT" and low <= position["target"]:
+                self._close(rec, ts, symbol, min(opening, position["target"]), "objectif de profit")
         # 3. mark to market and the account limits
         s["last_close"][symbol] = candle.close
         equity = self.equity()
@@ -821,7 +831,7 @@ class LabStore:
         return {"id": session_id, "status": status, "changed": True}
 
     def update_session_strategy(self, session_id: int, strategy: dict[str, Any], stop_atr_multiple: float,
-                                note: str) -> bool:
+                                note: str, take_profit_r: float = 0.0) -> bool:
         """New strategy parameters for a running paper account, from its next candle (positions are kept)."""
 
         validated = asdict(_build(StrategyParams, strategy))
@@ -831,7 +841,8 @@ class LabStore:
             if row is None:
                 return False
             params = json.loads(row["params_json"])
-            risk = asdict(_build(RiskParams, {**params["risk"], "stop_atr_multiple": stop_atr_multiple}))
+            risk = asdict(_build(RiskParams, {**params["risk"], "stop_atr_multiple": stop_atr_multiple,
+                                              "take_profit_r": take_profit_r}))
             if params["strategy"] == validated and params["risk"] == risk:
                 return False
             params["strategy"], params["risk"] = validated, risk

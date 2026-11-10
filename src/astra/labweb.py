@@ -182,7 +182,7 @@ def register_lab_routes(app: Flask, *, database: Path, import_dir: Path, require
             hourly = learning.overview(learn_store_h1, lab)
             for pair in learning.active_pairs(learning.overview(learn_store, lab), hourly):
                 session = pair.get("session")
-                detail = lab.session(session["id"], item_limit=1) if session else None
+                detail = lab.session(session["id"], item_limit=300) if session else None
                 last = detail["signals"][-1] if detail and detail.get("signals") else None
                 if detail:
                     processed += list((detail.get("last_processed") or {}).values())
@@ -191,7 +191,11 @@ def register_lab_routes(app: Flask, *, database: Path, import_dir: Path, require
                     signal_times.append(last["ts"])
                 family = pair["champion"]["params"]["strategy"].get("family", "sma_trend")
                 daily = candles.candles(pair["symbol"], learning.TIMEFRAME, learning.SOURCE, limit=130, newest=True)
-                signals.append({"symbol": pair["symbol"], "family": family, "profile": pair["profile"],
+                params = pair["champion"]["params"]
+                tier = params.get("tier")
+                signals.append({"symbol": pair["symbol"], "family": family, "profile": pair["profile"], "tier": tier,
+                                "dsr": params.get("dsr"), "take_profit_r": params.get("take_profit_r") or None,
+                                "live": learning.live_record(pair["champion"], detail) if tier == "PROBATOIRE" else None,
                                 "regime": riskmetrics.regime([c.close for c in daily]), "version": pair["champion"]["version"],
                                 "decision": last["decision"] if last else None, "reason": last["reason"] if last else None,
                                 "since": last["ts"] if last else None})

@@ -61,6 +61,7 @@ SPACE = {
     "min_atr_pct": (0.0, 0.0001, 0.0003),
     "stop_atr_multiple": (1.5, 2.0, 3.0, 4.0),
     "regime": ("none", "match"),
+    "take_profit_r": (0.0, 1.5, 2.5),  # 0: no target, the signal alone exits
 }
 DEFAULT_RISK = RiskParams()
 DEFAULT_COSTS = CostParams()
@@ -77,6 +78,7 @@ SPACE_H1 = {  # bars are hours: 6 to 48 hours fast, 2 to 14 days slow (the strat
     "min_atr_pct": (0.0, 0.00003, 0.0001),  # an hourly ATR is a small share of the price
     "stop_atr_multiple": SPACE["stop_atr_multiple"],
     "regime": SPACE["regime"],
+    "take_profit_r": SPACE["take_profit_r"],
 }
 
 
@@ -133,7 +135,8 @@ def _iso(value: datetime) -> str:
 
 
 def default_params() -> dict[str, Any]:
-    return {"strategy": asdict(StrategyParams()), "stop_atr_multiple": DEFAULT_RISK.stop_atr_multiple}
+    return {"strategy": asdict(StrategyParams()), "stop_atr_multiple": DEFAULT_RISK.stop_atr_multiple,
+            "take_profit_r": DEFAULT_RISK.take_profit_r}
 
 
 class LearningStore:
@@ -256,7 +259,8 @@ class LearningStore:
 
 def _request(symbol: str, params: dict[str, Any], start: datetime, end: datetime, cost_factor: float = 1.0,
              profile: Profile = D1_PROFILE) -> dict[str, Any]:
-    risk = replace(DEFAULT_RISK, stop_atr_multiple=float(params["stop_atr_multiple"]))
+    risk = replace(DEFAULT_RISK, stop_atr_multiple=float(params["stop_atr_multiple"]),
+                   take_profit_r=float(params.get("take_profit_r", 0.0)))
     costs = replace(DEFAULT_COSTS, spread_pips=DEFAULT_COSTS.spread_pips * cost_factor,
                     slippage_pips=DEFAULT_COSTS.slippage_pips * cost_factor)
     strategy = _build(StrategyParams, params["strategy"])
@@ -301,7 +305,8 @@ def candidates(seed: int, champion: dict[str, Any], count: int = CANDIDATES_PER_
     found: list[dict[str, Any]] = []
     # Champions stored before the strategy families have no family field: compare them with every field filled.
     normalized = {"strategy": asdict(_build(StrategyParams, champion["strategy"])),
-                  "stop_atr_multiple": champion["stop_atr_multiple"]}
+                  "stop_atr_multiple": champion["stop_atr_multiple"],
+                  "take_profit_r": champion.get("take_profit_r", 0.0)}
     seen = {json.dumps(normalized, sort_keys=True)}
     attempts = 0
     while len(found) < count and attempts < 1000:
@@ -314,7 +319,8 @@ def candidates(seed: int, champion: dict[str, Any], count: int = CANDIDATES_PER_
                     "min_atr_pct": rng.choice(space["min_atr_pct"]), "max_atr_pct": 0.03, "family": family,
                     "z_entry": rng.choice(space["z_entry"]) if family in Z_FAMILIES else 1.0,
                     "regime": rng.choice(space["regime"])}
-        params = {"strategy": strategy, "stop_atr_multiple": rng.choice(space["stop_atr_multiple"])}
+        params = {"strategy": strategy, "stop_atr_multiple": rng.choice(space["stop_atr_multiple"]),
+                  "take_profit_r": rng.choice(space["take_profit_r"])}
         key = json.dumps(params, sort_keys=True)
         if key not in seen:
             seen.add(key)
@@ -360,6 +366,14 @@ def _deflated(results: list[dict[str, Any]], best: dict[str, Any], trials: int) 
             "expected_max_sharpe": round(outcome.expected_max_sharpe, 4), "n_trials": trials, "n_trades": len(returns)}
 
 
+def live_record(champion: dict[str, Any], session: dict[str, Any] | None) -> dict[str, Any]:
+    """What the champion's own paper account did since its promotion: closed trades, net result, and how many are needed."""
+
+    since = champion.get("promoted_at") or ""
+    live = [t for t in (session or {}).get("trades", []) if t["exit_ts"] >= since]
+    return {"trades": len(live), "net_pnl": round(sum(t["net_pnl"] for t in live), 2), "needed": LIVE_MIN_TRADES}
+
+
 def graduate_or_demote(store: LearningStore, lab: LabStore, symbol: str) -> str | None:
     """Judge a probationary champion on what its own paper account did live since the promotion.
 
@@ -371,15 +385,13 @@ def graduate_or_demote(store: LearningStore, lab: LabStore, symbol: str) -> str 
     session_id = store.managed_session(symbol)
     if params.get("tier") != "PROBATOIRE" or champion.get("run_id") is None or session_id is None:
         return None
-    session = lab.session(session_id, item_limit=1000)
-    since = champion.get("promoted_at") or ""
-    live = [t for t in (session or {}).get("trades", []) if t["exit_ts"] >= since]
-    if len(live) < LIVE_MIN_TRADES:
+    record = live_record(champion, lab.session(session_id, item_limit=1000))
+    if record["trades"] < LIVE_MIN_TRADES:
         return None
-    net = sum(t["net_pnl"] for t in live)
+    net = record["net_pnl"]
     if net > 0:
         store.promote(symbol, {**params, "tier": "VALIDE"}, champion["run_id"],
-                      f"diplômé : {len(live)} transactions simulées en direct, résultat net {net:+.2f} USD")
+                      f"diplômé : {record['trades']} transactions simulées en direct, résultat net {net:+.2f} USD")
         return "GRADUATED"
     store.rollback(symbol)
     apply_champion(store, lab, symbol)
@@ -491,6 +503,7 @@ def ensure_managed_sessions(candles: CandleStore, store: LearningStore, lab: Lab
                                       "start": begin.isoformat(),
                                       "strategy_params": champion["params"]["strategy"],
                                       "risk": {"stop_atr_multiple": champion["params"]["stop_atr_multiple"],
+                                               "take_profit_r": champion["params"].get("take_profit_r", 0.0),
                                                "max_positions": 1}}, candles)
         session_id = lab.create_session(request, "worker:apprentissage")
         store.set_managed_session(symbol, session_id)
@@ -507,7 +520,8 @@ def apply_champion(store: LearningStore, lab: LabStore, symbol: str) -> bool:
     champion = store.champion(symbol)
     return lab.update_session_strategy(session_id, champion["params"]["strategy"],
                                        float(champion["params"]["stop_atr_multiple"]),
-                                       f"champion v{champion['version']} : {champion['reason']}")
+                                       f"champion v{champion['version']} : {champion['reason']}",
+                                       take_profit_r=float(champion["params"].get("take_profit_r", 0.0)))
 
 
 def active_pairs(daily: dict[str, Any], hourly: dict[str, Any] | None) -> list[dict[str, Any]]:

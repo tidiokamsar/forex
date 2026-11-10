@@ -343,6 +343,11 @@ function renderSignals(d) {
     const head = el("div", null, "signal-head");
     head.append(chip(s.symbol), el("strong", pairLabel(s.symbol)), badge(s.decision), el("small", s.since ? ago(s.since) : "—"));
     item.append(head, el("small", `${FAMILY[s.family] || s.family} v${s.version} (${s.profile || "D1"}) · ${s.reason || "pas encore de décision"}`));
+    if (s.tier) {
+      const live = s.live ? ` · ${s.live.trades}/${s.live.needed} transactions simulées en direct (${signed(s.live.net_pnl)} USD)` : "";
+      const dsr = s.dsr == null ? "" : ` · Sharpe dégonflé ${String(s.dsr).replace(".", ",")}`;
+      item.append(el("small", `Niveau ${s.tier === "VALIDE" ? "validé" : "probatoire (demi-risque)"}${dsr}${live}`, "tier-line"));
+    }
     const r = s.regime || {};
     if (r.trend) item.append(el("small", `Régime du marché (D1) : ${r.trend === "tendance" ? `tendance ${r.direction}` : "sans tendance (range)"}${r.volatility ? `, volatilité ${r.volatility}` : ""} · efficacité ${String(r.efficiency).replace(".", ",")}`, "regime-line"));
     return item;
