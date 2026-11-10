@@ -26,7 +26,7 @@ import random
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -63,17 +63,58 @@ SPACE = {
 DEFAULT_RISK = RiskParams()
 DEFAULT_COSTS = CostParams()
 
+SPACE_H1 = {  # bars are hours: 6 to 48 hours fast, 2 to 14 days slow (the strategy accepts up to 400 bars)
+    "family": SPACE["family"],
+    "z_entry": SPACE["z_entry"],
+    "fast": (6, 12, 24, 48),
+    "slow": (48, 96, 168, 336),
+    "atr_window": (14, 24),
+    "min_atr_pct": (0.0, 0.00003, 0.0001),  # an hourly ATR is a small share of the price
+    "stop_atr_multiple": SPACE["stop_atr_multiple"],
+}
+
+
+@dataclass(frozen=True)
+class Profile:
+    """What a learning pipeline trains on and follows: the daily one (ECB candles) or the hourly one.
+
+    The hourly profile chooses on the long Massive history (end-of-day delivery, quote-based bars) and its managed paper
+    accounts follow the broker's own live H1 candles, which is also what a mirrored order would be priced on."""
+
+    name: str
+    timeframe: str
+    source: str            # history the selection and the final check are run on
+    live_source: str       # candles the managed paper accounts follow
+    prefix: str            # table prefix: each profile keeps its own champions, runs and accounts
+    session_label: str
+    min_trades: int
+    min_bars: int
+    final_check_days: int
+    window_days: int | None  # None: yearly walk-forward after three years of history
+    space: dict
+    selection_text: str
+
+
+D1_PROFILE = Profile("D1", TIMEFRAME, SOURCE, SOURCE, "", "ASTRA auto", MIN_TRADES, 4 * 260, FINAL_CHECK_DAYS, None, SPACE,
+                     "walk-forward annuel hors échantillon, coûts inclus")
+H1_WINDOW_DAYS, H1_FINAL_CHECK_DAYS, H1_MIN_WINDOWS = 90, 120, 3
+H1_PROFILE = Profile("H1", "H1", "MASSIVE_FX_QUOTES", "MT5_METAQUOTES_DEMO", "h1_", "ASTRA H1", 30, 6000, H1_FINAL_CHECK_DAYS,
+                     H1_WINDOW_DAYS, SPACE_H1,
+                     "walk-forward par blocs de 90 jours hors échantillon, coûts inclus, "
+                     "contrôle final sur les 120 derniers jours")
+PROFILES = {"D1": D1_PROFILE, "H1": H1_PROFILE}
+
 _SCHEMA = """
-CREATE TABLE IF NOT EXISTS learn_champions (
+CREATE TABLE IF NOT EXISTS {p}learn_champions (
     symbol TEXT NOT NULL, version INTEGER NOT NULL, params_json TEXT NOT NULL, promoted_at TEXT NOT NULL,
     run_id INTEGER, reason TEXT NOT NULL, active INTEGER NOT NULL, PRIMARY KEY (symbol, version)
 );
-CREATE TABLE IF NOT EXISTS learn_runs (
+CREATE TABLE IF NOT EXISTS {p}learn_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT,
     status TEXT NOT NULL, data_json TEXT, champion_version INTEGER, decision TEXT, decision_json TEXT,
     candidates_json TEXT, error TEXT
 );
-CREATE TABLE IF NOT EXISTS learn_managed (symbol TEXT PRIMARY KEY, session_id INTEGER NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS {p}learn_managed (symbol TEXT PRIMARY KEY, session_id INTEGER NOT NULL, created_at TEXT NOT NULL);
 """
 
 
@@ -90,8 +131,10 @@ def default_params() -> dict[str, Any]:
 
 
 class LearningStore:
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, profile: Profile = D1_PROFILE) -> None:
         self.path = Path(path)
+        self.profile = profile
+        self._p = profile.prefix
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -109,14 +152,15 @@ class LearningStore:
 
     def initialize(self) -> None:
         with self._connect() as db:
-            db.executescript(_SCHEMA)
+            db.executescript(_SCHEMA.replace("{p}", self._p))
 
     def champion(self, symbol: str) -> dict[str, Any]:
         with self._connect() as db:
-            row = db.execute("SELECT * FROM learn_champions WHERE symbol = ? AND active = 1", (symbol,)).fetchone()
+            row = db.execute(f"SELECT * FROM {self._p}learn_champions WHERE symbol = ? AND active = 1", (symbol,)).fetchone()
             if row is None:
                 params = default_params()
-                db.execute("INSERT OR IGNORE INTO learn_champions(symbol, version, params_json, promoted_at, run_id, reason,"
+                db.execute(f"INSERT OR IGNORE INTO {self._p}learn_champions(symbol, version, params_json, promoted_at, run_id,"
+                           f" reason,"
                            " active) VALUES (?,?,?,?,?,?,1)",
                            (symbol, 1, json.dumps(params), _iso(_now()), None, "stratégie de référence (non optimisée)"))
                 return {"symbol": symbol, "version": 1, "params": params, "reason": "stratégie de référence (non optimisée)"}
@@ -126,10 +170,10 @@ class LearningStore:
     def promote(self, symbol: str, params: dict[str, Any], run_id: int | None, reason: str) -> int:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            version = (db.execute("SELECT COALESCE(MAX(version), 0) FROM learn_champions WHERE symbol = ?", (symbol,))
+            version = (db.execute(f"SELECT COALESCE(MAX(version), 0) FROM {self._p}learn_champions WHERE symbol = ?", (symbol,))
                        .fetchone()[0]) + 1
-            db.execute("UPDATE learn_champions SET active = 0 WHERE symbol = ?", (symbol,))
-            db.execute("INSERT INTO learn_champions(symbol, version, params_json, promoted_at, run_id, reason, active)"
+            db.execute(f"UPDATE {self._p}learn_champions SET active = 0 WHERE symbol = ?", (symbol,))
+            db.execute(f"INSERT INTO {self._p}learn_champions(symbol, version, params_json, promoted_at, run_id, reason, active)"
                        " VALUES (?,?,?,?,?,?,1)", (symbol, version, json.dumps(params), _iso(_now()), run_id, reason))
             return version
 
@@ -137,7 +181,8 @@ class LearningStore:
         """Reactivate the previous champion version (a new version row, so the history stays append-only)."""
 
         with self._connect() as db:
-            rows = db.execute("SELECT * FROM learn_champions WHERE symbol = ? ORDER BY version DESC", (symbol,)).fetchall()
+            rows = db.execute(f"SELECT * FROM {self._p}learn_champions WHERE symbol = ? ORDER BY version DESC",
+                              (symbol,)).fetchall()
         if len(rows) < 2:
             raise SimulationError("aucune version précédente à rétablir")
         previous = rows[1]
@@ -147,28 +192,29 @@ class LearningStore:
     def history(self, symbol: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         with self._connect() as db:
             if symbol:
-                rows = db.execute("SELECT * FROM learn_champions WHERE symbol = ? ORDER BY promoted_at DESC LIMIT ?",
+                rows = db.execute(f"SELECT * FROM {self._p}learn_champions WHERE symbol = ? ORDER BY promoted_at DESC LIMIT ?",
                                   (symbol, limit)).fetchall()
             else:
-                rows = db.execute("SELECT * FROM learn_champions ORDER BY promoted_at DESC LIMIT ?", (limit,)).fetchall()
+                rows = db.execute(f"SELECT * FROM {self._p}learn_champions ORDER BY promoted_at DESC LIMIT ?",
+                                  (limit,)).fetchall()
         return [{**{k: r[k] for k in ("symbol", "version", "promoted_at", "run_id", "reason", "active")},
                  "params": json.loads(r["params_json"])} for r in rows]
 
     def start_run(self, symbol: str) -> int:
         with self._connect() as db:
-            return int(db.execute("INSERT INTO learn_runs(symbol, started_at, status) VALUES (?,?,?)",
+            return int(db.execute(f"INSERT INTO {self._p}learn_runs(symbol, started_at, status) VALUES (?,?,?)",
                                   (symbol, _iso(_now()), "RUNNING")).lastrowid)
 
     def finish_run(self, run_id: int, **values: Any) -> None:
         columns = {k: (json.dumps(v, default=str) if k.endswith("_json") else v) for k, v in values.items()}
         assignments = ", ".join(f"{k} = ?" for k in columns)
         with self._connect() as db:
-            db.execute(f"UPDATE learn_runs SET {assignments}, finished_at = ? WHERE id = ?",
+            db.execute(f"UPDATE {self._p}learn_runs SET {assignments}, finished_at = ? WHERE id = ?",
                        (*columns.values(), _iso(_now()), run_id))
 
     def runs(self, limit: int = 50) -> list[dict[str, Any]]:
         with self._connect() as db:
-            rows = db.execute("SELECT * FROM learn_runs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+            rows = db.execute(f"SELECT * FROM {self._p}learn_runs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         out = []
         for r in rows:
             item = dict(r)
@@ -180,38 +226,40 @@ class LearningStore:
 
     def last_run_at(self, symbol: str) -> datetime | None:
         with self._connect() as db:
-            row = db.execute("SELECT MAX(started_at) FROM learn_runs WHERE symbol = ?", (symbol,)).fetchone()
+            row = db.execute(f"SELECT MAX(started_at) FROM {self._p}learn_runs WHERE symbol = ?", (symbol,)).fetchone()
         return datetime.fromisoformat(row[0]) if row and row[0] else None
 
     def trials(self, symbol: str) -> int:
         with self._connect() as db:
-            rows = db.execute("SELECT candidates_json FROM learn_runs WHERE symbol = ? AND status = 'DONE'", (symbol,)).fetchall()
+            rows = db.execute(f"SELECT candidates_json FROM {self._p}learn_runs WHERE symbol = ? AND status = 'DONE'",
+                              (symbol,)).fetchall()
         return sum(len(json.loads(r[0] or "[]")) for r in rows)
 
     def managed_session(self, symbol: str) -> int | None:
         with self._connect() as db:
-            row = db.execute("SELECT session_id FROM learn_managed WHERE symbol = ?", (symbol,)).fetchone()
+            row = db.execute(f"SELECT session_id FROM {self._p}learn_managed WHERE symbol = ?", (symbol,)).fetchone()
         return row[0] if row else None
 
     def set_managed_session(self, symbol: str, session_id: int) -> None:
         with self._connect() as db:
-            db.execute("INSERT INTO learn_managed(symbol, session_id, created_at) VALUES (?,?,?) ON CONFLICT(symbol)"
+            db.execute(f"INSERT INTO {self._p}learn_managed(symbol, session_id, created_at) VALUES (?,?,?) ON CONFLICT(symbol)"
                        " DO UPDATE SET session_id = excluded.session_id", (symbol, session_id, _iso(_now())))
 
 
 # -- evaluation -----------------------------------------------------------------------------------
 
-def _request(symbol: str, params: dict[str, Any], start: datetime, end: datetime, cost_factor: float = 1.0) -> dict[str, Any]:
+def _request(symbol: str, params: dict[str, Any], start: datetime, end: datetime, cost_factor: float = 1.0,
+             profile: Profile = D1_PROFILE) -> dict[str, Any]:
     risk = replace(DEFAULT_RISK, stop_atr_multiple=float(params["stop_atr_multiple"]))
     costs = replace(DEFAULT_COSTS, spread_pips=DEFAULT_COSTS.spread_pips * cost_factor,
                     slippage_pips=DEFAULT_COSTS.slippage_pips * cost_factor)
     strategy = _build(StrategyParams, params["strategy"])
-    return {"symbol": symbol, "timeframe": TIMEFRAME, "source": SOURCE, "start": _iso(start), "end": _iso(end),
+    return {"symbol": symbol, "timeframe": profile.timeframe, "source": profile.source, "start": _iso(start), "end": _iso(end),
             "strategy": STRATEGY_NAME, "strategy_params": asdict(strategy), "risk": asdict(risk), "costs": asdict(costs)}
 
 
 def evaluate(candles: CandleStore, symbol: str, params: dict[str, Any], windows: list[tuple[datetime, datetime]],
-             cost_factor: float = 1.0, purpose: str = "selection") -> dict[str, Any]:
+             cost_factor: float = 1.0, purpose: str = "selection", profile: Profile = D1_PROFILE) -> dict[str, Any]:
     """Out-of-sample metrics over the given windows (each simulated with earlier candles only as warm-up).
 
     ``purpose`` (selection, final_check, cost_stress) only labels the result."""
@@ -219,7 +267,7 @@ def evaluate(candles: CandleStore, symbol: str, params: dict[str, Any], windows:
     yearly, trades, worst_dd, net = [], 0, 0.0, 0.0
     for start, end in windows:
         try:
-            result = run_backtest(candles, _request(symbol, params, start, end, cost_factor))
+            result = run_backtest(candles, _request(symbol, params, start, end, cost_factor, profile))
         except SimulationError:
             continue
         m = result["metrics"]
@@ -233,12 +281,14 @@ def evaluate(candles: CandleStore, symbol: str, params: dict[str, Any], windows:
     return {"purpose": purpose, "windows": len(yearly), "mean_return_pct": round(mean, 3),
             "worst_drawdown_pct": round(worst_dd, 3),
             "trades": trades, "net_pnl": round(net, 2), "positive_windows": sum(1 for y in yearly if y > 0),
-            "score": round(mean - 0.5 * worst_dd, 3) if trades >= MIN_TRADES else None,
+            "score": round(mean - 0.5 * worst_dd, 3) if trades >= profile.min_trades else None,
             "yearly_returns_pct": [round(y, 3) for y in yearly]}
 
 
-def candidates(seed: int, champion: dict[str, Any], count: int = CANDIDATES_PER_RUN) -> list[dict[str, Any]]:
+def candidates(seed: int, champion: dict[str, Any], count: int = CANDIDATES_PER_RUN,
+               profile: Profile = D1_PROFILE) -> list[dict[str, Any]]:
     rng = random.Random(seed)
+    space = profile.space
     found: list[dict[str, Any]] = []
     # Champions stored before the strategy families have no family field: compare them with every field filled.
     normalized = {"strategy": asdict(_build(StrategyParams, champion["strategy"])),
@@ -247,14 +297,14 @@ def candidates(seed: int, champion: dict[str, Any], count: int = CANDIDATES_PER_
     attempts = 0
     while len(found) < count and attempts < 1000:
         attempts += 1
-        fast, slow = rng.choice(SPACE["fast"]), rng.choice(SPACE["slow"])
+        fast, slow = rng.choice(space["fast"]), rng.choice(space["slow"])
         if fast >= slow:
             continue
-        family = rng.choice(SPACE["family"])
-        strategy = {"fast": fast, "slow": slow, "atr_window": rng.choice(SPACE["atr_window"]),
-                    "min_atr_pct": rng.choice(SPACE["min_atr_pct"]), "max_atr_pct": 0.03, "family": family,
-                    "z_entry": rng.choice(SPACE["z_entry"]) if family == "mean_reversion" else 1.0}
-        params = {"strategy": strategy, "stop_atr_multiple": rng.choice(SPACE["stop_atr_multiple"])}
+        family = rng.choice(space["family"])
+        strategy = {"fast": fast, "slow": slow, "atr_window": rng.choice(space["atr_window"]),
+                    "min_atr_pct": rng.choice(space["min_atr_pct"]), "max_atr_pct": 0.03, "family": family,
+                    "z_entry": rng.choice(space["z_entry"]) if family == "mean_reversion" else 1.0}
+        params = {"strategy": strategy, "stop_atr_multiple": rng.choice(space["stop_atr_multiple"])}
         key = json.dumps(params, sort_keys=True)
         if key not in seen:
             seen.add(key)
@@ -262,10 +312,22 @@ def candidates(seed: int, champion: dict[str, Any], count: int = CANDIDATES_PER_
     return found
 
 
-def windows_for(first: datetime, last: datetime) -> tuple[list[tuple[datetime, datetime]], tuple[datetime, datetime]]:
-    """Yearly selection windows (after three years of history) and the final check window (last 365 days)."""
+def windows_for(first: datetime, last: datetime,
+                profile: Profile = D1_PROFILE) -> tuple[list[tuple[datetime, datetime]], tuple[datetime, datetime]]:
+    """Selection windows and the final check window (never used to choose).
 
-    check_start = last - timedelta(days=FINAL_CHECK_DAYS)
+    Daily profile: yearly windows after three years of history, final check = last 365 days. Hourly profile: blocks
+    of 90 days walking back from the final check (last 120 days), keeping two weeks of history before the first one."""
+
+    check_start = last - timedelta(days=profile.final_check_days)
+    if profile.window_days:
+        width = timedelta(days=profile.window_days)
+        selection, end = [], check_start
+        while end - width >= first + timedelta(days=14):
+            selection.append((end - width, end - timedelta(seconds=1)))
+            end -= width
+        selection.reverse()
+        return selection, (check_start, last)
     selection, start = [], datetime(first.year + 3, 1, 1, tzinfo=UTC)
     while start + timedelta(days=365) <= check_start:
         selection.append((start, start + timedelta(days=365) - timedelta(seconds=1)))
@@ -278,23 +340,28 @@ def learn(candles: CandleStore, store: LearningStore, symbol: str) -> dict[str, 
 
     if symbol not in PAIRS:
         raise SimulationError(f"paire inconnue {symbol}")
+    profile = store.profile
     run_id = store.start_run(symbol)
     try:
-        series = candles.candles(symbol, TIMEFRAME, SOURCE)
-        if len(series) < 4 * 260:
-            raise SimulationError(f"historique trop court pour apprendre ({len(series)} bougies D1)")
-        selection, check = windows_for(series[0].timestamp, series[-1].timestamp)
+        series = candles.candles(symbol, profile.timeframe, profile.source)
+        if len(series) < profile.min_bars:
+            raise SimulationError(f"historique trop court pour apprendre ({len(series)} bougies {profile.timeframe})")
+        selection, check = windows_for(series[0].timestamp, series[-1].timestamp, profile)
+        if profile.window_days and len(selection) < H1_MIN_WINDOWS:
+            raise SimulationError(f"pas assez de blocs de sélection ({len(selection)}, minimum {H1_MIN_WINDOWS})")
         champion = store.champion(symbol)
-        pool = candidates(run_id * 7919 + len(series), champion["params"])
+        pool = candidates(run_id * 7919 + len(series), champion["params"], profile=profile)
         results = []
         for label, params in [("champion", champion["params"]), *[(f"candidat {i + 1}", p) for i, p in enumerate(pool)]]:
-            results.append({"label": label, "params": params, "selection": evaluate(candles, symbol, params, selection)})
+            results.append({"label": label, "params": params,
+                            "selection": evaluate(candles, symbol, params, selection, profile=profile)})
         champ = results[0]
         scored = [r for r in results[1:] if r["selection"]["score"] is not None]
         best = max(scored, key=lambda r: r["selection"]["score"], default=None)
         decision: dict[str, Any] = {"champion_version": champion["version"], "champion_selection": champ["selection"],
                                     "criteria": {"min_score_gain": MIN_SCORE_GAIN, "max_drawdown_pct": MAX_DRAWDOWN_PCT,
-                                                 "min_trades": MIN_TRADES, "final_check_days": FINAL_CHECK_DAYS}}
+                                                 "min_trades": profile.min_trades,
+                                                 "final_check_days": profile.final_check_days}}
         verdict, reason = "KEPT", "aucun candidat n'a un score de sélection valable"
         if best is not None:
             decision["best"] = {"label": best["label"], "params": best["params"], "selection": best["selection"]}
@@ -305,9 +372,10 @@ def learn(candles: CandleStore, store: LearningStore, symbol: str) -> dict[str, 
             elif best["selection"]["worst_drawdown_pct"] > MAX_DRAWDOWN_PCT:
                 reason = f"drawdown du candidat {best['selection']['worst_drawdown_pct']:.1f} % > {MAX_DRAWDOWN_PCT} %"
             else:
-                final_best = evaluate(candles, symbol, best["params"], [check], purpose="final_check")
-                final_champ = evaluate(candles, symbol, champion["params"], [check], purpose="final_check")
-                stressed = evaluate(candles, symbol, best["params"], selection, cost_factor=2.0, purpose="cost_stress")
+                final_best = evaluate(candles, symbol, best["params"], [check], purpose="final_check", profile=profile)
+                final_champ = evaluate(candles, symbol, champion["params"], [check], purpose="final_check", profile=profile)
+                stressed = evaluate(candles, symbol, best["params"], selection, cost_factor=2.0, purpose="cost_stress",
+                                    profile=profile)
                 decision.update(final_check_best=final_best, final_check_champion=final_champ, cost_stress=stressed)
                 if final_best["windows"] == 0 or final_best["net_pnl"] < 0:
                     reason = "résultat net du candidat négatif sur la période de contrôle finale"
@@ -323,7 +391,8 @@ def learn(candles: CandleStore, store: LearningStore, symbol: str) -> dict[str, 
         decision["trials_so_far"] = store.trials(symbol) + len(results)
         if verdict == "PROMOTED":
             decision["new_version"] = store.promote(symbol, best["params"], run_id, reason)
-        data = {"source": SOURCE, "timeframe": TIMEFRAME, "candles": len(series), "first": _iso(series[0].timestamp),
+        data = {"source": profile.source, "timeframe": profile.timeframe, "profile": profile.name,
+                "candles": len(series), "first": _iso(series[0].timestamp),
                 "last": _iso(series[-1].timestamp), "selection_windows": len(selection),
                 "final_check": [_iso(check[0]), _iso(check[1])], "learning_version": LEARNING_VERSION}
         compact = [{"label": r["label"], "params": r["params"], "score": r["selection"]["score"],
@@ -346,13 +415,17 @@ def ensure_managed_sessions(candles: CandleStore, store: LearningStore, lab: Lab
     """One continuous paper account per pair, trading the pair's champion; created once, never reset."""
 
     created = []
+    profile = store.profile
     available = {(c["symbol"], c["timeframe"], c["source"]) for c in candles.coverage()}
+    # The daily accounts replay a year; the hourly ones start now, so no old bar is ever traded after the fact.
+    begin = MANAGED_START if profile is D1_PROFILE else _now().replace(minute=0, second=0, microsecond=0)
     for symbol in PAIRS:
-        if (symbol, TIMEFRAME, SOURCE) not in available or store.managed_session(symbol) is not None:
+        if (symbol, profile.timeframe, profile.live_source) not in available or store.managed_session(symbol) is not None:
             continue
         champion = store.champion(symbol)
-        request = simulation_request({"name": f"ASTRA auto · {symbol} (champion)", "symbols": [symbol],
-                                      "timeframe": TIMEFRAME, "source": SOURCE, "start": MANAGED_START.isoformat(),
+        request = simulation_request({"name": f"{profile.session_label} · {symbol} (champion)", "symbols": [symbol],
+                                      "timeframe": profile.timeframe, "source": profile.live_source,
+                                      "start": begin.isoformat(),
                                       "strategy_params": champion["params"]["strategy"],
                                       "risk": {"stop_atr_multiple": champion["params"]["stop_atr_multiple"],
                                                "max_positions": 1}}, candles)
@@ -385,10 +458,11 @@ def overview(store: LearningStore, lab: LabStore) -> dict[str, Any]:
                       "session": ({"id": session_id, "status": session["status"], "account": session["account"],
                                    "trades_total": session["trades_total"], "orders_total": session["orders_total"],
                                    "last_processed": session["last_processed"]} if session else None)})
-    return {"learning_version": LEARNING_VERSION, "pairs": pairs, "runs": store.runs(limit=30),
+    profile = store.profile
+    return {"learning_version": LEARNING_VERSION, "profile": profile.name, "pairs": pairs, "runs": store.runs(limit=30),
             "history": store.history(limit=40),
-            "method": {"selection": "walk-forward annuel hors échantillon, coûts inclus",
-                       "final_check_days": FINAL_CHECK_DAYS, "min_score_gain": MIN_SCORE_GAIN,
-                       "max_drawdown_pct": MAX_DRAWDOWN_PCT, "min_trades": MIN_TRADES,
+            "method": {"selection": profile.selection_text,
+                       "final_check_days": profile.final_check_days, "min_score_gain": MIN_SCORE_GAIN,
+                       "max_drawdown_pct": MAX_DRAWDOWN_PCT, "min_trades": profile.min_trades,
                        "candidates_per_run": CANDIDATES_PER_RUN,
                        "warning": "amélioration mesurée sur l'historique, aucune garantie de résultat futur"}}

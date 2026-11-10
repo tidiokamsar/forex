@@ -66,7 +66,7 @@ class UnitTests(LearningCase):
 
     def test_promotion_needs_every_criterion(self):
         def fake(scores):
-            def evaluate(candles, symbol, params, windows, cost_factor=1.0, purpose="selection"):
+            def evaluate(candles, symbol, params, windows, cost_factor=1.0, purpose="selection", profile=None):
                 key = {"selection": "selection", "final_check": "check", "cost_stress": "stress"}[purpose]
                 return dict(scores[key](params))
             return evaluate
@@ -105,6 +105,108 @@ class UnitTests(LearningCase):
         self.assertIn("NOUVEAU_CHAMPION", [e["kind"] for e in after["events"]])
         self.assertEqual(self.store.rollback("EURUSD"), 3)
         self.assertEqual(self.store.champion("EURUSD")["params"], learning.default_params())
+
+
+def hourly_series(symbol="EURUSD", source="MASSIVE_FX_QUOTES", start=datetime(2024, 10, 29, tzinfo=UTC), bars=12000, end=None):
+    """Weekday hourly bars with trending and ranging stretches; ``end`` fixes the last bar instead of the first."""
+
+    from astra.marketdata import KIND_OHLC
+
+    out, price, moment, i = [], 1.10, start, 0
+    while len(out) < bars:
+        moment = start + timedelta(hours=i)
+        i += 1
+        if moment.weekday() >= 5:
+            continue
+        price *= 1 + 0.0004 * ((i // 90) % 2 * 2 - 1) + 0.0003 * ((i * 7919) % 13 - 6) / 6
+        out.append(Candle(symbol, "H1", moment, price, price + 0.0004, price - 0.0004, round(price, 6), 100.0, source, KIND_OHLC))
+    if end is not None:
+        shift = end - out[-1].timestamp
+        out = [Candle(c.symbol, c.timeframe, c.timestamp + shift, c.open, c.high, c.low, c.close, c.volume, c.source, c.kind)
+               for c in out]
+    return out
+
+
+class HourlyProfileTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = workspace_tempdir()
+        self.db = Path(self.temp.name) / "astra.sqlite3"
+        self.candles, self.lab = CandleStore(self.db), LabStore(self.db)
+        self.daily, self.hourly = learning.LearningStore(self.db), learning.LearningStore(self.db, learning.H1_PROFILE)
+        for s in (self.candles, self.lab, self.daily, self.hourly):
+            s.initialize()
+        self.candles.register_source("MASSIVE_FX_QUOTES", "MASSIVE_REST", "HISTORICAL", "test")
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_hourly_windows_walk_back_from_the_final_check_and_never_touch_it(self):
+        first, last = datetime(2024, 10, 29, tzinfo=UTC), datetime(2026, 11, 8, 23, tzinfo=UTC)
+        selection, check = learning.windows_for(first, last, learning.H1_PROFILE)
+        self.assertGreaterEqual(len(selection), learning.H1_MIN_WINDOWS)
+        self.assertEqual((check[1] - check[0]).days, learning.H1_FINAL_CHECK_DAYS)
+        self.assertTrue(all(end < check[0] for _, end in selection))
+        self.assertEqual(selection, sorted(selection))
+        self.assertTrue(all((end - start).days == learning.H1_WINDOW_DAYS - 1 for start, end in selection))
+        self.assertGreaterEqual(selection[0][0], first + timedelta(days=14))  # warm-up history before the first block
+
+    def test_hourly_candidates_use_the_hourly_space_and_are_deterministic(self):
+        pool = learning.candidates(7, learning.default_params(), profile=learning.H1_PROFILE)
+        self.assertEqual(pool, learning.candidates(7, learning.default_params(), profile=learning.H1_PROFILE))
+        self.assertTrue(all(c["strategy"]["fast"] in learning.SPACE_H1["fast"] for c in pool))
+        self.assertTrue(all(c["strategy"]["slow"] in learning.SPACE_H1["slow"] for c in pool))
+        self.assertIn("breakout", {c["strategy"]["family"] for c in learning.candidates(
+            1, learning.default_params(), count=200, profile=learning.H1_PROFILE)})
+
+    def test_each_profile_keeps_its_own_champions_and_runs(self):
+        version = self.daily.promote("EURUSD", {**learning.default_params(), "stop_atr_multiple": 3.0}, None, "test")
+        self.assertEqual(version, 2)
+        self.assertEqual(self.hourly.champion("EURUSD")["version"], 1)
+        self.assertEqual(self.daily.champion("EURUSD")["version"], 2)
+        self.hourly.start_run("EURUSD")
+        self.assertEqual(len(self.hourly.runs()), 1)
+        self.assertEqual(self.daily.runs(), [])
+
+    def test_an_hourly_run_learns_on_the_massive_history_and_leaves_the_daily_pipeline_alone(self):
+        self.candles.store(hourly_series(), "HISTORICAL", None)
+        original = learning.candidates
+        with mock.patch.object(learning, "candidates",
+                               lambda seed, champ, count=3, profile=learning.D1_PROFILE: original(seed, champ, count, profile)):
+            result = learning.learn(self.candles, self.hourly, "EURUSD")
+        run = self.hourly.runs(1)[0]
+        self.assertEqual((run["status"], run["data"]["profile"], run["data"]["timeframe"]), ("DONE", "H1", "H1"))
+        self.assertEqual(len(run["candidates"]), 4)
+        self.assertEqual(run["evidence"]["criteria"]["min_trades"], learning.H1_PROFILE.min_trades)
+        self.assertIn(result["decision"], ("KEPT", "PROMOTED"))
+        self.assertEqual(self.daily.runs(), [])
+
+    def test_a_too_short_hourly_history_fails_the_run_instead_of_learning_from_nothing(self):
+        from astra.papertrade import SimulationError
+
+        self.candles.store(hourly_series(bars=500), "HISTORICAL", None)
+        with self.assertRaises(SimulationError):
+            learning.learn(self.candles, self.hourly, "EURUSD")
+        self.assertEqual(self.hourly.runs(1)[0]["status"], "FAILED")
+
+    def test_the_hourly_paper_account_follows_the_broker_candles_and_starts_now(self):
+        self.candles.register_source("MT5_METAQUOTES_DEMO", "MT5", "BROKER", "test")
+        now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        self.candles.store(hourly_series(source="MT5_METAQUOTES_DEMO", bars=600, end=now - timedelta(hours=1)), "BROKER", None)
+        created = learning.ensure_managed_sessions(self.candles, self.hourly, self.lab)
+        self.assertEqual(len(created), 1)
+        session = self.lab.session(created[0], item_limit=0)
+        self.assertEqual((session["timeframe"], session["source"]), ("H1", "MT5_METAQUOTES_DEMO"))
+        self.assertTrue(session["name"].startswith("ASTRA H1"))
+        self.assertGreaterEqual(datetime.fromisoformat(session["start_at"]), now)  # no old bar is traded after the fact
+        self.assertEqual(learning.ensure_managed_sessions(self.candles, self.hourly, self.lab), [])
+
+    def test_the_worker_schedules_hourly_learning_next_to_the_daily_one(self):
+        self.candles.store(hourly_series(bars=3000), "HISTORICAL", None)
+        worker = Worker(self.db, Path(self.temp.name) / "imports", ecb_enabled=False, massive_enabled=False)
+        worker.initialize()
+        worker.maybe_schedule_learning()
+        learn_jobs = [j for j in worker.jobs.jobs() if j["kind"] == "learn"]
+        self.assertEqual([j["params"] for j in learn_jobs], [{"symbol": "EURUSD", "profile": "H1"}])
 
 
 class FamilyTests(unittest.TestCase):

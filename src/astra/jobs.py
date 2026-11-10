@@ -174,6 +174,7 @@ class Worker:
         self.lab = LabStore(self.database)
         self.jobs = JobStore(self.database)
         self.learning = learning.LearningStore(self.database)
+        self.learning_h1 = learning.LearningStore(self.database, learning.H1_PROFILE)
         self.learning_enabled = True
         self.ecb_fetch = ecb_fetch
         self.ecb_enabled = ecb_enabled
@@ -187,6 +188,7 @@ class Worker:
         self.lab.initialize()
         self.jobs.initialize()
         self.learning.initialize()
+        self.learning_h1.initialize()
         recovered = self.jobs.recover()
         self.lab.fail_interrupted_backtests()
         if recovered:
@@ -219,9 +221,10 @@ class Worker:
             return report
         if job["kind"] == "learn":
             symbol = str(params["symbol"])
-            result = learning.learn(self.candles, self.learning, symbol)
+            store = self.learning_h1 if params.get("profile") == "H1" else self.learning
+            result = learning.learn(self.candles, store, symbol)
             if result["decision"] == "PROMOTED":
-                result["applied_to_simulation"] = learning.apply_champion(self.learning, self.lab, symbol)
+                result["applied_to_simulation"] = learning.apply_champion(store, self.lab, symbol)
             return result
         if job["kind"] == "backtest":
             backtest_id = int(params["backtest_id"])
@@ -287,13 +290,17 @@ class Worker:
 
         if not self.learning_enabled:
             return
-        learning.ensure_managed_sessions(self.candles, self.learning, self.lab)
-        available = {c["symbol"] for c in self.candles.coverage()
-                     if c["timeframe"] == learning.TIMEFRAME and c["source"] == learning.SOURCE}
-        for symbol in sorted(available):
-            last = self.learning.last_run_at(symbol)
-            if last is None or self.clock() - last >= LEARN_INTERVAL:
-                self.jobs.enqueue("learn", {"symbol": symbol}, "worker:apprentissage", dedupe_key=f"learn:{symbol}")
+        for store in (self.learning, self.learning_h1):
+            profile = store.profile
+            learning.ensure_managed_sessions(self.candles, store, self.lab)
+            available = {c["symbol"] for c in self.candles.coverage()
+                         if c["timeframe"] == profile.timeframe and c["source"] == profile.source}
+            for symbol in sorted(available):
+                last = store.last_run_at(symbol)
+                if last is None or self.clock() - last >= LEARN_INTERVAL:
+                    tag = symbol if profile.name == "D1" else f"{profile.name}:{symbol}"
+                    self.jobs.enqueue("learn", {"symbol": symbol, **({"profile": profile.name} if profile.name != "D1" else {})},
+                                      "worker:apprentissage", dedupe_key=f"learn:{tag}")
 
     def tick(self) -> dict[str, Any]:
         """One loop: schedule, run at most one job, advance every running simulation."""

@@ -30,8 +30,9 @@ def register_lab_routes(app: Flask, *, database: Path, import_dir: Path, require
                         error: Callable[[int, str], Response]) -> None:
     candles, lab, jobs = CandleStore(database), LabStore(database), JobStore(database)
     learn_store = learning.LearningStore(database)
+    learn_store_h1 = learning.LearningStore(database, learning.H1_PROFILE)
     mt5_view = mt5view.Mt5View(database)
-    for store in (candles, lab, jobs, learn_store, mt5_view):
+    for store in (candles, lab, jobs, learn_store, learn_store_h1, mt5_view):
         store.initialize()
 
     def answer(producer: Callable[[], Any], status: int = 200) -> Response:
@@ -131,7 +132,8 @@ def register_lab_routes(app: Flask, *, database: Path, import_dir: Path, require
     @app.get("/api/learn/overview")
     @require(WebRole.READ_ONLY)
     def learn_overview() -> Response:
-        return answer(lambda: learning.overview(learn_store, lab))
+        chosen = learn_store_h1 if request.args.get("profile", "D1").upper() == "H1" else learn_store
+        return answer(lambda: learning.overview(chosen, lab))
 
     @app.get("/api/mt5/overview")
     @require(WebRole.READ_ONLY)
