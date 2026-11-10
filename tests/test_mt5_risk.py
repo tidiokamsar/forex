@@ -10,12 +10,13 @@ from astra import mt5_risk
 from astra.mt5_risk import AccountState, OrderRequest, RiskConfigError, RiskLimits
 
 LIMITS = RiskLimits()
-ACCOUNT = AccountState(environment="DEMO", currency="USD", login=114765880, expected_login=114765880, equity=100_000.0,
-                       margin=5_000.0,
+ACCOUNT = AccountState(environment="DEMO", currency="USD", reconciliation_ok=True, unknown_orders=0, login=114765880,
+                       expected_login=114765880, equity=100_000.0, margin=5_000.0,
                        day_start_equity=100_000.0, peak_equity=100_000.0, positions=(), connector_ok=True,
                        algo_trading_enabled=True, entries_allowed_by_server=True, kill_switch_active=False)
 ORDER = OrderRequest(symbol="EURUSD", side="LONG", lots=0.83, loss_at_stop_usd=498.0, required_margin=900.0, bid=1.1,
-                     ask=1.10002, quote_age_seconds=4.0, volume_min=0.01, volume_max=100.0, volume_step=0.01)
+                     ask=1.10002, quote_age_seconds=4.0, volume_min=0.01, volume_max=100.0, volume_step=0.01,
+                     contract_size=100_000.0)
 
 
 def failed(decision):
@@ -78,6 +79,25 @@ class GatewayTests(unittest.TestCase):
         decision = mt5_risk.evaluate_entry(ACCOUNT, ORDER, error)
         self.assertFalse(decision.allowed)
         self.assertEqual([c.name for c in decision.checks], ["profil_de_risque"])
+
+
+class FreezeTests(unittest.TestCase):
+    def test_a_blocking_reconciliation_alert_or_an_unknown_state_freezes_new_entries(self):
+        for account in (replace(ACCOUNT, reconciliation_ok=False), replace(ACCOUNT, reconciliation_ok=None)):
+            decision = mt5_risk.evaluate_entry(account, ORDER, LIMITS)
+            self.assertIn("rapprochement", failed(decision))
+            self.assertFalse(decision.allowed)
+        self.assertTrue(mt5_risk.evaluate_entry(ACCOUNT, ORDER, LIMITS).allowed)
+
+    def test_an_order_with_an_unknown_outcome_freezes_new_entries_everywhere(self):
+        for count in (1, 3, None):
+            decision = mt5_risk.evaluate_entry(replace(ACCOUNT, unknown_orders=count), ORDER, LIMITS)
+            self.assertIn("ordres_inconnus", failed(decision))
+            self.assertFalse(mt5_risk.entries_state(replace(ACCOUNT, unknown_orders=count), LIMITS).allowed)  # the panel too
+
+    def test_the_contract_size_must_be_the_one_the_calculations_assume(self):
+        for size in (None, 1_000.0, 10_000.0):
+            self.assertIn("taille_de_contrat", failed(mt5_risk.evaluate_entry(ACCOUNT, replace(ORDER, contract_size=size), LIMITS)))
 
 
 class UsdExposureTests(unittest.TestCase):

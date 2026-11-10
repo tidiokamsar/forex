@@ -21,7 +21,7 @@ from typing import Any
 from .marketdata import PAIRS, pip_size
 
 LIMITS_VERSION = "1"
-CONTRACT_SIZE = 100_000  # standard Forex lot; assumed for every allowed pair, not yet read from the broker's specifications
+CONTRACT_SIZE = 100_000  # standard Forex lot; every order must report this size for its symbol, otherwise it is refused
 
 
 class RiskConfigError(ValueError):
@@ -115,6 +115,8 @@ class AccountState:
     connector_ok: bool = False
     algo_trading_enabled: bool | None = None
     currency: str | None = None                          # account currency: the exposure maths below assumes USD
+    reconciliation_ok: bool | None = None                # no blocking divergence between the broker and the decisions
+    unknown_orders: int | None = None                    # orders sent whose outcome is not yet known
     entries_allowed_by_server: bool | None = None        # /api/controls: kill switch and entry freezes
     kill_switch_active: bool | None = None
 
@@ -133,6 +135,7 @@ class OrderRequest:
     volume_max: float | None
     volume_step: float | None
     has_stop: bool = True
+    contract_size: float | None = None                   # as the broker reports it for the symbol
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +175,12 @@ def account_checks(account: AccountState, limits: RiskLimits | RiskConfigError) 
                      "compte DEMO confirmé" if account.environment == "DEMO" else f"environnement {account.environment!r}"))
     out.append(Check("devise_du_compte", account.currency == "USD",
                      "compte en USD" if account.currency == "USD" else f"devise {account.currency!r} : calculs prévus en USD"))
+    out.append(Check("rapprochement", account.reconciliation_ok is True,
+                     "positions rapprochées, aucune alerte bloquante" if account.reconciliation_ok is True
+                     else "alerte de rapprochement (position sans stop, positions multiples) ou état inconnu : entrées gelées"))
+    out.append(Check("ordres_inconnus", account.unknown_orders == 0,
+                     "aucun ordre au résultat inconnu" if account.unknown_orders == 0
+                     else f"{account.unknown_orders} ordre(s) au résultat inconnu ou état illisible : entrées gelées"))
     pinned = account.expected_login is not None and account.login == account.expected_login
     out.append(Check("compte_autorise", pinned, "compte attendu" if pinned else f"compte {account.login} non autorisé"))
     out.append(Check("connecteur", account.connector_ok and account.algo_trading_enabled is True,
@@ -222,6 +231,8 @@ def order_checks(account: AccountState, order: OrderRequest, limits: RiskLimits)
     out.append(Check("volume_conforme", bool(steps_ok and 0 < order.lots <= limits.max_lots_per_position),
                      f"{order.lots} lot (spécifications du courtier et maximum {limits.max_lots_per_position})"))
     out.append(Check("stop_present", order.has_stop, "stop défini" if order.has_stop else "pas de stop"))
+    out.append(Check("taille_de_contrat", order.contract_size == CONTRACT_SIZE,
+                     f"taille de contrat {order.contract_size} (calculs prévus pour {CONTRACT_SIZE:g})"))
     if _ok(order.loss_at_stop_usd) and _ok(account.equity) and account.equity > 0:
         allowed = account.equity * limits.risk_per_trade_pct / 100 * limits.risk_tolerance
         out.append(Check("taille_de_position", order.loss_at_stop_usd <= allowed,

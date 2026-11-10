@@ -49,6 +49,8 @@ DEFAULT_INTERVAL_SECONDS = 300
 CONTROLS_CACHE_SECONDS = 15
 INTENT_GRACE_SECONDS = 120   # after an unknown outcome, look for the position this long before concluding "not executed"
 INTENTS_KEPT = 40
+HANDLED_KEPT = 50  # site requests remembered: a request is executed once, whatever happens to its answer
+BLOCKING_ALERTS = ("positions_multiples", "position_sans_stop")  # reconciliation alerts that freeze new entries
 PENDING = ("SOUMIS", "INCONNU")  # intention states that still block a new attempt on the same pair
 STREAM_SECONDS = 5          # quotes, balance and open positions reach the dashboard this often
 FAST_CANDLES_SECONDS = 60   # M5 and M15: the last bars, every minute
@@ -171,6 +173,8 @@ class Bridge:
             environment=account.get("environment"), login=account.get("login"), expected_login=self.trader.expected_login,
             equity=account["equity"], margin=account.get("margin"), day_start_equity=self.state["day_start_equity"],
             peak_equity=self.state["peak_equity"],
+            reconciliation_ok=not any(d["code"] in BLOCKING_ALERTS for d in self.reconcile(positions)["divergences"]),
+            unknown_orders=sum(1 for i in self.state["intents"].values() if i["status"] == "INCONNU"),
             positions=tuple({"symbol": p.symbol, "side": p.side, "volume": p.volume, "price_open": p.price_open,
                              "price_current": p.price_current} for p in positions if p.magic in (MAGIC, MAGIC_MANUAL)),
             currency=account.get("currency"),
@@ -271,6 +275,9 @@ class Bridge:
         orders share this path. The volume always comes from the risk limit. Returns (outcome, actions) with outcome
         OUVERT, REFUSE, REJETE or INCONNU."""
 
+        if manual and self.pending_intent(symbol) is not None:
+            return "REFUSE", [{"kind": "refused", "symbol": symbol, "side": side, "lots": 0.0,
+                               "reason": "un ordre précédent sur cette paire n'a pas de résultat connu : aucun nouvel envoi"}]
         state = self.account_state(trader.refresh_account(), trader.positions())
         limits = self.limits
         risk_pct = limits.risk_per_trade_pct if isinstance(limits, RiskLimits) else 0.0
@@ -280,7 +287,8 @@ class Bridge:
         if entry["tick_time"]:
             age = (self.clock() - datetime.fromisoformat(entry["tick_time"])).total_seconds()
         order = OrderRequest(symbol, side, entry["lots"], entry["loss_at_stop_usd"], entry["required_margin"], entry["bid"],
-                             entry["ask"], age, entry["volume_min"], entry["volume_max"], entry["volume_step"], entry["has_stop"])
+                             entry["ask"], age, entry["volume_min"], entry["volume_max"], entry["volume_step"], entry["has_stop"],
+                             entry.get("contract_size"))
         decision = evaluate_entry(state, order, limits)
         if not decision.allowed:
             key = f"{entry_ts}|{'|'.join(decision.reasons)}"
@@ -332,9 +340,22 @@ class Bridge:
         except (ApiError, OSError, AttributeError):
             return []
         done = []
+        handled = self.state.setdefault("handled_requests", {})
         for item in pending:
-            status, result, actions = self._handle_request(item)
-            self.client.post(f"/api/mt5/requests/{item['id']}/result", {"status": status, "result": result})
+            key = str(item["id"])
+            if key in handled:  # executed before, its answer did not reach the server: only the answer is sent again
+                status, result, actions = handled[key]["status"], handled[key]["result"], []
+            else:
+                status, result, actions = self._handle_request(item)
+                handled[key] = {"status": status, "result": result}
+                for old in sorted(handled, key=int)[:-HANDLED_KEPT]:
+                    del handled[old]
+                self.save()  # written before the answer leaves: a crash cannot make the request run twice
+            try:
+                self.client.post(f"/api/mt5/requests/{item['id']}/result", {"status": status, "result": result})
+            except (ApiError, OSError) as exc:
+                self.note("request_result_not_sent", id=item["id"], reason=str(exc)[:120])
+                continue
             for action in actions:
                 self.note(action["kind"], **{k: v for k, v in action.items() if k != "kind"})
             self.note("request", id=item["id"], request_kind=item["kind"], actor=item.get("actor"), status=status,

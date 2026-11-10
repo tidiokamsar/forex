@@ -38,6 +38,7 @@ class TradingMt5(FakeMt5):
 
     def symbol_info(self, symbol):
         return SimpleNamespace(filling_mode=1, volume_min=0.01, volume_step=0.01, volume_max=100.0, trade_stops_level=0,
+                               trade_contract_size=100000.0,
                                point=0.00001, digits=5)
 
     tick_time = server_seconds("2026-10-29 11:00")  # server clock UTC+2: 09:00 UTC, the bridge's test clock
@@ -104,9 +105,12 @@ class FakeServer:
         self.requests, self.results, self.fail_pending = [], [], False
         self.hourly_view = None
         self.hourly_fail = False
+        self.fail_results = False
 
     def __call__(self, method, path, body):
         if method == "POST":
+            if self.fail_results and "/api/mt5/requests/" in path:
+                return 503, {"error": "down"}
             self.posts.append((path, body))
             if "/api/mt5/requests/" in path:
                 self.results.append((path, body))
@@ -301,6 +305,46 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(self.bridge.cycle()["actions"], [])  # an hourly champion with a position changes nothing
         self.assertEqual(self.fake.sent, [])
         self.assertEqual(self.bridge.targets["EURUSD"]["side"], "FLAT")
+
+    def test_a_position_without_a_stop_or_an_unknown_order_freezes_the_entries_of_every_pair(self):
+        self.bridge.cycle()  # opens EURUSD with its stop
+        with self.bridge.trader as trader:
+            self.assertTrue(self.bridge.account_state(trader.refresh_account(), trader.positions()).reconciliation_ok)
+            self.fake.open_positions[0].sl = 0.0  # the stop disappeared at the broker
+            state = self.bridge.account_state(trader.refresh_account(), trader.positions())
+            self.assertFalse(state.reconciliation_ok)
+            self.fake.open_positions[0].sl = 1.106
+            self.bridge.state["intents"]["x"] = {"id": "x", "symbol": "GBPUSD", "side": "LONG", "lots": 1.0, "sl": 1.2,
+                                                 "entry_ts": "t", "status": "INCONNU", "at": "2026-10-29T09:00:00+00:00"}
+            state = self.bridge.account_state(trader.refresh_account(), trader.positions())
+            self.assertEqual(state.unknown_orders, 1)
+
+    def test_a_manual_order_waits_for_the_unknown_outcome_of_an_earlier_order_on_the_same_pair(self):
+        self.fake.mode = "lost_nothing"
+        self.assertEqual([a["kind"] for a in self.bridge.cycle()["actions"]], ["order_unknown"])
+        self.fake.mode = "ok"
+        status, message, _ = self.ask(kind="order", symbol="EURUSD", side="LONG", stop_pips=60.0)
+        self.assertEqual(status, "REFUSE")
+        self.assertEqual(len(self.fake.sent), 1)  # nothing new left
+
+    def test_a_site_request_whose_answer_was_lost_is_never_executed_twice(self):
+        request = {"id": 7, "actor": "web:ops", "kind": "order", "symbol": "EURUSD", "side": "LONG", "stop_pips": 60.0}
+        self.server.requests = [request]
+        self.server.fail_results = True  # the answer cannot reach the server
+        with self.bridge.trader:
+            first = self.bridge.process_requests()
+        self.assertEqual(first, [])  # not acknowledged
+        self.assertEqual(len(self.fake.sent), 1)  # but executed once
+        self.assertTrue(any("request_result_not_sent" in line for line in
+                            (self.dir / "journal-2026-10-29.jsonl").read_text(encoding="utf-8").splitlines()))
+        self.server.fail_results = False  # the server is back: the request is still pending there
+        restarted = Bridge(AstraClient(self.server), Mt5DemoTrader(module=self.fake, expected_login=LOGIN), self.dir,
+                           clock=lambda: datetime(2026, 10, 29, 9, tzinfo=UTC))  # even after a restart
+        with restarted.trader:
+            second = restarted.process_requests()
+        self.assertEqual(len(self.fake.sent), 1)  # still one order
+        self.assertEqual(second[0]["id"], 7)
+        self.assertEqual(self.server.results[-1][1]["status"], "EXECUTE")  # only the answer was sent again
 
     def test_the_gateway_sees_the_real_prices_and_currency_of_the_account(self):
         with self.bridge.trader as trader:

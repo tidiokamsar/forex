@@ -153,7 +153,8 @@ class Mt5DemoTrader(Mt5DemoFeed):
         return {"symbol": symbol, "side": side, "lots": lots, "sl": sl, "price": price, "bid": tick.bid, "ask": tick.ask,
                 "tick_time": stamp, "loss_at_stop_usd": loss_per_lot * lots if loss_per_lot > 0 and lots > 0 else None,
                 "required_margin": margin, "volume_min": info.volume_min, "volume_max": info.volume_max,
-                "volume_step": info.volume_step, "has_stop": bool(sl)}
+                "volume_step": info.volume_step, "has_stop": bool(sl),
+                "contract_size": getattr(info, "trade_contract_size", None)}
 
     def open(self, symbol: str, side: str, lots: float, sl: float, comment: str = COMMENT, magic: int = MAGIC) -> dict[str, Any]:
         self._guard()
