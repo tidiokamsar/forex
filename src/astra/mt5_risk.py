@@ -171,7 +171,7 @@ def account_checks(account: AccountState, limits: RiskLimits | RiskConfigError) 
     out.append(Check("environnement_demo", account.environment == "DEMO",
                      "compte DEMO confirmé" if account.environment == "DEMO" else f"environnement {account.environment!r}"))
     out.append(Check("devise_du_compte", account.currency == "USD",
-                     "compte en USD" if account.currency == "USD" else f"devise {account.currency!r} : calculs prévus pour l'USD"))
+                     "compte en USD" if account.currency == "USD" else f"devise {account.currency!r} : calculs prévus en USD"))
     pinned = account.expected_login is not None and account.login == account.expected_login
     out.append(Check("compte_autorise", pinned, "compte attendu" if pinned else f"compte {account.login} non autorisé"))
     out.append(Check("connecteur", account.connector_ok and account.algo_trading_enabled is True,

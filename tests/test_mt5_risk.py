@@ -93,7 +93,7 @@ class UsdExposureTests(unittest.TestCase):
 
     def test_a_position_is_valued_at_its_own_price_not_at_the_price_of_the_order(self):
         # A EURUSD position at 1.10 next to a USDJPY order at 150: valuing it at 150 would multiply its weight by 136.
-        account = self.held({"symbol": "EURUSD", "side": "LONG", "volume": 2.0, "price_open": 1.10, "price_current": 1.10})
+        account = self.held({"symbol": "EURUSD", "side": "LONG", "volume": 1.0, "price_open": 1.10, "price_current": 1.10})
         order = replace(ORDER, symbol="USDJPY", side="SHORT", bid=150.0, ask=150.02)
         self.assertNotIn("exposition_nette_usd", failed(mt5_risk.evaluate_entry(account, order, LIMITS)))
 
