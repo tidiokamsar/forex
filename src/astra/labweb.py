@@ -179,8 +179,8 @@ def register_lab_routes(app: Flask, *, database: Path, import_dir: Path, require
                 if len(rows) >= 25 and rows[0].close:
                     quote["change_24h_pct"] = round((quote["bid"] / rows[0].close - 1) * 100, 3)
             signals, processed, evaluated, signal_times = [], [], [], []
-            hourly = learning.overview(learn_store_h1, lab)
-            for pair in learning.active_pairs(learning.overview(learn_store, lab), hourly):
+            hourly_by = {p["symbol"]: p for p in learning.overview(learn_store_h1, lab)["pairs"]}
+            for pair in learning.overview(learn_store, lab)["pairs"]:
                 session = pair.get("session")
                 detail = lab.session(session["id"], item_limit=300) if session else None
                 last = detail["signals"][-1] if detail and detail.get("signals") else None
@@ -191,11 +191,17 @@ def register_lab_routes(app: Flask, *, database: Path, import_dir: Path, require
                     signal_times.append(last["ts"])
                 family = pair["champion"]["params"]["strategy"].get("family", "sma_trend")
                 daily = candles.candles(pair["symbol"], learning.TIMEFRAME, learning.SOURCE, limit=130, newest=True)
-                params = pair["champion"]["params"]
-                tier = params.get("tier")
-                signals.append({"symbol": pair["symbol"], "family": family, "profile": pair["profile"], "tier": tier,
-                                "dsr": params.get("dsr"), "take_profit_r": params.get("take_profit_r") or None,
-                                "live": learning.live_record(pair["champion"], detail) if tier == "PROBATOIRE" else None,
+                other = hourly_by.get(pair["symbol"])
+                observation = None
+                if other and (other.get("champion") or {}).get("run_id") is not None:  # promoted by a run, simulation only
+                    seen = lab.session(other["session"]["id"], item_limit=300) if other.get("session") else None
+                    held = other["champion"]["params"]
+                    observation = {"profile": "H1", "version": other["champion"]["version"],
+                                   "family": held["strategy"].get("family", "sma_trend"), "tier": held.get("tier"),
+                                   "dsr": held.get("dsr"), "status": held.get("review_status"),
+                                   "live": learning.live_record(other["champion"], seen)}
+                signals.append({"symbol": pair["symbol"], "family": family, "profile": "D1",
+                                "observation": observation,
                                 "regime": riskmetrics.regime([c.close for c in daily]), "version": pair["champion"]["version"],
                                 "decision": last["decision"] if last else None, "reason": last["reason"] if last else None,
                                 "since": last["ts"] if last else None})

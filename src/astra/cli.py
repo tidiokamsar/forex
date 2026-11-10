@@ -98,6 +98,17 @@ def build_parser() -> argparse.ArgumentParser:
     massive_ingest.add_argument("--timeframe", default="H1", choices=("M5", "M15", "H1", "H4", "D1"))
     massive_ingest.add_argument("--days", type=int, default=30)
     massive_ingest.add_argument("--symbol", default="all")
+    learn_cmd = commands.add_parser("learn", help="Apprentissage : journal d'audit, autorisation d'un champion pour le pont DEMO")
+    learn_actions = learn_cmd.add_subparsers(dest="learn_action", required=True)
+    learn_audit = learn_actions.add_parser("audit", help="Journal des décisions d'apprentissage (lecture seule)")
+    learn_audit.add_argument("--profile", default="D1", choices=("D1", "H1"))
+    learn_audit.add_argument("--symbol")
+    learn_audit.add_argument("--limit", type=int, default=50)
+    learn_authorize = learn_actions.add_parser(
+        "authorize", help="Donner au compte qui nourrit le pont DEMO le champion actuel d'une paire (action humaine)")
+    learn_authorize.add_argument("--symbol", required=True)
+    learn_authorize.add_argument("--operator", required=True)
+    learn_authorize.add_argument("--reason", required=True)
     mt5_cmd = commands.add_parser("mt5", help="Compte DEMO MetaTrader 5 en lecture (Windows, terminal MT5 connecté)")
     mt5_actions = mt5_cmd.add_subparsers(dest="mt5_action", required=True)
     mt5_actions.add_parser("check", help="Vérifier le compte DEMO du terminal (aucun ordre, aucun mot de passe)")
@@ -398,6 +409,27 @@ def _massive(args: argparse.Namespace, config: AppConfig) -> int:
         return 2
 
 
+def _learn(args: argparse.Namespace, config: AppConfig) -> int:
+    from . import learning
+    from .papertrade import LabStore, SimulationError
+
+    profile = learning.PROFILES[getattr(args, "profile", "D1")]
+    store = learning.LearningStore(config.database_path, profile)
+    store.initialize()
+    if args.learn_action == "audit":
+        _write_json({"profile": profile.name, "events": store.events(args.symbol.upper() if args.symbol else None, args.limit)})
+        return 0
+    lab = LabStore(config.database_path)
+    lab.initialize()
+    try:
+        changed = learning.authorize_demo(store, lab, args.symbol.upper(), args.operator, args.reason)
+    except SimulationError as exc:
+        _write_json({"status": "error", "reason": str(exc)})
+        return 2
+    _write_json({"status": "ok", "symbol": args.symbol.upper(), "changed": changed})
+    return 0
+
+
 def _mt5(args: argparse.Namespace) -> int:
     from .brokers import mt5_demo
 
@@ -513,6 +545,9 @@ def _run(args: argparse.Namespace) -> int:
 
         if args.command == "massive":
             return _massive(args, config)
+
+        if args.command == "learn":
+            return _learn(args, config)
 
         if args.command == "ctrader-check":
             _write_json(ctrader_check(args.operator, config))

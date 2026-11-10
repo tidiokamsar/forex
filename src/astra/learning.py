@@ -21,9 +21,12 @@ final check window is reused by later runs; both make an optimistic bias possibl
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import random
 import sqlite3
+import statistics
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
@@ -67,8 +70,13 @@ DEFAULT_RISK = RiskParams()
 DEFAULT_COSTS = CostParams()
 
 Z_FAMILIES = ("mean_reversion", "currency_momentum", "currency_reversion")  # families that use the z threshold
-DSR_VALID = 0.80          # deflated Sharpe probability from which a promotion counts as statistically solid
-LIVE_MIN_TRADES = 20      # paper trades after a promotion before the live record can graduate or demote it
+DSR_VALID = 0.95          # deflated Sharpe probability from which a promotion counts as statistically solid (protocol value)
+# Pre-registered review of a promoted champion on its own prospective (observation) trades, one-sided t-test on the mean
+# net result per trade. Confirmation at 5 % (z 1.645) once enough trades could confirm half of the in-sample edge;
+# suspension at 10 % (z -1.28) from REVIEW_MIN_OBS trades, the floor below which a t statistic means very little.
+REVIEW_MIN_OBS = 8
+Z_CONFIRM = 1.645
+Z_SUSPEND = -1.28
 SPACE_H1 = {  # bars are hours: 6 to 48 hours fast, 2 to 14 days slow (the strategy accepts up to 400 bars)
     "family": SPACE["family"],
     "z_entry": SPACE["z_entry"],
@@ -101,15 +109,16 @@ class Profile:
     window_days: int | None  # None: yearly walk-forward after three years of history
     space: dict
     selection_text: str
+    demo_feed: bool        # True: its managed account feeds the DEMO bridge (frozen until a human authorizes a change)
 
 
 D1_PROFILE = Profile("D1", TIMEFRAME, SOURCE, SOURCE, "", "ASTRA auto", MIN_TRADES, 4 * 260, FINAL_CHECK_DAYS, None, SPACE,
-                     "walk-forward annuel hors échantillon, coûts inclus")
+                     "walk-forward annuel hors échantillon, coûts inclus", True)
 H1_WINDOW_DAYS, H1_FINAL_CHECK_DAYS, H1_MIN_WINDOWS = 90, 120, 3
 H1_PROFILE = Profile("H1", "H1", "MASSIVE_FX_QUOTES", "MT5_METAQUOTES_DEMO", "h1_", "ASTRA H1", 30, 6000, H1_FINAL_CHECK_DAYS,
                      H1_WINDOW_DAYS, SPACE_H1,
                      "walk-forward par blocs de 90 jours hors échantillon, coûts inclus, "
-                     "contrôle final sur les 120 derniers jours")
+                     "contrôle final sur les 120 derniers jours", False)
 PROFILES = {"D1": D1_PROFILE, "H1": H1_PROFILE}
 
 _SCHEMA = """
@@ -123,6 +132,11 @@ CREATE TABLE IF NOT EXISTS {p}learn_runs (
     candidates_json TEXT, error TEXT
 );
 CREATE TABLE IF NOT EXISTS {p}learn_managed (symbol TEXT PRIMARY KEY, session_id INTEGER NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS {p}learn_shadow (symbol TEXT PRIMARY KEY, session_id INTEGER NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS {p}learn_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, symbol TEXT NOT NULL, run_id INTEGER, kind TEXT NOT NULL,
+    detail_json TEXT NOT NULL
+);
 """
 
 
@@ -255,6 +269,34 @@ class LearningStore:
                        " DO UPDATE SET session_id = excluded.session_id", (symbol, session_id, _iso(_now())))
 
 
+    def shadow_session(self, symbol: str) -> int | None:
+        with self._connect() as db:
+            row = db.execute(f"SELECT session_id FROM {self._p}learn_shadow WHERE symbol = ?", (symbol,)).fetchone()
+        return row[0] if row else None
+
+    def set_shadow_session(self, symbol: str, session_id: int) -> None:
+        with self._connect() as db:
+            db.execute(f"INSERT INTO {self._p}learn_shadow(symbol, session_id, created_at) VALUES (?,?,?) ON CONFLICT(symbol)"
+                       " DO UPDATE SET session_id = excluded.session_id", (symbol, session_id, _iso(_now())))
+
+    def record_event(self, symbol: str, kind: str, detail: dict[str, Any], run_id: int | None = None) -> None:
+        """Append-only audit line: registration, promotion, refusal, suspension, rollback, authorization."""
+
+        with self._connect() as db:
+            db.execute(f"INSERT INTO {self._p}learn_events(ts, symbol, run_id, kind, detail_json) VALUES (?,?,?,?,?)",
+                       (_iso(_now()), symbol, run_id, kind, json.dumps(detail, default=str, sort_keys=True)))
+
+    def events(self, symbol: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            if symbol:
+                rows = db.execute(f"SELECT * FROM {self._p}learn_events WHERE symbol = ? ORDER BY id DESC LIMIT ?",
+                                  (symbol, limit)).fetchall()
+            else:
+                rows = db.execute(f"SELECT * FROM {self._p}learn_events ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [{"id": r["id"], "ts": r["ts"], "symbol": r["symbol"], "run_id": r["run_id"], "kind": r["kind"],
+                 "detail": json.loads(r["detail_json"])} for r in rows]
+
+
 # -- evaluation -----------------------------------------------------------------------------------
 
 def _request(symbol: str, params: dict[str, Any], start: datetime, end: datetime, cost_factor: float = 1.0,
@@ -366,36 +408,104 @@ def _deflated(results: list[dict[str, Any]], best: dict[str, Any], trials: int) 
             "expected_max_sharpe": round(outcome.expected_max_sharpe, 4), "n_trials": trials, "n_trades": len(returns)}
 
 
-def live_record(champion: dict[str, Any], session: dict[str, Any] | None) -> dict[str, Any]:
-    """What the champion's own paper account did since its promotion: closed trades, net result, and how many are needed."""
+def preregistered_review(returns: list[float]) -> dict[str, Any]:
+    """Criteria of the prospective review, written down at promotion time from the candidate's own selection trades.
+
+    ``n_required`` is the number of observed trades from which a one-sided 5 % test could confirm half of the in-sample
+    mean return per trade; with no positive in-sample edge there is nothing to confirm (None), only to suspend."""
+
+    review: dict[str, Any] = {"min_obs": REVIEW_MIN_OBS, "z_confirm": Z_CONFIRM, "z_suspend": Z_SUSPEND, "mu": None,
+                              "sigma": None, "n_required": None}
+    if len(returns) >= 3:
+        mu, sigma = statistics.fmean(returns), statistics.stdev(returns)
+        review.update(mu=round(mu, 8), sigma=round(sigma, 8))
+        if mu > 0 and sigma > 0:
+            review["n_required"] = max(REVIEW_MIN_OBS, math.ceil((Z_CONFIRM * sigma / (0.5 * mu)) ** 2))
+    return review
+
+
+def live_stats(champion: dict[str, Any], session: dict[str, Any] | None) -> dict[str, Any]:
+    """The champion's prospective record: the net result per trade (as a share of the account) since its promotion."""
 
     since = champion.get("promoted_at") or ""
-    live = [t for t in (session or {}).get("trades", []) if t["exit_ts"] >= since]
-    return {"trades": len(live), "net_pnl": round(sum(t["net_pnl"] for t in live), 2), "needed": LIVE_MIN_TRADES}
+    capital = ((session or {}).get("account") or {}).get("initial_capital") or 10_000.0
+    trades = [t for t in (session or {}).get("trades", []) if t["exit_ts"] >= since]
+    returns = [t["net_pnl"] / capital for t in trades]
+    n = len(returns)
+    spread = statistics.stdev(returns) if n >= 2 else 0.0
+    t_stat = statistics.fmean(returns) / (spread / math.sqrt(n)) if n >= 2 and spread > 0 else None
+    return {"n": n, "net_pnl": round(sum(t["net_pnl"] for t in trades), 2), "t": t_stat}
 
 
-def graduate_or_demote(store: LearningStore, lab: LabStore, symbol: str) -> str | None:
-    """Judge a probationary champion on what its own paper account did live since the promotion.
+def live_record(champion: dict[str, Any], session: dict[str, Any] | None) -> dict[str, Any]:
+    """Compact prospective record for the dashboard: closed trades, net result, and the trades the review needs."""
 
-    At least ``LIVE_MIN_TRADES`` closed paper trades: a positive net result graduates it to full size, a negative one
-    puts the previous version back. Returns "GRADUATED", "DEMOTED" or None (not enough evidence yet)."""
+    stats = live_stats(champion, session)
+    review = champion["params"].get("review") or {}
+    return {"trades": stats["n"], "net_pnl": stats["net_pnl"], "needed": review.get("n_required"),
+            "min_obs": review.get("min_obs", REVIEW_MIN_OBS)}
+
+
+def _observation_session(store: LearningStore, symbol: str) -> int | None:
+    """The paper account that observes the champion without any order: the shadow account of a pipeline that feeds
+    the DEMO bridge, otherwise its managed account."""
+
+    return store.shadow_session(symbol) if store.profile.demo_feed else store.managed_session(symbol)
+
+
+def review_live(store: LearningStore, lab: LabStore, symbol: str) -> str | None:
+    """Judge a promoted champion on its prospective record, against the criteria registered at its promotion.
+
+    Suspension (and the return to the previous version) when the one-sided test says the mean result is negative;
+    confirmation when enough trades confirm half of the in-sample edge. Simulation only: neither touches the DEMO bridge."""
 
     champion = store.champion(symbol)
     params = champion["params"]
+    review = params.get("review")
+    session_id = _observation_session(store, symbol)
+    if champion.get("run_id") is None or not review or session_id is None:
+        return None
+    stats = live_stats(champion, lab.session(session_id, item_limit=1000))
+    if stats["t"] is None or stats["n"] < review["min_obs"]:
+        return None
+    detail = {"version": champion["version"], "trades": stats["n"], "net_pnl": stats["net_pnl"], "t": round(stats["t"], 3),
+              "criteria": review}
+    if stats["t"] <= review["z_suspend"]:
+        store.record_event(symbol, "SUSPENSION", detail, champion["run_id"])
+        version = store.rollback(symbol)
+        apply_champion(store, lab, symbol)
+        store.record_event(symbol, "RETOUR_ARRIERE", {**detail, "restored_as_version": version}, champion["run_id"])
+        return "SUSPENDED"
+    if (params.get("review_status") != "CONFIRME" and review.get("n_required") and stats["n"] >= review["n_required"]
+            and stats["t"] >= review["z_confirm"]):
+        store.promote(symbol, {**params, "review_status": "CONFIRME", "tier": "VALIDE"}, champion["run_id"],
+                      f"confirmé en observation : {stats['n']} transactions, t = {stats['t']:.2f}, "
+                      f"résultat net {stats['net_pnl']:+.2f} USD")
+        store.record_event(symbol, "CONFIRMATION_PROSPECTIVE", detail, champion["run_id"])
+        return "CONFIRMED"
+    return None
+
+
+def authorize_demo(store: LearningStore, lab: LabStore, symbol: str, operator: str, reason: str) -> bool:
+    """Give the DEMO-feeding account of ``symbol`` the current champion. Only a person does this (command line):
+    promotions never reach the DEMO bridge by themselves. Returns False when nothing changes."""
+
+    if not store.profile.demo_feed:
+        raise SimulationError(f"le profil {store.profile.name} ne nourrit pas le pont DEMO")
+    if not operator.strip() or not reason.strip():
+        raise SimulationError("un opérateur et une raison sont obligatoires")
     session_id = store.managed_session(symbol)
-    if params.get("tier") != "PROBATOIRE" or champion.get("run_id") is None or session_id is None:
-        return None
-    record = live_record(champion, lab.session(session_id, item_limit=1000))
-    if record["trades"] < LIVE_MIN_TRADES:
-        return None
-    net = record["net_pnl"]
-    if net > 0:
-        store.promote(symbol, {**params, "tier": "VALIDE"}, champion["run_id"],
-                      f"diplômé : {record['trades']} transactions simulées en direct, résultat net {net:+.2f} USD")
-        return "GRADUATED"
-    store.rollback(symbol)
-    apply_champion(store, lab, symbol)
-    return "DEMOTED"
+    if session_id is None:
+        raise SimulationError(f"aucun compte géré pour {symbol}")
+    champion = store.champion(symbol)
+    params = champion["params"]
+    changed = lab.update_session_strategy(session_id, params["strategy"], float(params["stop_atr_multiple"]),
+                                          f"autorisation DEMO par {operator} : champion v{champion['version']}",
+                                          take_profit_r=float(params.get("take_profit_r", 0.0)))
+    store.record_event(symbol, "AUTORISATION_DEMO", {"operator": operator, "reason": reason, "changed": changed,
+                                                     "champion_version": champion["version"], "params": params},
+                       champion.get("run_id"))
+    return changed
 
 
 def learn(candles: CandleStore, store: LearningStore, symbol: str) -> dict[str, Any]:
@@ -414,6 +524,18 @@ def learn(candles: CandleStore, store: LearningStore, symbol: str) -> dict[str, 
             raise SimulationError(f"pas assez de blocs de sélection ({len(selection)}, minimum {H1_MIN_WINDOWS})")
         champion = store.champion(symbol)
         pool = candidates(run_id * 7919 + len(series), champion["params"], profile=profile)
+        identity = {"profile": profile.name, "source": profile.source, "timeframe": profile.timeframe,
+                    "nature": (candles.source(profile.source) or {}).get("nature"), "candles": len(series),
+                    "first": _iso(series[0].timestamp), "last": _iso(series[-1].timestamp),
+                    "sha256": candles.fingerprint(series)}
+        criteria = {"min_score_gain": MIN_SCORE_GAIN, "max_drawdown_pct": MAX_DRAWDOWN_PCT, "min_trades": profile.min_trades,
+                    "final_check_days": profile.final_check_days, "dsr_valid": DSR_VALID,
+                    "cost_stress_factor": 2.0, "selection": profile.selection_text}
+        store.record_event(symbol, "CANDIDATS_ENREGISTRES", {
+            "champion_version": champion["version"], "candidates": len(pool), "criteria": criteria, "data": identity,
+            "pool_sha256": hashlib.sha256(json.dumps(pool, sort_keys=True).encode()).hexdigest(),
+            "note": "paramètres et critères figés avant toute évaluation ; le contrôle final est réutilisé d'un run à "
+                    "l'autre : c'est une présélection, la preuve indépendante est l'observation prospective"}, run_id)
         results = []
         for label, params in [("champion", champion["params"]), *[(f"candidat {i + 1}", p) for i, p in enumerate(pool)]]:
             results.append({"label": label, "params": params,
@@ -453,8 +575,9 @@ def learn(candles: CandleStore, store: LearningStore, symbol: str) -> dict[str, 
                               f"contrôle final {final_best['net_pnl']:+.2f} USD, coûts doublés {stressed['net_pnl']:+.2f} USD")
         decision["reason"] = reason
         decision["trials_so_far"] = store.trials(symbol) + len(results)
-        tier = None
+        tier, review = None, None
         if verdict == "PROMOTED":
+            review = preregistered_review(best["selection"].get("returns") or [])
             dsr = _deflated(results, best, decision["trials_so_far"])
             decision["dsr"] = dsr
             tier = "VALIDE" if dsr and dsr["probability"] >= DSR_VALID else "PROBATOIRE"
@@ -464,20 +587,27 @@ def learn(candles: CandleStore, store: LearningStore, symbol: str) -> dict[str, 
         for r in results:
             r["selection"].pop("returns", None)
         if verdict == "PROMOTED":
-            promoted = {**best["params"], "tier": tier, "dsr": decision["dsr"]["probability"] if decision["dsr"] else None}
+            promoted = {**best["params"], "tier": tier, "dsr": decision["dsr"]["probability"] if decision["dsr"] else None,
+                        "review": review}
             decision["new_version"] = store.promote(symbol, promoted, run_id, reason)
-        data = {"source": profile.source, "timeframe": profile.timeframe, "profile": profile.name,
-                "candles": len(series), "first": _iso(series[0].timestamp),
-                "last": _iso(series[-1].timestamp), "selection_windows": len(selection),
+            decision["review"] = review
+        data = {**identity, "selection_windows": len(selection),
                 "final_check": [_iso(check[0]), _iso(check[1])], "learning_version": LEARNING_VERSION}
         compact = [{"label": r["label"], "params": r["params"], "score": r["selection"]["score"],
                     "mean_return_pct": r["selection"].get("mean_return_pct"), "trades": r["selection"]["trades"],
                     "worst_drawdown_pct": r["selection"].get("worst_drawdown_pct")} for r in results]
         store.finish_run(run_id, status="DONE", data_json=data, champion_version=champion["version"], decision=verdict,
                          decision_json=decision, candidates_json=compact)
+        best_selection = (decision.get("best") or {}).get("selection") or {}
+        store.record_event(symbol, "PROMOTION_SIMULATION" if verdict == "PROMOTED" else "REFUS", {
+            "reason": reason, "tier": tier, "dsr": decision.get("dsr"), "review": review,
+            "trials_so_far": decision["trials_so_far"],
+            "best_score": best_selection.get("score"), "champion_score": champ["selection"].get("score"),
+            "new_version": decision.get("new_version")}, run_id)
         return {"run_id": run_id, "symbol": symbol, "decision": verdict, "reason": reason, "candidates": len(results)}
     except Exception as exc:
         store.finish_run(run_id, status="FAILED", error=f"{type(exc).__name__}: {exc}")
+        store.record_event(symbol, "ECHEC", {"error": f"{type(exc).__name__}: {exc}"}, run_id)
         raise
 
 
@@ -511,10 +641,39 @@ def ensure_managed_sessions(candles: CandleStore, store: LearningStore, lab: Lab
     return created
 
 
-def apply_champion(store: LearningStore, lab: LabStore, symbol: str) -> bool:
-    """Give the managed paper account of ``symbol`` the current champion (from its next candle on)."""
+def ensure_shadow_sessions(candles: CandleStore, store: LearningStore, lab: LabStore) -> list[int]:
+    """For a pipeline that feeds the DEMO bridge: one observation account per pair, following the champion, starting now.
 
-    session_id = store.managed_session(symbol)
+    It decides without any order and without any effect on the bridge: it is where a promoted champion is watched
+    prospectively. Created once, never reset."""
+
+    profile = store.profile
+    if not profile.demo_feed:
+        return []
+    created = []
+    available = {(c["symbol"], c["timeframe"], c["source"]) for c in candles.coverage()}
+    begin = _now().replace(hour=0, minute=0, second=0, microsecond=0)
+    for symbol in PAIRS:
+        if (symbol, profile.timeframe, profile.live_source) not in available or store.shadow_session(symbol) is not None:
+            continue
+        champion = store.champion(symbol)
+        request = simulation_request({"name": f"{profile.session_label} · {symbol} (observation)", "symbols": [symbol],
+                                      "timeframe": profile.timeframe, "source": profile.live_source,
+                                      "start": begin.isoformat(), "strategy_params": champion["params"]["strategy"],
+                                      "risk": {"stop_atr_multiple": champion["params"]["stop_atr_multiple"],
+                                               "take_profit_r": champion["params"].get("take_profit_r", 0.0),
+                                               "max_positions": 1}}, candles)
+        session_id = lab.create_session(request, "worker:apprentissage")
+        store.set_shadow_session(symbol, session_id)
+        created.append(session_id)
+    return created
+
+
+def apply_champion(store: LearningStore, lab: LabStore, symbol: str) -> bool:
+    """Give the observation account of ``symbol`` the current champion (from its next candle on). Never the account that
+    feeds the DEMO bridge: that one changes only through ``authorize_demo``."""
+
+    session_id = _observation_session(store, symbol)
     if session_id is None:
         return False
     champion = store.champion(symbol)
@@ -524,26 +683,14 @@ def apply_champion(store: LearningStore, lab: LabStore, symbol: str) -> bool:
                                        take_profit_r=float(champion["params"].get("take_profit_r", 0.0)))
 
 
-def active_pairs(daily: dict[str, Any], hourly: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """Per pair, the pipeline that decides: the hourly one once its champion was promoted by a run (every criterion met),
-    otherwise the daily one. The reference strategy an hourly account starts with never decides anything."""
-
-    hourly_by = {pair["symbol"]: pair for pair in (hourly or {}).get("pairs", [])}
-    chosen = []
-    for pair in daily.get("pairs", []):
-        other = hourly_by.get(pair["symbol"])
-        use_hourly = bool(other and other.get("session") and (other.get("champion") or {}).get("run_id") is not None)
-        chosen.append({**(other if use_hourly else pair), "profile": "H1" if use_hourly else "D1"})
-    return chosen
-
-
 def overview(store: LearningStore, lab: LabStore) -> dict[str, Any]:
     pairs = []
     for symbol in PAIRS:
         champion = store.champion(symbol)
         session_id = store.managed_session(symbol)
         session = lab.session(session_id, item_limit=0) if session_id else None
-        pairs.append({"symbol": symbol, "champion": champion, "trials": store.trials(symbol),
+        shadow_id = store.shadow_session(symbol)
+        pairs.append({"symbol": symbol, "champion": champion, "trials": store.trials(symbol), "shadow_session_id": shadow_id,
                       "last_run_at": (lambda d: d.isoformat() if d else None)(store.last_run_at(symbol)),
                       "session": ({"id": session_id, "status": session["status"], "account": session["account"],
                                    "trades_total": session["trades_total"], "orders_total": session["orders_total"],

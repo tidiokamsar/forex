@@ -290,7 +290,7 @@ class BridgeTests(unittest.TestCase):
         saved = json.loads((self.dir / "bridge-state.json").read_text(encoding="utf-8"))
         self.assertEqual(saved["intents"][intent["id"]]["status"], "EXECUTE")  # on disk, not only in memory
 
-    def test_an_hourly_read_failure_leaves_an_hourly_pair_alone_instead_of_closing_it(self):
+    def test_the_hourly_pipeline_never_feeds_the_bridge(self):
         hourly_short = {**SHORT, "entry_ts": "2026-10-29T08:00:00+00:00"}
         daily_flat = {"pairs": [{"symbol": "EURUSD", "session": {"id": 1, "status": "RUNNING",
                                                                   "account": {"positions": {}, "pending": {}}}}]}
@@ -298,16 +298,9 @@ class BridgeTests(unittest.TestCase):
         self.server.hourly_view = {"pairs": [{"symbol": "EURUSD", "champion": {"version": 2, "run_id": 5},
                                               "session": {"id": 2, "status": "RUNNING",
                                                           "account": {"positions": {"EURUSD": hourly_short}, "pending": {}}}}]}
-        self.assertEqual([a["kind"] for a in self.bridge.cycle()["actions"]], ["open"])
-        self.server.hourly_fail = True  # a network incident on the hourly read: the daily view says "flat"
-        self.assertEqual(self.bridge.cycle()["actions"], [])
-        self.assertEqual(len(self.fake.open_positions), 1)  # still open
-        journal = (self.dir / "journal-2026-10-29.jsonl").read_text(encoding="utf-8")
-        self.assertIn("hourly_unavailable", journal)
-        self.server.hourly_fail = False
-        self.server.hourly_view = {"pairs": [{**self.server.hourly_view["pairs"][0], "session": {
-            "id": 2, "status": "RUNNING", "account": {"positions": {}, "pending": {}}}}]}  # the hourly pipeline is now flat
-        self.assertEqual([a["kind"] for a in self.bridge.cycle()["actions"]], ["close"])  # a real decision closes it
+        self.assertEqual(self.bridge.cycle()["actions"], [])  # an hourly champion with a position changes nothing
+        self.assertEqual(self.fake.sent, [])
+        self.assertEqual(self.bridge.targets["EURUSD"]["side"], "FLAT")
 
     def test_the_gateway_sees_the_real_prices_and_currency_of_the_account(self):
         with self.bridge.trader as trader:
@@ -316,39 +309,6 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(state.currency, "USD")
         self.assertTrue(state.positions)
         self.assertTrue(all(p["price_open"] for p in state.positions))
-
-    def test_a_probationary_champion_trades_at_half_the_usual_risk(self):
-        from astra.mt5_bridge import risk_scale
-
-        def pair(tier, profile="D1"):
-            return {"champion": {"params": {"tier": tier} if tier else {}}, "profile": profile}
-
-        self.assertEqual([risk_scale(pair("VALIDE")), risk_scale(pair(None)), risk_scale(pair("PROBATOIRE")),
-                          risk_scale(pair(None, "H1")), risk_scale(pair("VALIDE", "H1"))], [1.0, 1.0, 0.5, 0.5, 1.0])
-        full = self.bridge.cycle()["actions"][0]["lots"]
-        self.fake.open_positions.clear()
-        self.bridge.state["mirrored"].clear()
-        self.server.view = {"pairs": [{**overview(SHORT)["pairs"][0], "champion": {"params": {"tier": "PROBATOIRE"}}}]}
-        half = self.bridge.cycle()["actions"][0]["lots"]
-        self.assertAlmostEqual(half / full, 0.5, delta=0.03)
-
-    def test_the_hourly_pipeline_decides_only_for_a_pair_whose_hourly_champion_was_promoted(self):
-        hourly_short = {**SHORT, "entry_ts": "2026-10-29T08:00:00+00:00"}
-        daily_flat = {"pairs": [{"symbol": "EURUSD", "session": {"id": 1, "status": "RUNNING",
-                                                                  "account": {"positions": {}, "pending": {}}}}]}
-
-        def hourly(run_id):
-            return {"pairs": [{"symbol": "EURUSD", "champion": {"version": 2 if run_id else 1, "run_id": run_id},
-                               "session": {"id": 2, "status": "RUNNING",
-                                           "account": {"positions": {"EURUSD": hourly_short}, "pending": {}}}}]}
-
-        self.server.view, self.server.hourly_view = daily_flat, hourly(None)  # reference strategy only: ignored
-        self.assertEqual(self.bridge.cycle()["actions"], [])
-        self.assertEqual(self.bridge.targets["EURUSD"]["profile"], "D1")
-        self.server.hourly_view = hourly(5)  # promoted by run 5: it decides
-        self.assertEqual([a["kind"] for a in self.bridge.cycle()["actions"]], ["open"])
-        self.assertEqual(self.bridge.targets["EURUSD"]["profile"], "H1")
-        self.assertEqual(self.bridge.targets["EURUSD"]["entry_ts"], hourly_short["entry_ts"])
 
     def test_a_refusal_by_the_broker_is_a_rejection_reported_once_and_not_retried_every_cycle(self):
         self.fake.mode = "reject"

@@ -90,22 +90,33 @@ class UnitTests(LearningCase):
                                                           "check": pick, "stress": pick})):
             self.assertIn("drawdown", learning.learn(self.candles, self.store, "EURUSD")["reason"])
 
-    def test_managed_account_follows_the_champion_and_can_roll_back(self):
+    def test_a_promotion_reaches_the_observation_account_and_never_the_demo_feed_until_a_person_authorizes_it(self):
         created = learning.ensure_managed_sessions(self.candles, self.store, self.lab)
         self.assertEqual(len(created), 1)  # only EURUSD has data here
         self.assertEqual(learning.ensure_managed_sessions(self.candles, self.store, self.lab), [])  # never twice
-        session_id = self.store.managed_session("EURUSD")
-        self.lab.step_session(session_id, self.candles)
-        before = self.lab.session(session_id)
+        shadow = learning.ensure_shadow_sessions(self.candles, self.store, self.lab)
+        self.assertEqual(len(shadow), 1)
+        self.assertEqual(learning.ensure_shadow_sessions(self.candles, self.store, self.lab), [])
+        feed_id, shadow_id = self.store.managed_session("EURUSD"), self.store.shadow_session("EURUSD")
+        self.assertNotEqual(feed_id, shadow_id)
+        self.lab.step_session(feed_id, self.candles)
+        before = self.lab.session(feed_id)
         new = {"strategy": {"fast": 10, "slow": 80, "atr_window": 20, "min_atr_pct": 0.0, "max_atr_pct": 0.03},
                "stop_atr_multiple": 3.0}
         self.store.promote("EURUSD", new, None, "test")
         self.assertTrue(learning.apply_champion(self.store, self.lab, "EURUSD"))
-        after = self.lab.session(session_id)
-        self.assertEqual(after["params"]["strategy"]["fast"], 10)
-        self.assertEqual(after["params"]["risk"]["stop_atr_multiple"], 3.0)
-        self.assertEqual(after["account"], before["account"])  # the paper account continues, only the strategy changes
-        self.assertIn("NOUVEAU_CHAMPION", [e["kind"] for e in after["events"]])
+        observed, feed = self.lab.session(shadow_id), self.lab.session(feed_id)
+        self.assertEqual(observed["params"]["strategy"]["fast"], 10)  # the observation account follows the champion
+        self.assertEqual(observed["params"]["risk"]["stop_atr_multiple"], 3.0)
+        self.assertIn("NOUVEAU_CHAMPION", [e["kind"] for e in observed["events"]])
+        self.assertEqual(feed["params"], before["params"])  # the account that feeds the DEMO bridge did not move
+        self.assertEqual(feed["account"], before["account"])
+        with self.assertRaises(learning.SimulationError):
+            learning.authorize_demo(self.store, self.lab, "EURUSD", "", "raison")  # a person and a reason are required
+        self.assertTrue(learning.authorize_demo(self.store, self.lab, "EURUSD", "test-op", "essai"))
+        self.assertEqual(self.lab.session(feed_id)["params"]["strategy"]["fast"], 10)
+        audit = [e for e in self.store.events("EURUSD") if e["kind"] == "AUTORISATION_DEMO"]
+        self.assertEqual((audit[0]["detail"]["operator"], audit[0]["detail"]["champion_version"]), ("test-op", 2))
         self.assertEqual(self.store.rollback("EURUSD"), 3)
         self.assertEqual(self.store.champion("EURUSD")["params"], learning.default_params())
 
@@ -147,40 +158,103 @@ class DeflationAndGraduationTests(LearningCase):
     def test_too_few_returns_give_no_deflated_sharpe(self):
         self.assertIsNone(learning._deflated([{"selection": {"returns": [0.01]}}], {"selection": {"returns": [0.01]}}, 5))
 
-    def promote_probationary(self):
+    def test_the_review_criteria_are_derived_from_the_candidate_own_selection_trades(self):
+        import math
+        import statistics
+
+        review = learning.preregistered_review(self.STRONG)
+        self.assertEqual((review["min_obs"], review["z_confirm"], review["z_suspend"]),
+                         (learning.REVIEW_MIN_OBS, learning.Z_CONFIRM, learning.Z_SUSPEND))
+        mu, sigma = statistics.fmean(self.STRONG), statistics.stdev(self.STRONG)
+        self.assertEqual(review["n_required"], max(learning.REVIEW_MIN_OBS, math.ceil((1.645 * sigma / (0.5 * mu)) ** 2)))
+        self.assertIsNone(learning.preregistered_review([-0.01, -0.02, -0.01, 0.0])["n_required"])  # no edge to confirm
+        self.assertIsNone(learning.preregistered_review([0.01])["n_required"])
+
+    def promote_with_review(self, returns):
         self.store.champion("EURUSD")
-        self.store.promote("EURUSD", {**learning.default_params(), "tier": "PROBATOIRE"}, 5, "test")
-        self.store.set_managed_session("EURUSD", 1)
+        review = learning.preregistered_review(returns)
+        self.store.promote("EURUSD", {**learning.default_params(), "tier": "PROBATOIRE", "review": review}, 5, "test")
+        self.store.set_shadow_session("EURUSD", 1)
+        return review
 
     def lab_with(self, trades):
         lab = mock.Mock()
-        lab.session.return_value = {"trades": trades}
+        lab.session.return_value = {"trades": trades, "account": {"initial_capital": 10_000.0}}
         return lab
 
-    def test_a_probationary_champion_graduates_on_a_positive_live_record(self):
-        self.promote_probationary()
-        live = [{"exit_ts": "2999-01-01T00:00:00+00:00", "net_pnl": 5.0}] * learning.LIVE_MIN_TRADES
-        self.assertEqual(learning.graduate_or_demote(self.store, self.lab_with(live[:-1]), "EURUSD"), None)  # not enough yet
-        self.assertEqual(learning.graduate_or_demote(self.store, self.lab_with(live), "EURUSD"), "GRADUATED")
-        champion = self.store.champion("EURUSD")
-        self.assertEqual((champion["params"]["tier"], champion["run_id"]), ("VALIDE", 5))
-        self.assertIsNone(learning.graduate_or_demote(self.store, self.lab_with(live), "EURUSD"))  # nothing left to judge
+    @staticmethod
+    def trades(values):
+        return [{"exit_ts": "2999-01-01T00:00:00+00:00", "net_pnl": v} for v in values]
 
-    def test_a_negative_live_record_puts_the_previous_version_back(self):
-        self.promote_probationary()
-        live = [{"exit_ts": "2999-01-01T00:00:00+00:00", "net_pnl": -5.0}] * learning.LIVE_MIN_TRADES
-        self.assertEqual(learning.graduate_or_demote(self.store, self.lab_with(live), "EURUSD"), "DEMOTED")
-        champion = self.store.champion("EURUSD")
-        self.assertEqual(champion["params"], learning.default_params())
-        self.assertIsNone(champion["run_id"])
+    def test_a_clearly_negative_prospective_record_suspends_the_champion_and_is_audited(self):
+        self.promote_with_review(self.STRONG)
+        lab = self.lab_with(self.trades([-50.0, -40.0, -60.0, -45.0, -55.0, -42.0, -58.0, -47.0, -52.0]))
+        self.assertEqual(learning.review_live(self.store, lab, "EURUSD"), "SUSPENDED")
+        self.assertEqual(self.store.champion("EURUSD")["params"], learning.default_params())
+        kinds = [e["kind"] for e in self.store.events("EURUSD")]
+        self.assertIn("SUSPENSION", kinds)
+        self.assertIn("RETOUR_ARRIERE", kinds)
 
-    def test_trades_before_the_promotion_and_validated_champions_are_never_judged(self):
-        self.promote_probationary()
-        old = [{"exit_ts": "2000-01-01T00:00:00+00:00", "net_pnl": 9.0}] * 50
-        self.assertIsNone(learning.graduate_or_demote(self.store, self.lab_with(old), "EURUSD"))
-        self.store.promote("EURUSD", {**learning.default_params(), "tier": "VALIDE"}, 5, "validé")
-        live = [{"exit_ts": "2999-01-01T00:00:00+00:00", "net_pnl": -9.0}] * 50
-        self.assertIsNone(learning.graduate_or_demote(self.store, self.lab_with(live), "EURUSD"))
+    def test_nothing_is_decided_below_the_minimum_observations_or_without_a_registered_review(self):
+        self.promote_with_review(self.STRONG)
+        few = self.lab_with(self.trades([-50.0, -40.0, -60.0]))
+        self.assertIsNone(learning.review_live(self.store, few, "EURUSD"))
+        self.assertEqual(self.store.champion("EURUSD")["version"], 2)  # untouched
+        self.store.promote("EURUSD", {**learning.default_params(), "tier": "PROBATOIRE"}, 6, "sans revue")
+        many = self.lab_with(self.trades([-50.0, -40.0, -60.0, -45.0, -55.0, -42.0, -58.0, -47.0, -52.0]))
+        self.assertIsNone(learning.review_live(self.store, many, "EURUSD"))  # no pre-registered criteria: no verdict
+
+    def test_enough_good_prospective_trades_confirm_the_champion_once_without_touching_the_demo_feed(self):
+        review = self.promote_with_review(self.STRONG)
+        needed = max(review["n_required"], learning.REVIEW_MIN_OBS)
+        lab = self.lab_with(self.trades([100.0 + (i % 5) for i in range(needed)]))
+        self.assertEqual(learning.review_live(self.store, lab, "EURUSD"), "CONFIRMED")
+        champion = self.store.champion("EURUSD")
+        self.assertEqual((champion["params"]["review_status"], champion["run_id"]), ("CONFIRME", 5))
+        self.assertIsNone(learning.review_live(self.store, lab, "EURUSD"))  # nothing left to confirm
+        self.assertIn("CONFIRMATION_PROSPECTIVE", [e["kind"] for e in self.store.events("EURUSD")])
+        lab.update_session_strategy.assert_not_called()  # no account changed
+
+    def test_trades_before_the_promotion_are_not_counted(self):
+        self.promote_with_review(self.STRONG)
+        old = [{"exit_ts": "2000-01-01T00:00:00+00:00", "net_pnl": -50.0}] * 20
+        self.assertIsNone(learning.review_live(self.store, self.lab_with(old), "EURUSD"))
+        self.assertEqual(self.store.champion("EURUSD")["version"], 2)
+
+    def test_a_run_registers_its_candidates_and_data_identity_before_evaluating_anything(self):
+        seen = []
+
+        def evaluate(candles, symbol, params, windows, cost_factor=1.0, purpose="selection", profile=None, **_):
+            if not seen:
+                seen.append([e["kind"] for e in self.store.events("EURUSD")])
+            return {"windows": 1, "score": 1.0, "trades": 50, "worst_drawdown_pct": 5.0, "net_pnl": 100.0}
+
+        with mock.patch.object(learning, "evaluate", evaluate):
+            learning.learn(self.candles, self.store, "EURUSD")
+        self.assertEqual(seen[0], ["CANDIDATS_ENREGISTRES"])
+        registered = next(e for e in self.store.events("EURUSD") if e["kind"] == "CANDIDATS_ENREGISTRES")
+        detail = registered["detail"]
+        self.assertEqual(len(detail["data"]["sha256"]), 64)
+        self.assertEqual((detail["data"]["nature"], detail["data"]["source"]), ("REFERENCE", "ECB_EXR"))
+        self.assertEqual(detail["criteria"]["dsr_valid"], learning.DSR_VALID)
+        self.assertEqual(len(detail["pool_sha256"]), 64)
+        run = self.store.runs(1)[0]
+        self.assertEqual(run["data"]["sha256"], detail["data"]["sha256"])  # the run stores the same identity
+
+    def test_every_verdict_and_failure_leaves_an_audit_line(self):
+        def evaluate(candles, symbol, params, windows, cost_factor=1.0, purpose="selection", profile=None, **_):
+            return {"windows": 1, "score": 1.0, "trades": 50, "worst_drawdown_pct": 5.0, "net_pnl": 100.0}
+
+        with mock.patch.object(learning, "evaluate", evaluate):
+            learning.learn(self.candles, self.store, "EURUSD")
+        self.assertIn("REFUS", [e["kind"] for e in self.store.events("EURUSD")])  # no candidate beat the champion by enough
+        short = CandleStore(Path(self.temp.name) / "short.sqlite3")
+        short.initialize()
+        other = learning.LearningStore(Path(self.temp.name) / "short.sqlite3")
+        other.initialize()
+        with self.assertRaises(learning.SimulationError):
+            learning.learn(short, other, "EURUSD")
+        self.assertEqual(other.events("EURUSD")[0]["kind"], "ECHEC")
 
 
 class HourlyProfileTests(unittest.TestCase):

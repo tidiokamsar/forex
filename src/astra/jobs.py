@@ -225,11 +225,9 @@ class Worker:
             result = learning.learn(self.candles, store, symbol)
             if result["decision"] == "PROMOTED":
                 result["applied_to_simulation"] = learning.apply_champion(store, self.lab, symbol)
-            else:
-                outcome = learning.graduate_or_demote(store, self.lab, symbol)
-                if outcome:
-                    result["live_verdict"] = outcome
-                    learning.apply_champion(store, self.lab, symbol)
+            verdict = learning.review_live(store, self.lab, symbol)
+            if verdict:
+                result["live_verdict"] = verdict
             return result
         if job["kind"] == "backtest":
             backtest_id = int(params["backtest_id"])
@@ -298,6 +296,7 @@ class Worker:
         for store in (self.learning, self.learning_h1):
             profile = store.profile
             learning.ensure_managed_sessions(self.candles, store, self.lab)
+            learning.ensure_shadow_sessions(self.candles, store, self.lab)
             available = {c["symbol"] for c in self.candles.coverage()
                          if c["timeframe"] == profile.timeframe and c["source"] == profile.source}
             for symbol in sorted(available):

@@ -42,7 +42,6 @@ from .brokers.mt5_demo_orders import (
     Mt5OrderRejected,
     Mt5OrderUnknown,
 )
-from .learning import active_pairs
 from .marketdata import pip_size
 from .mt5_risk import AccountState, OrderRequest, RiskConfigError, RiskLimits, entries_state, evaluate_entry, load_limits
 
@@ -63,18 +62,6 @@ ITEMS_PER_POST = 80  # keeps a history post well under the proxy's 64 KB body li
 RECENT_BARS = {"M5": 12, "M15": 8, "H1": 8, "H4": 6, "D1": 4}
 
 
-PROBATION_RISK_SCALE = 0.5  # a probationary champion trades at half the usual risk until its live record graduates it
-
-
-def risk_scale(pair: dict[str, Any]) -> float:
-    """Full size for a validated champion and for daily champions that predate the tiers; half size otherwise."""
-
-    tier = ((pair.get("champion") or {}).get("params") or {}).get("tier")
-    if tier == "VALIDE" or (tier is None and pair.get("profile", "D1") != "H1"):
-        return 1.0
-    return PROBATION_RISK_SCALE
-
-
 def targets(overview: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Wanted MT5 side per pair from the managed paper accounts (FLAT when nothing should be held)."""
 
@@ -92,7 +79,6 @@ def targets(overview: dict[str, Any]) -> dict[str, dict[str, Any]]:
             result[symbol] = {"side": "FLAT", "reason": f"décision en attente : {pending['label']}"}
         elif position:
             result[symbol] = {"side": side, "entry_ts": position["entry_ts"], "session_id": session["id"],
-                              "risk_scale": risk_scale(pair),
                               "stop_distance": abs(position["entry_ref"] - position["stop"]),
                               "reason": f"position {side} du compte simulé depuis {position['entry_ts']}"}
         else:
@@ -136,7 +122,6 @@ class Bridge:
         self.state_path = workdir / "bridge-state.json"
         self.state = json.loads(self.state_path.read_text(encoding="utf-8")) if self.state_path.exists() else {}
         self.state.setdefault("mirrored", {})
-        self.state.setdefault("profiles", {})  # which pipeline decided each pair at the last good read
         self.state.setdefault("last_refusal", {})
         self.state.setdefault("intents", {})
         self.targets: dict[str, dict[str, Any]] = {}
@@ -281,7 +266,7 @@ class Bridge:
         return [{k: v for k, v in i.items() if k in keep} for i in recent]
 
     def _enter(self, trader: Mt5DemoTrader, symbol: str, side: str, stop_distance: float, entry_ts: str, reason: str,
-               manual: bool = False, scale: float = 1.0) -> tuple[str, list[dict[str, Any]]]:
+               manual: bool = False) -> tuple[str, list[dict[str, Any]]]:
         """One opening order through the gateway, the written intention and the outcome handling. Automatic and manual
         orders share this path. The volume always comes from the risk limit. Returns (outcome, actions) with outcome
         OUVERT, REFUSE, REJETE or INCONNU."""
@@ -289,7 +274,7 @@ class Bridge:
         state = self.account_state(trader.refresh_account(), trader.positions())
         limits = self.limits
         risk_pct = limits.risk_per_trade_pct if isinstance(limits, RiskLimits) else 0.0
-        risk_usd = state.equity * risk_pct / 100 * scale
+        risk_usd = state.equity * risk_pct / 100
         entry = trader.prepare_entry(symbol, side, stop_distance, risk_usd)
         age = None
         if entry["tick_time"]:
@@ -419,26 +404,10 @@ class Bridge:
         if (self.workdir / "STOP").exists():
             self.note("halted", reason="fichier STOP présent : aucun ordre")
             return {"halted": True, "actions": []}
-        daily = self.client.get("/api/learn/overview")
-        try:
-            hourly = self.client.get("/api/learn/overview", profile="H1")
-        except ApiError:
-            hourly = None
-        chosen = active_pairs(daily, hourly)
-        wanted = targets({"pairs": chosen})
-        for pair in chosen:
-            wanted[pair["symbol"]]["profile"] = pair["profile"]
+        # Only the accounts that feed the DEMO bridge (the daily pipeline, strategies a person authorized) are read here.
+        # The hourly pipeline and every observation account are SIMULATION only: no order ever comes from them.
+        wanted = targets(self.client.get("/api/learn/overview"))
         self.targets = wanted
-        held: set[str] = set()
-        if hourly is None:
-            # Without the hourly read, a pair the hourly pipeline was deciding must not fall back to the daily one and be
-            # closed because of a network incident: its positions are left alone until the read works again.
-            held = {symbol for symbol, profile in self.state["profiles"].items() if profile == "H1"}
-            if held:
-                self.note("hourly_unavailable", reason="lecture H1 indisponible : paires laissées telles quelles",
-                          symbols=sorted(held))
-        else:
-            self.state["profiles"] = {pair["symbol"]: pair["profile"] for pair in chosen}
         actions: list[dict[str, Any]] = []
         with self.trader as trader:
             account = trader.refresh_account()
@@ -447,8 +416,6 @@ class Bridge:
                 actions.append({"kind": "intent_resolved", "symbol": settled["symbol"], "side": settled["side"],
                                 "reason": f"{settled['status']} : {settled['resolved']}"})
             for symbol, target in sorted(wanted.items()):
-                if symbol in held:
-                    continue
                 mine = [p for p in positions if p.astra and p.symbol == symbol]
                 close_failed = False
                 for p in mine:
@@ -484,7 +451,7 @@ class Bridge:
                 if self.pending_intent(symbol) is not None:
                     continue  # an earlier order on this pair has no known outcome yet: look first, never send again
                 actions.extend(self._enter(trader, symbol, target["side"], target["stop_distance"], target["entry_ts"],
-                                           target["reason"], scale=target.get("risk_scale", 1.0))[1])
+                                           target["reason"])[1])
             everything = trader.positions()
             account = trader.refresh_account()
             manual_positions = [asdict(p) for p in everything if not p.astra]

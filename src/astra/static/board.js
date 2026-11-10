@@ -342,11 +342,14 @@ function renderSignals(d) {
     const item = el("div", null, "signal-item");
     const head = el("div", null, "signal-head");
     head.append(chip(s.symbol), el("strong", pairLabel(s.symbol)), badge(s.decision), el("small", s.since ? ago(s.since) : "—"));
-    item.append(head, el("small", `${FAMILY[s.family] || s.family} v${s.version} (${s.profile || "D1"}) · ${s.reason || "pas encore de décision"}`));
-    if (s.tier) {
-      const live = s.live ? ` · ${s.live.trades}/${s.live.needed} transactions simulées en direct (${signed(s.live.net_pnl)} USD)` : "";
-      const dsr = s.dsr == null ? "" : ` · Sharpe dégonflé ${String(s.dsr).replace(".", ",")}`;
-      item.append(el("small", `Niveau ${s.tier === "VALIDE" ? "validé" : "probatoire (demi-risque)"}${dsr}${live}`, "tier-line"));
+    item.append(head, el("small", `${FAMILY[s.family] || s.family} v${s.version} · ${s.reason || "pas encore de décision"}`));
+    const o = s.observation;
+    if (o) {
+      const needed = o.live && o.live.needed ? `/${o.live.needed}` : "";
+      const live = o.live ? ` · ${o.live.trades}${needed} transactions observées (${signed(o.live.net_pnl)} USD)` : "";
+      const dsr = o.dsr == null ? "" : ` · Sharpe dégonflé ${String(o.dsr).replace(".", ",")}`;
+      const state = o.status === "CONFIRME" ? "confirmé en observation" : "en observation";
+      item.append(el("small", `Simulation ${o.profile} v${o.version} (${FAMILY[o.family] || o.family}), ${state}, sans ordre${dsr}${live}`, "tier-line"));
     }
     const r = s.regime || {};
     if (r.trend) item.append(el("small", `Régime du marché (D1) : ${r.trend === "tendance" ? `tendance ${r.direction}` : "sans tendance (range)"}${r.volatility ? `, volatilité ${r.volatility}` : ""} · efficacité ${String(r.efficiency).replace(".", ",")}`, "regime-line"));
