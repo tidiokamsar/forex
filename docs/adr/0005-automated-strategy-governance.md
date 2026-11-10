@@ -39,3 +39,14 @@ Règles du propriétaire : aucune revue technique quotidienne de sa part ; promo
 ## Vérification
 
 Tests dans `tests/test_learning.py` et `tests/test_mt5_bridge.py` : enregistrement avant évaluation, évènements de refus, d'échec et de promotion, observation séparée du flux DEMO, autorisation humaine avec opérateur et raison obligatoires, suspension, confirmation, absence de verdict sous le plancher d'observations ou sans critères enregistrés, pont indifférent au pipeline H1.
+
+## Addendum du 2026-11-10 : flux H1 pour le pont DEMO, sur autorisation humaine
+
+Le pipeline H1 reste en simulation. Pour qu'une paire puisse nourrir le pont DEMO avec une stratégie H1, une personne lance `astra learn authorize --profile H1 --symbol X --operator NOM --reason TEXTE` :
+
+- **Prérequis vérifiés par la commande** : le champion H1 doit avoir été promu par un run (la stratégie de référence ne peut jamais être autorisée) et confirmé par la revue prospective (`review_status = CONFIRME`). Si la personne assume qu'il n'est pas encore confirmé, elle ajoute `--accept-unconfirmed` : la décision est alors journalisée avec `unconfirmed = true`.
+- **Compte dédié** : un compte simulé « DEMO » est créé pour la paire, à plat, démarrant à l'heure de l'autorisation (aucune ancienne bougie n'est rejouée), avec les paramètres figés du champion. Le pont suit ce compte à la place du compte quotidien pour cette paire seulement. Un futur champion n'y change rien : seule une nouvelle autorisation humaine met à jour le compte.
+- **Suspension automatique** : si la revue prospective du champion devient négative, l'autorisation est suspendue sans intervention humaine (évènements `SUSPENSION` puis `SUSPENSION_DEMO`) : la paire retourne au flux quotidien. Le retour à un flux moins actif réduit l'exposition ; aucune ouverture ne peut en résulter.
+- **Révocation** : `astra learn revoke --symbol X --operator NOM --reason TEXTE` (action humaine, journalisée).
+- **Panne de lecture H1** : si le pont ne peut pas lire le flux H1, les paires qui le suivaient sont laissées telles quelles (aucune fermeture sur un incident réseau) ; une ligne `hourly_unavailable` est journalisée.
+- Les limites du portail de risque s'appliquent sans changement ; l'autorisation ne les modifie pas.

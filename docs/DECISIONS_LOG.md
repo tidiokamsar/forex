@@ -32,3 +32,5 @@
 | 2026-11-10 | Seuil du Sharpe dégonflé « validé » aligné sur le protocole (0,95) | écart relevé par l'audit (0,80 dans le code) |
 | 2026-11-10 | Lot 3 du risque : gel des nouvelles entrées (toutes paires et panneau) tant qu'une alerte bloquante de rapprochement ou un ordre au résultat inconnu existe ; taille de contrat lue chez le courtier et exigée égale à 100 000 ; une demande du site n'est jamais exécutée deux fois | écarts relevés par l'audit du Lot 0 ; refus par défaut quand l'état est inconnu |
 | 2026-11-10 | Pas de limite par devise séparée pour l'instant | avec les 7 paires actuelles chaque devise hors dollar n'est que dans une paire, déjà bornée par position ; le dollar a sa limite propre |
+| 2026-11-10 | Flux H1 pour le pont DEMO préparé mais inactif : il faut `astra learn authorize --profile H1` (champion promu et confirmé, ou `--accept-unconfirmed` journalisé) ; compte dédié créé à plat ; suspension automatique sur revue négative ; révocation par `astra learn revoke` | demande du propriétaire d'obtenir plus de trades sans lever la règle « aucun ordre sans autorisation distincte » |
+
