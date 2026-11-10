@@ -64,6 +64,19 @@ ITEMS_PER_POST = 80  # keeps a history post well under the proxy's 64 KB body li
 RECENT_BARS = {"M5": 12, "M15": 8, "H1": 8, "H4": 6, "D1": 4}
 
 
+def feed_pairs(daily: dict[str, Any], hourly: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Per pair, the account the bridge follows: the hourly DEMO account of a pair a person authorized for it,
+    otherwise the daily one. Observation accounts and unauthorized champions never appear here."""
+
+    hourly_by = {pair["symbol"]: pair for pair in (hourly or {}).get("pairs", [])}
+    chosen = []
+    for pair in daily.get("pairs", []):
+        other = hourly_by.get(pair["symbol"])
+        demo = other.get("demo_session") if other else None
+        chosen.append({**pair, "session": demo, "profile": "H1"} if demo else {**pair, "profile": "D1"})
+    return chosen
+
+
 def targets(overview: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Wanted MT5 side per pair from the managed paper accounts (FLAT when nothing should be held)."""
 
@@ -124,6 +137,7 @@ class Bridge:
         self.state_path = workdir / "bridge-state.json"
         self.state = json.loads(self.state_path.read_text(encoding="utf-8")) if self.state_path.exists() else {}
         self.state.setdefault("mirrored", {})
+        self.state.setdefault("profiles", {})  # which feed (D1 or H1) each pair followed at the last good read
         self.state.setdefault("last_refusal", {})
         self.state.setdefault("intents", {})
         self.targets: dict[str, dict[str, Any]] = {}
@@ -425,10 +439,26 @@ class Bridge:
         if (self.workdir / "STOP").exists():
             self.note("halted", reason="fichier STOP présent : aucun ordre")
             return {"halted": True, "actions": []}
-        # Only the accounts that feed the DEMO bridge (the daily pipeline, strategies a person authorized) are read here.
-        # The hourly pipeline and every observation account are SIMULATION only: no order ever comes from them.
-        wanted = targets(self.client.get("/api/learn/overview"))
+        # Only accounts that feed the DEMO bridge are read here: the daily ones, and the hourly DEMO account of a pair a
+        # person authorized. Observation accounts and unauthorized champions are SIMULATION only: no order comes from them.
+        daily = self.client.get("/api/learn/overview")
+        try:
+            hourly = self.client.get("/api/learn/overview", profile="H1")
+        except ApiError:
+            hourly = None
+        chosen = feed_pairs(daily, hourly)
+        wanted = targets({"pairs": chosen})
         self.targets = wanted
+        held: set[str] = set()
+        if hourly is None:
+            # Without the hourly read, a pair that was following its hourly account must not fall back to the daily one and be
+            # closed because of a network incident: it is left alone until the read works again.
+            held = {symbol for symbol, profile in self.state["profiles"].items() if profile == "H1"}
+            if held:
+                self.note("hourly_unavailable", reason="lecture H1 indisponible : paires laissées telles quelles",
+                          symbols=sorted(held))
+        else:
+            self.state["profiles"] = {pair["symbol"]: pair["profile"] for pair in chosen}
         actions: list[dict[str, Any]] = []
         with self.trader as trader:
             account = trader.refresh_account()
@@ -437,6 +467,8 @@ class Bridge:
                 actions.append({"kind": "intent_resolved", "symbol": settled["symbol"], "side": settled["side"],
                                 "reason": f"{settled['status']} : {settled['resolved']}"})
             for symbol, target in sorted(wanted.items()):
+                if symbol in held:
+                    continue
                 mine = [p for p in positions if p.astra and p.symbol == symbol]
                 close_failed = False
                 for p in mine:

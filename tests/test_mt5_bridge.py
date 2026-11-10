@@ -346,6 +346,33 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(second[0]["id"], 7)
         self.assertEqual(self.server.results[-1][1]["status"], "EXECUTE")  # only the answer was sent again
 
+    def test_the_bridge_follows_the_hourly_demo_account_of_an_authorized_pair_and_holds_it_when_the_hourly_read_fails(self):
+        from astra.mt5_bridge import feed_pairs
+
+        hourly_short = {**SHORT, "entry_ts": "2026-10-29T08:00:00+00:00"}
+        daily_flat = {"pairs": [{"symbol": "EURUSD", "session": {"id": 1, "status": "RUNNING",
+                                                                  "account": {"positions": {}, "pending": {}}}}]}
+
+        def hourly(positions):
+            return {"pairs": [{"symbol": "EURUSD", "champion": {"version": 2, "run_id": 5},
+                               "demo_session": {"id": 2, "status": "RUNNING",
+                                                "account": {"positions": positions, "pending": {}}}}]}
+
+        self.assertEqual(feed_pairs(daily_flat, hourly({}))[0]["profile"], "H1")
+        self.assertEqual(feed_pairs(daily_flat, None)[0]["profile"], "D1")
+        self.server.view = daily_flat
+        self.server.hourly_view = hourly({"EURUSD": hourly_short})
+        self.assertEqual([a["kind"] for a in self.bridge.cycle()["actions"]], ["open"])  # the authorized hourly feed opens it
+        self.server.hourly_fail = True  # a network incident on the hourly read: the daily view says "flat"
+        self.assertEqual(self.bridge.cycle()["actions"], [])
+        self.assertEqual(len(self.fake.open_positions), 1)  # still open
+        journal = (self.dir / "journal-2026-10-29.jsonl").read_text(encoding="utf-8")
+        self.assertIn("hourly_unavailable", journal)
+        self.server.hourly_fail = False
+        self.server.hourly_view = {"pairs": [{"symbol": "EURUSD", "champion": {"version": 2, "run_id": 5},
+                                              "demo_session": None}]}  # revoked or suspended: the daily feed is back
+        self.assertEqual([a["kind"] for a in self.bridge.cycle()["actions"]], ["close"])  # and it says flat
+
     def test_the_gateway_sees_the_real_prices_and_currency_of_the_account(self):
         with self.bridge.trader as trader:
             self.bridge.cycle()

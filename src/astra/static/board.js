@@ -342,7 +342,7 @@ function renderSignals(d) {
     const item = el("div", null, "signal-item");
     const head = el("div", null, "signal-head");
     head.append(chip(s.symbol), el("strong", pairLabel(s.symbol)), badge(s.decision), el("small", s.since ? ago(s.since) : "—"));
-    item.append(head, el("small", `${FAMILY[s.family] || s.family} v${s.version} · ${s.reason || "pas encore de décision"}`));
+    item.append(head, el("small", `${FAMILY[s.family] || s.family}${s.profile === "H1" ? " (H1, autorisé DEMO)" : ""} · ${s.reason || "pas encore de décision"}`));
     const o = s.observation;
     if (o) {
       const needed = o.live && o.live.needed ? `/${o.live.needed}` : "";

@@ -331,6 +331,84 @@ class HourlyProfileTests(unittest.TestCase):
         self.assertGreaterEqual(datetime.fromisoformat(session["start_at"]), now)  # no old bar is traded after the fact
         self.assertEqual(learning.ensure_managed_sessions(self.candles, self.hourly, self.lab), [])
 
+    # -- hourly DEMO authorization (a person, never a process) -------------------------------------------------
+
+    def live_broker_candles(self):
+        self.candles.register_source("MT5_METAQUOTES_DEMO", "MT5", "BROKER", "test")
+        now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        self.candles.store(hourly_series(source="MT5_METAQUOTES_DEMO", bars=600, end=now - timedelta(hours=1)), "BROKER", None)
+
+    def promote_hourly(self, status=None):
+        self.hourly.champion("EURUSD")
+        params = {**learning.default_params(), "tier": "PROBATOIRE",
+                  "review": learning.preregistered_review([0.01, 0.02, 0.015, 0.012, 0.018])}
+        if status:
+            params["review_status"] = status
+        self.hourly.promote("EURUSD", params, 5, "test")
+
+    def authorize(self, **kw):
+        return learning.authorize_demo(self.hourly, self.lab, "EURUSD", "test-op", "essai", candles=self.candles, **kw)
+
+    def test_hourly_authorization_needs_a_promoted_champion_and_a_confirmation_or_an_explicit_acceptance(self):
+        self.live_broker_candles()
+        with self.assertRaises(learning.SimulationError):
+            self.authorize()  # only the reference strategy: nothing was promoted
+        self.promote_hourly()
+        with self.assertRaises(learning.SimulationError) as caught:
+            self.authorize()  # promoted but not confirmed by the prospective review
+        self.assertIn("--accept-unconfirmed", str(caught.exception))
+        self.assertIsNone(self.hourly.demo_session("EURUSD"))
+        with self.assertRaises(learning.SimulationError):
+            learning.authorize_demo(self.hourly, self.lab, "EURUSD", "", "essai", candles=self.candles, accept_unconfirmed=True)
+        self.assertTrue(self.authorize(accept_unconfirmed=True))
+        session_id = self.hourly.demo_session("EURUSD")
+        self.assertIsNotNone(session_id)
+        session = self.lab.session(session_id, item_limit=0)
+        self.assertEqual((session["timeframe"], session["source"], session["status"]),
+                         ("H1", "MT5_METAQUOTES_DEMO", "RUNNING"))
+        self.assertIn("DEMO", session["name"])
+        audit = next(e for e in self.hourly.events("EURUSD") if e["kind"] == "AUTORISATION_DEMO")
+        self.assertEqual((audit["detail"]["unconfirmed"], audit["detail"]["operator"]), (True, "test-op"))
+        again = self.authorize(accept_unconfirmed=True)  # same champion: same account, nothing changes
+        self.assertFalse(again)
+        self.assertEqual(self.hourly.demo_session("EURUSD"), session_id)
+        pair = next(p for p in learning.overview(self.hourly, self.lab)["pairs"] if p["symbol"] == "EURUSD")
+        self.assertEqual(pair["demo_session"]["id"], session_id)
+
+    def test_a_champion_confirmed_by_the_prospective_review_needs_no_acceptance_flag(self):
+        self.live_broker_candles()
+        self.promote_hourly(status="CONFIRME")
+        self.assertTrue(self.authorize())
+        audit = next(e for e in self.hourly.events("EURUSD") if e["kind"] == "AUTORISATION_DEMO")
+        self.assertFalse(audit["detail"]["unconfirmed"])
+
+    def test_a_person_can_revoke_the_hourly_feed_and_the_daily_feed_cannot_be_revoked(self):
+        self.live_broker_candles()
+        self.promote_hourly(status="CONFIRME")
+        self.authorize()
+        self.assertTrue(learning.revoke_demo(self.hourly, "EURUSD", "test-op", "essai"))
+        self.assertIsNone(self.hourly.demo_session("EURUSD"))
+        self.assertIn("REVOCATION_DEMO", [e["kind"] for e in self.hourly.events("EURUSD")])
+        with self.assertRaises(learning.SimulationError):
+            learning.revoke_demo(self.daily, "EURUSD", "test-op", "essai")
+        with self.assertRaises(learning.SimulationError):
+            learning.revoke_demo(self.hourly, "EURUSD", "", "essai")
+
+    def test_a_negative_prospective_review_suspends_the_authorization_without_a_person(self):
+        self.live_broker_candles()
+        self.promote_hourly()
+        self.authorize(accept_unconfirmed=True)
+        self.hourly.set_managed_session("EURUSD", 99)  # the observation account of the pair
+        lab = mock.Mock()
+        lab.session.return_value = {"account": {"initial_capital": 10_000.0}, "trades": [
+            {"exit_ts": "2999-01-01T00:00:00+00:00", "net_pnl": v}
+            for v in (-50.0, -40.0, -60.0, -45.0, -55.0, -42.0, -58.0, -47.0, -52.0)]}
+        self.assertEqual(learning.review_live(self.hourly, lab, "EURUSD"), "SUSPENDED")
+        self.assertIsNone(self.hourly.demo_session("EURUSD"))  # the bridge goes back to the daily feed
+        kinds = [e["kind"] for e in self.hourly.events("EURUSD")]
+        self.assertIn("SUSPENSION_DEMO", kinds)
+        self.assertIn("SUSPENSION", kinds)
+
     def test_the_worker_schedules_hourly_learning_next_to_the_daily_one(self):
         self.candles.store(hourly_series(bars=3000), "HISTORICAL", None)
         worker = Worker(self.db, Path(self.temp.name) / "imports", ecb_enabled=False, massive_enabled=False)

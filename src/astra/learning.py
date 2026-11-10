@@ -133,6 +133,10 @@ CREATE TABLE IF NOT EXISTS {p}learn_runs (
 );
 CREATE TABLE IF NOT EXISTS {p}learn_managed (symbol TEXT PRIMARY KEY, session_id INTEGER NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS {p}learn_shadow (symbol TEXT PRIMARY KEY, session_id INTEGER NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS {p}learn_demo (
+    symbol TEXT PRIMARY KEY, session_id INTEGER NOT NULL, active INTEGER NOT NULL, authorized_at TEXT NOT NULL,
+    champion_version INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS {p}learn_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, symbol TEXT NOT NULL, run_id INTEGER, kind TEXT NOT NULL,
     detail_json TEXT NOT NULL
@@ -278,6 +282,25 @@ class LearningStore:
         with self._connect() as db:
             db.execute(f"INSERT INTO {self._p}learn_shadow(symbol, session_id, created_at) VALUES (?,?,?) ON CONFLICT(symbol)"
                        " DO UPDATE SET session_id = excluded.session_id", (symbol, session_id, _iso(_now())))
+
+    def demo_session(self, symbol: str) -> int | None:
+        """The account that feeds the DEMO bridge for this pair under a person's authorization (None when not authorized)."""
+
+        with self._connect() as db:
+            row = db.execute(f"SELECT session_id FROM {self._p}learn_demo WHERE symbol = ? AND active = 1", (symbol,)).fetchone()
+        return row[0] if row else None
+
+    def set_demo_session(self, symbol: str, session_id: int, champion_version: int) -> None:
+        with self._connect() as db:
+            db.execute(f"INSERT INTO {self._p}learn_demo(symbol, session_id, active, authorized_at, champion_version)"
+                       " VALUES (?,?,1,?,?) ON CONFLICT(symbol) DO UPDATE SET session_id = excluded.session_id, active = 1,"
+                       " authorized_at = excluded.authorized_at, champion_version = excluded.champion_version",
+                       (symbol, session_id, _iso(_now()), champion_version))
+
+    def deactivate_demo(self, symbol: str) -> bool:
+        with self._connect() as db:
+            return db.execute(f"UPDATE {self._p}learn_demo SET active = 0 WHERE symbol = ? AND active = 1",
+                              (symbol,)).rowcount == 1
 
     def record_event(self, symbol: str, kind: str, detail: dict[str, Any], run_id: int | None = None) -> None:
         """Append-only audit line: registration, promotion, refusal, suspension, rollback, authorization."""
@@ -475,6 +498,9 @@ def review_live(store: LearningStore, lab: LabStore, symbol: str) -> str | None:
         version = store.rollback(symbol)
         apply_champion(store, lab, symbol)
         store.record_event(symbol, "RETOUR_ARRIERE", {**detail, "restored_as_version": version}, champion["run_id"])
+        if not store.profile.demo_feed and store.deactivate_demo(symbol):
+            # the authorization was given to a strategy that no longer holds: the pair goes back to the daily feed
+            store.record_event(symbol, "SUSPENSION_DEMO", {**detail, "reason": "revue prospective négative"}, champion["run_id"])
         return "SUSPENDED"
     if (params.get("review_status") != "CONFIRME" and review.get("n_required") and stats["n"] >= review["n_required"]
             and stats["t"] >= review["z_confirm"]):
@@ -486,26 +512,71 @@ def review_live(store: LearningStore, lab: LabStore, symbol: str) -> str | None:
     return None
 
 
-def authorize_demo(store: LearningStore, lab: LabStore, symbol: str, operator: str, reason: str) -> bool:
-    """Give the DEMO-feeding account of ``symbol`` the current champion. Only a person does this (command line):
-    promotions never reach the DEMO bridge by themselves. Returns False when nothing changes."""
+def authorize_demo(store: LearningStore, lab: LabStore, symbol: str, operator: str, reason: str, *,
+                   candles: CandleStore | None = None, accept_unconfirmed: bool = False) -> bool:
+    """A person gives the DEMO bridge the current champion of ``symbol``. No automatic process calls this function.
 
-    if not store.profile.demo_feed:
-        raise SimulationError(f"le profil {store.profile.name} ne nourrit pas le pont DEMO")
+    Daily pipeline: the account that already feeds the bridge takes the champion's parameters. Hourly pipeline: a
+    dedicated account (created now, flat) is opened for the pair, and the bridge follows it instead of the daily one.
+    The hourly path requires a champion promoted by a run and confirmed by the prospective review, unless the person
+    states in the command that the champion is not yet confirmed (the audit line records it). Returns False when
+    nothing changes."""
+
     if not operator.strip() or not reason.strip():
         raise SimulationError("un opérateur et une raison sont obligatoires")
-    session_id = store.managed_session(symbol)
-    if session_id is None:
-        raise SimulationError(f"aucun compte géré pour {symbol}")
     champion = store.champion(symbol)
     params = champion["params"]
-    changed = lab.update_session_strategy(session_id, params["strategy"], float(params["stop_atr_multiple"]),
-                                          f"autorisation DEMO par {operator} : champion v{champion['version']}",
-                                          take_profit_r=float(params.get("take_profit_r", 0.0)))
-    store.record_event(symbol, "AUTORISATION_DEMO", {"operator": operator, "reason": reason, "changed": changed,
-                                                     "champion_version": champion["version"], "params": params},
-                       champion.get("run_id"))
+    profile = store.profile
+    unconfirmed = False
+    if profile.demo_feed:
+        session_id = store.managed_session(symbol)
+        if session_id is None:
+            raise SimulationError(f"aucun compte géré pour {symbol}")
+        changed = lab.update_session_strategy(session_id, params["strategy"], float(params["stop_atr_multiple"]),
+                                              f"autorisation DEMO par {operator} : champion v{champion['version']}",
+                                              take_profit_r=float(params.get("take_profit_r", 0.0)))
+    else:
+        if champion.get("run_id") is None:
+            raise SimulationError(f"le champion {profile.name} de {symbol} n'a pas été promu par un run : rien à autoriser")
+        unconfirmed = params.get("review_status") != "CONFIRME"
+        if unconfirmed and not accept_unconfirmed:
+            raise SimulationError("champion pas encore confirmé par l'observation prospective : refaites la commande avec "
+                                  "--accept-unconfirmed si vous assumez ce risque (la décision sera journalisée)")
+        if candles is None:
+            raise SimulationError("les bougies sont nécessaires pour ouvrir le compte DEMO H1")
+        existing = store.demo_session(symbol)
+        if existing is not None:
+            changed = lab.update_session_strategy(existing, params["strategy"], float(params["stop_atr_multiple"]),
+                                                  f"autorisation DEMO par {operator} : champion v{champion['version']}",
+                                                  take_profit_r=float(params.get("take_profit_r", 0.0)))
+            store.set_demo_session(symbol, existing, champion["version"])
+        else:
+            begin = _now().replace(minute=0, second=0, microsecond=0)
+            request = simulation_request({"name": f"{profile.session_label} DEMO · {symbol}", "symbols": [symbol],
+                                          "timeframe": profile.timeframe, "source": profile.live_source,
+                                          "start": begin.isoformat(), "strategy_params": params["strategy"],
+                                          "risk": {"stop_atr_multiple": params["stop_atr_multiple"],
+                                                   "take_profit_r": params.get("take_profit_r", 0.0),
+                                                   "max_positions": 1}}, candles)
+            store.set_demo_session(symbol, lab.create_session(request, f"cli:{operator}"), champion["version"])
+            changed = True
+    store.record_event(symbol, "AUTORISATION_DEMO", {
+        "operator": operator, "reason": reason, "changed": changed, "profile": profile.name, "unconfirmed": unconfirmed,
+        "champion_version": champion["version"], "review_status": params.get("review_status"), "params": params},
+        champion.get("run_id"))
     return changed
+
+
+def revoke_demo(store: LearningStore, symbol: str, operator: str, reason: str) -> bool:
+    """A person takes a pair back from the hourly DEMO feed: the bridge follows the daily pipeline again for it."""
+
+    if not operator.strip() or not reason.strip():
+        raise SimulationError("un opérateur et une raison sont obligatoires")
+    if store.profile.demo_feed:
+        raise SimulationError("le flux quotidien est le flux par défaut : rien à révoquer")
+    revoked = store.deactivate_demo(symbol)
+    store.record_event(symbol, "REVOCATION_DEMO", {"operator": operator, "reason": reason, "revoked": revoked})
+    return revoked
 
 
 def learn(candles: CandleStore, store: LearningStore, symbol: str) -> dict[str, Any]:
@@ -690,7 +761,12 @@ def overview(store: LearningStore, lab: LabStore) -> dict[str, Any]:
         session_id = store.managed_session(symbol)
         session = lab.session(session_id, item_limit=0) if session_id else None
         shadow_id = store.shadow_session(symbol)
+        demo_id = store.demo_session(symbol)
+        demo = lab.session(demo_id, item_limit=0) if demo_id else None
         pairs.append({"symbol": symbol, "champion": champion, "trials": store.trials(symbol), "shadow_session_id": shadow_id,
+                      "demo_session": ({"id": demo_id, "status": demo["status"], "account": demo["account"],
+                                        "trades_total": demo["trades_total"], "orders_total": demo["orders_total"],
+                                        "last_processed": demo["last_processed"]} if demo else None),
                       "last_run_at": (lambda d: d.isoformat() if d else None)(store.last_run_at(symbol)),
                       "session": ({"id": session_id, "status": session["status"], "account": session["account"],
                                    "trades_total": session["trades_total"], "orders_total": session["orders_total"],

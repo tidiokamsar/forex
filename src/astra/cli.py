@@ -109,6 +109,13 @@ def build_parser() -> argparse.ArgumentParser:
     learn_authorize.add_argument("--symbol", required=True)
     learn_authorize.add_argument("--operator", required=True)
     learn_authorize.add_argument("--reason", required=True)
+    learn_authorize.add_argument("--profile", default="D1", choices=("D1", "H1"))
+    learn_authorize.add_argument("--accept-unconfirmed", action="store_true",
+                                 help="H1 : autoriser un champion pas encore confirmé par l'observation (journalisé)")
+    learn_revoke = learn_actions.add_parser("revoke", help="Reprendre une paire au flux H1 DEMO : le flux quotidien reprend")
+    learn_revoke.add_argument("--symbol", required=True)
+    learn_revoke.add_argument("--operator", required=True)
+    learn_revoke.add_argument("--reason", required=True)
     mt5_cmd = commands.add_parser("mt5", help="Compte DEMO MetaTrader 5 en lecture (Windows, terminal MT5 connecté)")
     mt5_actions = mt5_cmd.add_subparsers(dest="mt5_action", required=True)
     mt5_actions.add_parser("check", help="Vérifier le compte DEMO du terminal (aucun ordre, aucun mot de passe)")
@@ -422,7 +429,18 @@ def _learn(args: argparse.Namespace, config: AppConfig) -> int:
     lab = LabStore(config.database_path)
     lab.initialize()
     try:
-        changed = learning.authorize_demo(store, lab, args.symbol.upper(), args.operator, args.reason)
+        if args.learn_action == "revoke":
+            h1 = learning.LearningStore(config.database_path, learning.H1_PROFILE)
+            h1.initialize()
+            revoked = learning.revoke_demo(h1, args.symbol.upper(), args.operator, args.reason)
+            _write_json({"status": "ok", "symbol": args.symbol.upper(), "revoked": revoked})
+            return 0
+        from .marketdata import CandleStore
+
+        candles = CandleStore(config.database_path)
+        candles.initialize()
+        changed = learning.authorize_demo(store, lab, args.symbol.upper(), args.operator, args.reason,
+                                          candles=candles, accept_unconfirmed=args.accept_unconfirmed)
     except SimulationError as exc:
         _write_json({"status": "error", "reason": str(exc)})
         return 2
