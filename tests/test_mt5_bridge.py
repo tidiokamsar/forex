@@ -102,6 +102,7 @@ class FakeServer:
         self.posts = []
         self.controls = {"entries_allowed": True, "kill_switch": {"active": False}}
         self.requests, self.results, self.fail_pending = [], [], False
+        self.hourly_view = None
 
     def __call__(self, method, path, body):
         if method == "POST":
@@ -115,6 +116,8 @@ class FakeServer:
             return 200, {"requests": self.requests}
         if path == "/api/controls":
             return 200, self.controls
+        if path.startswith("/api/learn/overview?profile=H1"):
+            return 200, self.hourly_view or {"pairs": []}
         return 200, self.status if path == "/api/status" else self.view
 
 
@@ -283,6 +286,24 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(self.fake.sent[0]["comment"], f"ASTRA:{intent['id']}")
         saved = json.loads((self.dir / "bridge-state.json").read_text(encoding="utf-8"))
         self.assertEqual(saved["intents"][intent["id"]]["status"], "EXECUTE")  # on disk, not only in memory
+
+    def test_the_hourly_pipeline_decides_only_for_a_pair_whose_hourly_champion_was_promoted(self):
+        hourly_short = {**SHORT, "entry_ts": "2026-10-29T08:00:00+00:00"}
+        daily_flat = {"pairs": [{"symbol": "EURUSD", "session": {"id": 1, "status": "RUNNING",
+                                                                  "account": {"positions": {}, "pending": {}}}}]}
+
+        def hourly(run_id):
+            return {"pairs": [{"symbol": "EURUSD", "champion": {"version": 2 if run_id else 1, "run_id": run_id},
+                               "session": {"id": 2, "status": "RUNNING",
+                                           "account": {"positions": {"EURUSD": hourly_short}, "pending": {}}}}]}
+
+        self.server.view, self.server.hourly_view = daily_flat, hourly(None)  # reference strategy only: ignored
+        self.assertEqual(self.bridge.cycle()["actions"], [])
+        self.assertEqual(self.bridge.targets["EURUSD"]["profile"], "D1")
+        self.server.hourly_view = hourly(5)  # promoted by run 5: it decides
+        self.assertEqual([a["kind"] for a in self.bridge.cycle()["actions"]], ["open"])
+        self.assertEqual(self.bridge.targets["EURUSD"]["profile"], "H1")
+        self.assertEqual(self.bridge.targets["EURUSD"]["entry_ts"], hourly_short["entry_ts"])
 
     def test_a_refusal_by_the_broker_is_a_rejection_reported_once_and_not_retried_every_cycle(self):
         self.fake.mode = "reject"

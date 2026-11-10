@@ -179,7 +179,8 @@ def register_lab_routes(app: Flask, *, database: Path, import_dir: Path, require
                 if len(rows) >= 25 and rows[0].close:
                     quote["change_24h_pct"] = round((quote["bid"] / rows[0].close - 1) * 100, 3)
             signals, processed, evaluated, signal_times = [], [], [], []
-            for pair in learning.overview(learn_store, lab)["pairs"]:
+            hourly = learning.overview(learn_store_h1, lab)
+            for pair in learning.active_pairs(learning.overview(learn_store, lab), hourly):
                 session = pair.get("session")
                 detail = lab.session(session["id"], item_limit=1) if session else None
                 last = detail["signals"][-1] if detail and detail.get("signals") else None
@@ -190,7 +191,7 @@ def register_lab_routes(app: Flask, *, database: Path, import_dir: Path, require
                     signal_times.append(last["ts"])
                 family = pair["champion"]["params"]["strategy"].get("family", "sma_trend")
                 daily = candles.candles(pair["symbol"], learning.TIMEFRAME, learning.SOURCE, limit=130, newest=True)
-                signals.append({"symbol": pair["symbol"], "family": family,
+                signals.append({"symbol": pair["symbol"], "family": family, "profile": pair["profile"],
                                 "regime": riskmetrics.regime([c.close for c in daily]), "version": pair["champion"]["version"],
                                 "decision": last["decision"] if last else None, "reason": last["reason"] if last else None,
                                 "since": last["ts"] if last else None})

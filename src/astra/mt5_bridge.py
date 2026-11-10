@@ -42,6 +42,7 @@ from .brokers.mt5_demo_orders import (
     Mt5OrderRejected,
     Mt5OrderUnknown,
 )
+from .learning import active_pairs
 from .marketdata import pip_size
 from .mt5_risk import AccountState, OrderRequest, RiskConfigError, RiskLimits, entries_state, evaluate_entry, load_limits
 
@@ -402,7 +403,15 @@ class Bridge:
         if (self.workdir / "STOP").exists():
             self.note("halted", reason="fichier STOP présent : aucun ordre")
             return {"halted": True, "actions": []}
-        wanted = targets(self.client.get("/api/learn/overview"))
+        daily = self.client.get("/api/learn/overview")
+        try:
+            hourly = self.client.get("/api/learn/overview", profile="H1")
+        except ApiError:
+            hourly = None  # the hourly pipeline is optional: the daily one keeps deciding
+        chosen = active_pairs(daily, hourly)
+        wanted = targets({"pairs": chosen})
+        for pair in chosen:
+            wanted[pair["symbol"]]["profile"] = pair["profile"]
         self.targets = wanted
         actions: list[dict[str, Any]] = []
         with self.trader as trader:

@@ -447,6 +447,19 @@ def apply_champion(store: LearningStore, lab: LabStore, symbol: str) -> bool:
                                        f"champion v{champion['version']} : {champion['reason']}")
 
 
+def active_pairs(daily: dict[str, Any], hourly: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Per pair, the pipeline that decides: the hourly one once its champion was promoted by a run (every criterion met),
+    otherwise the daily one. The reference strategy an hourly account starts with never decides anything."""
+
+    hourly_by = {pair["symbol"]: pair for pair in (hourly or {}).get("pairs", [])}
+    chosen = []
+    for pair in daily.get("pairs", []):
+        other = hourly_by.get(pair["symbol"])
+        use_hourly = bool(other and other.get("session") and (other.get("champion") or {}).get("run_id") is not None)
+        chosen.append({**(other if use_hourly else pair), "profile": "H1" if use_hourly else "D1"})
+    return chosen
+
+
 def overview(store: LearningStore, lab: LabStore) -> dict[str, Any]:
     pairs = []
     for symbol in PAIRS:
