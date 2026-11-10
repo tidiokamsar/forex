@@ -48,12 +48,12 @@ from .papertrade import (
 LEARNING_VERSION = "1.0.0"
 SOURCE, TIMEFRAME = "ECB_EXR", "D1"
 FINAL_CHECK_DAYS = 365
-CANDIDATES_PER_RUN = 24  # about six per strategy family
+CANDIDATES_PER_RUN = 36  # about six per strategy family
 MIN_TRADES = 20
 MIN_SCORE_GAIN = 0.5
 MAX_DRAWDOWN_PCT = 15.0
 SPACE = {
-    "family": ("sma_trend", "momentum", "mean_reversion", "breakout"),
+    "family": ("sma_trend", "momentum", "mean_reversion", "breakout", "currency_momentum", "currency_reversion"),
     "z_entry": (0.75, 1.0, 1.5, 2.0),  # mean_reversion only
     "fast": (5, 10, 15, 20, 30, 40),
     "slow": (20, 30, 50, 80, 120, 160),
@@ -65,6 +65,7 @@ SPACE = {
 DEFAULT_RISK = RiskParams()
 DEFAULT_COSTS = CostParams()
 
+Z_FAMILIES = ("mean_reversion", "currency_momentum", "currency_reversion")  # families that use the z threshold
 DSR_VALID = 0.80          # deflated Sharpe probability from which a promotion counts as statistically solid
 LIVE_MIN_TRADES = 20      # paper trades after a promotion before the live record can graduate or demote it
 SPACE_H1 = {  # bars are hours: 6 to 48 hours fast, 2 to 14 days slow (the strategy accepts up to 400 bars)
@@ -311,7 +312,7 @@ def candidates(seed: int, champion: dict[str, Any], count: int = CANDIDATES_PER_
         family = rng.choice(space["family"])
         strategy = {"fast": fast, "slow": slow, "atr_window": rng.choice(space["atr_window"]),
                     "min_atr_pct": rng.choice(space["min_atr_pct"]), "max_atr_pct": 0.03, "family": family,
-                    "z_entry": rng.choice(space["z_entry"]) if family == "mean_reversion" else 1.0,
+                    "z_entry": rng.choice(space["z_entry"]) if family in Z_FAMILIES else 1.0,
                     "regime": rng.choice(space["regime"])}
         params = {"strategy": strategy, "stop_atr_multiple": rng.choice(space["stop_atr_multiple"])}
         key = json.dumps(params, sort_keys=True)

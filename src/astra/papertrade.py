@@ -41,7 +41,10 @@ FAMILIES = {
     "momentum": "momentum",
     "mean_reversion": "retour à la moyenne",
     "breakout": "cassure de canal",
+    "currency_momentum": "force relative des devises (suivre)",
+    "currency_reversion": "force relative des devises (inverse)",
 }
+CROSS_FAMILIES = ("currency_momentum", "currency_reversion")  # these read the prices of the other pairs too
 REGIME_FILTERS = ("none", "match")
 BUY, SELL, FLAT = "ACHAT", "VENTE", "AUCUNE_POSITION"
 MIN_UNITS, UNIT_STEP = 1000, 1000
@@ -185,7 +188,82 @@ class Decision:
     reason: str
 
 
-def decide(history: Sequence[Candle], params: StrategyParams) -> Decision | None:
+class PeerPrices:
+    """Closes of every pair by timestamp, for the strategies that compare currencies with one another."""
+
+    def __init__(self, closes: dict[str, dict[datetime, float]]) -> None:
+        self.closes = closes
+
+    @classmethod
+    def load(cls, store: CandleStore, timeframe: str, source: str, start: datetime, end: datetime) -> PeerPrices:
+        return cls({symbol: {c.timestamp: c.close for c in store.candles(symbol, timeframe, source, start=start, end=end)}
+                    for symbol in PAIRS})
+
+
+MIN_PEERS = 6  # of the seven dollar pairs, at the same two instants, before a currency comparison means anything
+
+
+def currency_strengths(peers: PeerPrices, before: datetime, now: datetime) -> dict[str, float] | None:
+    """Strength of each currency against the average currency over ``before`` to ``now`` (log returns).
+
+    Every pair holds the dollar, so each pair gives one currency's move against it (the dollar's own move is 0 by
+    definition); a currency's strength is that move minus the average of the eight. ``None`` when too few pairs
+    have both prices."""
+
+    moves: dict[str, float] = {}
+    for symbol, closes in peers.closes.items():
+        first, last = closes.get(before), closes.get(now)
+        if first and last and first > 0 and last > 0:
+            move = math.log(last / first)
+            base, quote = PAIRS[symbol][0], PAIRS[symbol][1]
+            if quote == "USD":
+                moves[base] = move
+            elif base == "USD":
+                moves[quote] = -move
+    if len(moves) < MIN_PEERS:
+        return None
+    average = sum(moves.values()) / (len(moves) + 1)  # the dollar counts as the eighth currency, at 0
+    return {currency: move - average for currency, move in moves.items()}
+
+
+def _currency(params: StrategyParams, history: Sequence[Candle], peers: PeerPrices | None, price: float, vol_ok: bool,
+              indicators: dict[str, float | None], atr_pct: float) -> Decision | None:
+    """Relative strength of the pair's non-dollar currency against the basket of currencies (``fast`` bars).
+
+    ``currency_momentum`` follows the strong currency and sells the weak one; ``currency_reversion`` does the opposite.
+    The threshold scales with the pair's own volatility. Without the other pairs' prices there is no decision at all
+    (None), so a late candle of another pair never closes a position by itself."""
+
+    lookback = params.fast
+    if peers is None or len(history) <= lookback:
+        return None
+    strengths = currency_strengths(peers, history[-1 - lookback].timestamp, history[-1].timestamp)
+    symbol = history[-1].symbol
+    base, quote = PAIRS[symbol][0], PAIRS[symbol][1]
+    currency = quote if base == "USD" else base
+    if strengths is None or currency not in strengths:
+        return None
+    strength = strengths[currency]
+    threshold = params.z_entry * atr_pct * math.sqrt(lookback)
+    strong, weak = strength > threshold, strength < -threshold
+    follow = params.family == "currency_momentum"
+    buy_currency, sell_currency = (strong, weak) if follow else (weak, strong)
+    buy_pair, sell_pair = (buy_currency, sell_currency) if base != "USD" else (sell_currency, buy_currency)
+    indicators = {**indicators, "force_devise": round(strength, 6), "seuil_force": round(threshold, 6)}
+    conditions = {"devise_forte": strong, "devise_faible": weak, "volatilite_dans_la_plage": vol_ok}
+    if not vol_ok:
+        return _quiet_or_wild(params, price, indicators, conditions, atr_pct)
+    label = "suivre" if follow else "inverse"
+    detail = (f"{currency} {strength * 100:+.3f} % contre le panier sur {lookback} bougies "
+              f"(seuil {threshold * 100:.3f} %, {label})")
+    if buy_pair:
+        return Decision(BUY, price, indicators, conditions, detail)
+    if sell_pair:
+        return Decision(SELL, price, indicators, conditions, detail)
+    return Decision(FLAT, price, indicators, conditions, f"{detail} : écart insuffisant")
+
+
+def decide(history: Sequence[Candle], params: StrategyParams, peers: PeerPrices | None = None) -> Decision | None:
     """The decision at the close of ``history[-1]``, using only ``history`` (None during warm-up)."""
 
     if len(history) < params.warmup:
@@ -209,12 +287,14 @@ def decide(history: Sequence[Candle], params: StrategyParams) -> Decision | None
         market = riskmetrics.regime([c.close for c in history[-(riskmetrics.EFFICIENCY_WINDOW + 1):]])
         if market["trend"] is not None:
             indicators = {**indicators, "efficacite": market["efficiency"]}
-            wants_trend = params.family != "mean_reversion"
+            wants_trend = params.family not in ("mean_reversion", "currency_reversion")
             if (market["trend"] == "tendance") != wants_trend:
                 kind = "en tendance" if market["trend"] == "tendance" else "sans tendance"
                 needed = "tendance" if wants_trend else "range"
                 return Decision(FLAT, price, indicators, {"regime_adapte": False, "volatilite_dans_la_plage": vol_ok},
                                 f"marché {kind} (efficacité {market['efficiency']}) : cette stratégie n'agit qu'en {needed}")
+    if params.family in CROSS_FAMILIES:
+        return _currency(params, history, peers, price, vol_ok, indicators, atr_pct)
     if params.family == "momentum":
         return _momentum(params, closes, fast, price, vol_ok, indicators, atr_pct)
     if params.family == "mean_reversion":
@@ -310,11 +390,12 @@ STRATEGIES = {
     STRATEGY_NAME: {
         "version": STRATEGY_VERSION,
         "label": "Tendance SMA, momentum, retour à la moyenne ou cassure + filtre ATR (expérimentales, non validées)",
-        "description": ("Quatre familles. Tendance SMA : ACHAT si la moyenne rapide est au-dessus de la lente, VENTE "
+        "description": ("Six familles. Tendance SMA : ACHAT si la moyenne rapide est au-dessus de la lente, VENTE "
                         "au-dessous. Momentum : ACHAT si le cours a monté sur la période lente et reste au-dessus de "
                         "la moyenne rapide, VENTE à l'inverse. Retour à la moyenne : ACHAT si le cours est à plus de "
                         "z écarts-types sous la moyenne lente, VENTE au-dessus. Cassure : ACHAT au-dessus du plus haut du canal "
-                        "des bougies lentes précédentes, VENTE au-dessous du plus bas. AUCUNE POSITION si la volatilité "
+                        "des bougies lentes précédentes, VENTE au-dessous du plus bas. Force relative des devises : "
+                        "suit la devise la plus forte contre le panier (ou fait l'inverse). AUCUNE POSITION si la volatilité "
                         "(ATR/prix) sort de la plage. Aucune performance n'est démontrée."),
         "params": asdict(StrategyParams()),
     },
@@ -354,6 +435,7 @@ class Engine:
 
     def __init__(self, strategy: StrategyParams, risk: RiskParams, costs: CostParams, state: dict[str, Any] | None = None):
         self.strategy, self.risk, self.costs = strategy, risk, costs
+        self.peers: PeerPrices | None = None
         self.state = state or {
             "cash": risk.initial_capital, "positions": {}, "pending": {}, "last_decision": {},
             "peak_equity": risk.initial_capital, "equity": risk.initial_capital, "day": None,
@@ -506,7 +588,7 @@ class Engine:
                                           " entrées bloquées jusqu'au prochain jour UTC"})
         rec.equity.append((_iso(ts), round(equity, 4)))
         # 4. decision at the close, executed at the next open
-        decision = decide(history, self.strategy)
+        decision = decide(history, self.strategy, self.peers)
         if decision is None:
             return
         previous = s["last_decision"].get(symbol)
@@ -831,6 +913,9 @@ class LabStore:
                     history = [*history[-(engine.strategy.warmup + 2):], candle]
                     work.append((candle.timestamp, candle, history))
             work.sort(key=lambda item: (item[0], item[1].symbol))
+            if work and engine.strategy.family in CROSS_FAMILIES:
+                engine.peers = PeerPrices.load(candles_store, row["timeframe"], row["source"],
+                                               min(h[0].timestamp for _, _, h in work), max(w[0] for w in work))
             rec = Recorder()
             for _, candle, history in work[:max_bars]:
                 engine.process(candle, history, rec)
@@ -912,6 +997,8 @@ def run_backtest(candles_store: CandleStore, request: dict[str, Any]) -> dict[st
     warm = candles_store.candles(sym, tf, src, end=period[0].timestamp, limit=strategy.warmup + 1, newest=True)
     warm = [c for c in warm if c.timestamp < period[0].timestamp]
     engine, rec = Engine(strategy, risk, costs), Recorder()
+    if strategy.family in CROSS_FAMILIES:
+        engine.peers = PeerPrices.load(candles_store, tf, src, (warm or period)[0].timestamp, period[-1].timestamp)
     history: list[Candle] = list(warm)
     for candle in period:
         history.append(candle)
@@ -926,6 +1013,9 @@ def run_backtest(candles_store: CandleStore, request: dict[str, Any]) -> dict[st
     gaps = find_gaps([c.timestamp for c in period], tf)
     data_nature = (candles_store.source(src) or {}).get("nature") or "UNKNOWN"
     assumptions = list(ASSUMPTIONS)
+    if strategy.family in CROSS_FAMILIES:
+        assumptions.append("Cette stratégie compare les devises entre elles : elle lit aussi les prix des autres paires "
+                           "de la même source, aux mêmes instants.")
     if KIND_REFERENCE in natures:
         assumptions.append(REFERENCE_ASSUMPTION)
     if data_nature == "SYNTHETIC":
