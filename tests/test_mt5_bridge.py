@@ -323,7 +323,7 @@ class BridgeTests(unittest.TestCase):
         self.fake.mode = "lost_nothing"
         self.assertEqual([a["kind"] for a in self.bridge.cycle()["actions"]], ["order_unknown"])
         self.fake.mode = "ok"
-        status, message, _ = self.ask(kind="order", symbol="EURUSD", side="LONG", stop_pips=60.0)
+        status, _, _ = self.ask(kind="order", symbol="EURUSD", side="LONG", stop_pips=60.0)
         self.assertEqual(status, "REFUSE")
         self.assertEqual(len(self.fake.sent), 1)  # nothing new left
 
