@@ -56,6 +56,18 @@ class FakeMt5:
     def symbol_select(self, symbol, enable):
         return True
 
+    symbols = "default"
+
+    def symbols_get(self, *args, **kwargs):
+        if self.symbols is None:
+            return None
+        if self.symbols != "default":
+            return self.symbols
+        return tuple(SimpleNamespace(name=n, path=p, description=n, trade_contract_size=c, currency_base=n[:3],
+                                     currency_profit="USD", currency_margin=n[:3], digits=5, volume_min=0.01,
+                                     volume_max=100.0, volume_step=0.01, trade_mode=4, spread=10)
+                     for n, p, c in (("EURUSD", "Forex\\Majors\\EURUSD", 100000.0), ("BTCUSD", "Crypto\\BTCUSD", 1.0)))
+
     def copy_rates_from_pos(self, symbol, timeframe, start, count):
         self.calls.append((symbol, timeframe, start, count))
         return self.rates
@@ -96,6 +108,19 @@ class Mt5DemoTests(unittest.TestCase):
                          [datetime(2025, 12, 15, 8, tzinfo=UTC), datetime(2026, 7, 15, 7, tzinfo=UTC)])  # UTC+2, UTC+3
         with mt5_demo.Mt5DemoFeed(module=FakeMt5()) as feed, self.assertRaises(mt5_demo.Mt5DemoError):
             feed.candles("EURUSD", "M1", 2)
+
+    def test_the_catalogue_lists_every_instrument_read_only_and_refuses_an_unreadable_list(self):
+        fake = FakeMt5()
+        with mt5_demo.Mt5DemoFeed(module=fake) as feed:
+            items = feed.catalogue()
+        self.assertEqual([(i["name"], i["group"], i["contract_size"]) for i in items],
+                         [("EURUSD", "Forex", 100000.0), ("BTCUSD", "Crypto", 1.0)])
+        self.assertEqual(items[0]["path"], "Forex\\Majors\\EURUSD")
+        self.assertEqual(fake.calls, [])  # nothing was selected, subscribed or traded
+        silent = FakeMt5()
+        silent.symbols = None  # the terminal cannot list: an error, never an empty catalogue taken for the truth
+        with mt5_demo.Mt5DemoFeed(module=silent) as feed, self.assertRaises(mt5_demo.Mt5DemoError):
+            feed.catalogue()
 
     def test_csv_imports_unchanged_into_the_candle_store(self):
         with mt5_demo.Mt5DemoFeed(module=FakeMt5()) as feed:

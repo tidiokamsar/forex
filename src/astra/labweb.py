@@ -359,6 +359,25 @@ def register_lab_routes(app: Flask, *, database: Path, import_dir: Path, require
 
         return answer(produce)
 
+    @app.post("/api/mt5/instruments")
+    @require(WebRole.OPERATOR)
+    def mt5_instruments() -> Response:
+        if g.get("agent") is None:
+            return error(403, "forbidden")
+
+        def produce() -> dict[str, Any]:
+            try:
+                return mt5_view.record_instruments(request.get_json(silent=True))
+            except mt5view.Mt5ViewError as exc:
+                raise MarketDataError(str(exc)) from exc
+
+        return answer(produce)
+
+    @app.get("/api/mt5/instruments")
+    @require(WebRole.READ_ONLY)
+    def mt5_instruments_summary() -> Response:
+        return answer(mt5_view.instruments_summary)
+
     @app.post("/api/mt5/history")
     @require(WebRole.OPERATOR)
     def mt5_history() -> Response:

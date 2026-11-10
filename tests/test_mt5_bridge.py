@@ -533,6 +533,32 @@ class BridgeTests(unittest.TestCase):
         self.server.fail_pending = False
         self.assertEqual(self.ask(kind="teleport")[0], "REFUSE")
 
+    def test_the_catalogue_goes_to_the_server_in_small_posts_once_a_day_and_a_failure_never_stops_the_flow(self):
+        from types import SimpleNamespace
+
+        many = tuple(SimpleNamespace(name=f"SYM{i}", path=f"Stocks\\SYM{i}", description="x", trade_contract_size=1.0,
+                                     currency_base="USD", currency_profit="USD", currency_margin="USD", digits=2,
+                                     volume_min=1.0, volume_max=100.0, volume_step=1.0, trade_mode=4, spread=5)
+                     for i in range(170))
+        self.fake.symbols = many
+        with self.bridge.trader:
+            self.assertEqual(self.bridge.sync_catalogue(), {"instruments": 170})
+        posts = [b for p, b in self.server.posts if p == "/api/mt5/instruments"]
+        self.assertEqual([len(b["items"]) for b in posts], [80, 80, 10])  # under the proxy's body limit
+        self.assertEqual({b["server"] for b in posts}, {"MetaQuotes-Demo"})
+        self.server.posts.clear()
+        clock = {"t": 0.0}
+        self.bridge.flow(300, lambda: clock["t"], lambda s: clock.update(t=clock["t"] + 5), rounds=4)
+        self.assertEqual(sum(1 for p, _ in self.server.posts if p == "/api/mt5/instruments") > 0, True)
+        first = sum(1 for p, _ in self.server.posts if p == "/api/mt5/instruments")
+        self.assertEqual(first, 3)  # once in the first rounds, not again within the day
+        self.fake.symbols = None  # an unreadable list at the next due time
+        self.server.posts.clear()
+        self.bridge.flow(300, lambda: clock["t"] + 90_000, lambda s: clock.update(t=clock["t"] + 5), rounds=2)
+        self.assertEqual(sum(1 for p, _ in self.server.posts if p == "/api/mt5/quotes"), 2)  # the stream went on
+        journal = (self.dir / "journal-2026-10-29.jsonl").read_text(encoding="utf-8")
+        self.assertIn("catalogue_failed", journal)
+
     def test_flow_keeps_one_connection_and_trades_only_when_the_cycle_is_due(self):
         clock = {"t": 0.0}
         self.bridge.flow(300, lambda: clock["t"], lambda s: clock.update(t=clock["t"] + 5), rounds=3)

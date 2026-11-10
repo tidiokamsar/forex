@@ -25,6 +25,7 @@ MAX_CANDLES = 2000
 ASTRA_MAGIC = 20261028  # the magic number of ASTRA's orders (same value as brokers.mt5_demo_orders.MAGIC, tested)
 MANUAL_MAGIC = 20261029  # orders placed from the site (same value as brokers.mt5_demo_orders.MAGIC_MANUAL, tested)
 MAX_HISTORY_ITEMS = 120
+MAX_INSTRUMENT_ITEMS = 100  # per post: well under the proxy's 64 KB body limit
 MAX_PANEL_BYTES = 16_000
 REQUEST_KINDS = ("pause", "resume", "close", "order", "modify_sl")
 REQUEST_STATUSES = ("EN_ATTENTE", "EXECUTE", "REFUSE", "ECHEC", "EXPIRE")
@@ -61,6 +62,11 @@ CREATE TABLE IF NOT EXISTS mt5_orders (
     ticket INTEGER PRIMARY KEY, position_id INTEGER NOT NULL, ts TEXT NOT NULL, symbol TEXT NOT NULL, type INTEGER NOT NULL,
     state INTEGER NOT NULL, volume REAL NOT NULL, magic INTEGER NOT NULL, comment TEXT NOT NULL, received_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS mt5_sync (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS mt5_instruments (
+    server TEXT NOT NULL, name TEXT NOT NULL, grp TEXT NOT NULL, path TEXT NOT NULL, description TEXT NOT NULL,
+    contract_size REAL NOT NULL, currency_base TEXT NOT NULL, currency_profit TEXT NOT NULL, currency_margin TEXT NOT NULL,
+    digits INTEGER NOT NULL, volume_min REAL NOT NULL, volume_max REAL NOT NULL, volume_step REAL NOT NULL,
+    trade_mode INTEGER NOT NULL, spread INTEGER NOT NULL, received_at TEXT NOT NULL, PRIMARY KEY (server, name));
 CREATE TABLE IF NOT EXISTS mt5_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, actor TEXT NOT NULL, kind TEXT NOT NULL, params_json TEXT NOT NULL,
     status TEXT NOT NULL, result_json TEXT, finished_at TEXT);
@@ -314,6 +320,55 @@ class Mt5View:
                 for r in rows}
 
     # -- broker history ---------------------------------------------------------------------------------
+
+    def record_instruments(self, payload: Any) -> dict[str, int]:
+        """Instruments the broker lists for the account's server (idempotent, keyed by server and name)."""
+
+        if not isinstance(payload, dict):
+            raise Mt5ViewError("corps JSON attendu")
+        server = payload.get("server") if isinstance(payload.get("server"), str) else ""
+        source_name(server)  # allowed server only
+        items = payload.get("items")
+        if not isinstance(items, list) or not items or len(items) > MAX_INSTRUMENT_ITEMS:
+            raise Mt5ViewError(f"items : liste de 1 à {MAX_INSTRUMENT_ITEMS} instruments")
+        rows = []
+        for item in items:
+            if not isinstance(item, dict) or not isinstance(item.get("name"), str) or not 1 <= len(item["name"]) <= 24:
+                raise Mt5ViewError("instrument invalide")
+            text = {k: str(item.get(k) or "")[:limit] for k, limit in (("group", 40), ("path", 120), ("description", 80),
+                                                                       ("currency_base", 8), ("currency_profit", 8),
+                                                                       ("currency_margin", 8))}
+            rows.append((server, item["name"], text["group"] or "?", text["path"], text["description"],
+                         _number(item.get("contract_size"), "contract_size"), text["currency_base"], text["currency_profit"],
+                         text["currency_margin"], int(_number(item.get("digits"), "digits")),
+                         _number(item.get("volume_min"), "volume_min"), _number(item.get("volume_max"), "volume_max"),
+                         _number(item.get("volume_step"), "volume_step"), int(_number(item.get("trade_mode"), "trade_mode")),
+                         int(_number(item.get("spread"), "spread"))))
+        now = _now().isoformat()
+        with self._connect() as db:
+            for row in rows:
+                db.execute("INSERT OR REPLACE INTO mt5_instruments VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (*row, now))
+            db.execute("INSERT OR REPLACE INTO mt5_sync(key, value) VALUES ('instruments_synced_at', ?)", (now,))
+        return {"stored": len(rows)}
+
+    def instruments_summary(self, sample: int = 8) -> dict[str, Any]:
+        """What the broker lists, by group, with a few names and the contract sizes seen: the answer to "which markets?"."""
+
+        with self._connect() as db:
+            rows = db.execute("SELECT name, grp, contract_size, trade_mode FROM mt5_instruments ORDER BY grp, name").fetchall()
+            synced = db.execute("SELECT value FROM mt5_sync WHERE key = 'instruments_synced_at'").fetchone()
+        groups: dict[str, dict[str, Any]] = {}
+        for r in rows:
+            entry = groups.setdefault(r["grp"], {"count": 0, "tradable": 0, "examples": [], "contract_sizes": set()})
+            entry["count"] += 1
+            entry["tradable"] += 1 if r["trade_mode"] == 4 else 0  # SYMBOL_TRADE_MODE_FULL
+            entry["contract_sizes"].add(r["contract_size"])
+            if len(entry["examples"]) < sample:
+                entry["examples"].append(r["name"])
+        for entry in groups.values():
+            entry["contract_sizes"] = sorted(entry["contract_sizes"])[:6]
+        return {"synced_at": synced["value"] if synced else None, "total": len(rows),
+                "groups": dict(sorted(groups.items(), key=lambda kv: -kv[1]["count"]))}
 
     def record_history(self, payload: Any) -> dict[str, int]:
         """Deals and orders as the broker reports them, keyed by the broker's tickets (idempotent)."""

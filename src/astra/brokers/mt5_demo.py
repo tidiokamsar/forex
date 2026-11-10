@@ -144,6 +144,30 @@ class Mt5DemoFeed:
             out.append({"symbol": symbol, "bid": float(tick.bid), "ask": float(tick.ask), "time": stamp})
         return out
 
+    def catalogue(self) -> list[dict[str, Any]]:
+        """Every instrument the DEMO account's server lists, read only: group, contract size, currencies, volume rules.
+
+        Nothing is selected, subscribed or traded. The terminal answers None when it cannot list: that is an error,
+        never an empty catalogue taken for the truth."""
+
+        symbols = self.mt5.symbols_get()
+        if symbols is None:
+            raise Mt5DemoError(f"liste des symboles indisponible : {self.mt5.last_error()}")
+        out = []
+        for s in symbols:
+            path = str(getattr(s, "path", "") or "")
+            out.append({"name": str(s.name)[:24], "path": path[:120], "group": (path.split("\\")[0] or "?")[:40],
+                        "description": str(getattr(s, "description", "") or "")[:80],
+                        "contract_size": float(getattr(s, "trade_contract_size", 0) or 0),
+                        "currency_base": str(getattr(s, "currency_base", "") or "")[:8],
+                        "currency_profit": str(getattr(s, "currency_profit", "") or "")[:8],
+                        "currency_margin": str(getattr(s, "currency_margin", "") or "")[:8],
+                        "digits": int(getattr(s, "digits", 0) or 0), "volume_min": float(getattr(s, "volume_min", 0) or 0),
+                        "volume_max": float(getattr(s, "volume_max", 0) or 0),
+                        "volume_step": float(getattr(s, "volume_step", 0) or 0),
+                        "trade_mode": int(getattr(s, "trade_mode", 0) or 0), "spread": int(getattr(s, "spread", 0) or 0)})
+        return out
+
     def _deal(self, d: Any) -> dict[str, Any]:
         return {"ticket": int(d.ticket), "order": int(d.order), "position_id": int(d.position_id), "ts": self._utc(d.time),
                 "symbol": d.symbol or "", "type": int(d.type), "entry": int(d.entry), "volume": float(d.volume),

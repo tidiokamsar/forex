@@ -49,6 +49,8 @@ DEFAULT_INTERVAL_SECONDS = 300
 CONTROLS_CACHE_SECONDS = 15
 INTENT_GRACE_SECONDS = 120   # after an unknown outcome, look for the position this long before concluding "not executed"
 INTENTS_KEPT = 40
+CATALOGUE_SECONDS = 24 * 3600   # the instrument catalogue is read once a day (it changes rarely)
+CATALOGUE_RETRY_SECONDS = 3600  # and again an hour later when sending failed
 HANDLED_KEPT = 50  # site requests remembered: a request is executed once, whatever happens to its answer
 BLOCKING_ALERTS = ("positions_multiples", "position_sans_stop")  # reconciliation alerts that freeze new entries
 PENDING = ("SOUMIS", "INCONNU")  # intention states that still block a new attempt on the same pair
@@ -532,6 +534,16 @@ class Bridge:
         except (ApiError, OSError) as exc:
             self.note("publish_failed", reason=str(exc)[:200])
 
+    def sync_catalogue(self) -> dict[str, int]:
+        """Read the instruments of the DEMO account's server and send them in small posts (the proxy refuses large bodies).
+        Read only: nothing is subscribed or traded."""
+
+        items = self.trader.catalogue()
+        server = self.trader.account["server"]
+        for start in range(0, len(items), ITEMS_PER_POST):
+            self.client.post("/api/mt5/instruments", {"server": server, "items": items[start:start + ITEMS_PER_POST]})
+        return {"instruments": len(items)}
+
     def stream(self) -> dict[str, int]:
         """Continuous flow: quotes, account figures and open positions, without trading."""
 
@@ -577,7 +589,7 @@ class Bridge:
         """One connection to the terminal, kept open: the stream every few seconds, the trading cycle every
         ``cycle_seconds``, candles every minute (fast timeframes) and ten minutes (slow ones)."""
 
-        next_cycle = next_fast = next_slow = next_history = 0.0
+        next_cycle = next_fast = next_slow = next_history = next_catalogue = 0.0
         first = True
         with self.trader:
             done = 0
@@ -599,6 +611,13 @@ class Bridge:
                     except (ApiError, OSError) as exc:
                         self.note("history_failed", reason=str(exc)[:160])
                     next_history = started + HISTORY_SECONDS
+                if started >= next_catalogue:
+                    try:
+                        self.note("catalogue", **self.sync_catalogue())
+                        next_catalogue = started + CATALOGUE_SECONDS
+                    except (ApiError, OSError, Mt5DemoError) as exc:
+                        self.note("catalogue_failed", reason=str(exc)[:160])
+                        next_catalogue = started + CATALOGUE_RETRY_SECONDS
                 if started >= next_fast:
                     self.push_candles(("M5", "M15"), recent=True)
                     next_fast = started + FAST_CANDLES_SECONDS
