@@ -476,7 +476,9 @@ class Engine:
 
     def _rates_ready(self, symbol: str) -> bool:
         spec = INSTRUMENTS[symbol]
-        return all(self._rate(c) for c in (spec.base, spec.quote) if c != "USD" and spec.kind == "forex")
+        if spec.kind != "forex" or "USD" in (spec.base, spec.quote):
+            return True  # only a cross needs the dollar pairs to be converted
+        return all(self._rate(c) for c in (spec.base, spec.quote))
 
     def _usd(self, symbol: str, amount_quote: float, price: float) -> float:
         spec = INSTRUMENTS[symbol]

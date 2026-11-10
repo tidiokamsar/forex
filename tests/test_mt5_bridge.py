@@ -210,14 +210,33 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(self.fake.sent, [])
 
     def test_candles_go_to_the_server_in_utc_for_every_pair_and_timeframe(self):
+        from astra.marketdata import INSTRUMENTS, PAIRS
+
         with self.bridge.trader:
             count = self.bridge.push_candles(("M5", "H1"), recent=True)
         posts = [(b["symbol"], b["timeframe"]) for p, b in self.server.posts if p == "/api/mt5/candles"]
-        self.assertEqual(len(posts), 14)
-        self.assertEqual(count, 14 * 2)  # the fake terminal returns two bars
+        self.assertEqual({s for s, t in posts if t == "M5"}, set(PAIRS))  # fast bars: the tradable pairs only
+        self.assertEqual({s for s, t in posts if t == "H1"}, set(INSTRUMENTS))  # hourly bars: the research universe too
+        self.assertEqual(len(posts), len(PAIRS) + len(INSTRUMENTS))
+        self.assertEqual(count, len(posts) * 2)  # the fake terminal returns two bars
         body = next(b for p, b in self.server.posts if p == "/api/mt5/candles")
         self.assertEqual(body["server"], "MetaQuotes-Demo")
         self.assertEqual(body["candles"][0]["ts"], "2025-12-15T08:00:00+00:00")
+
+    def test_a_research_instrument_missing_at_the_broker_never_stops_the_flow_but_a_tradable_pair_must_answer(self):
+        from astra.brokers.mt5_demo import Mt5DemoError
+
+        self.fake.symbol_select = lambda symbol, enable: symbol != "XAUUSD"
+        with self.bridge.trader:
+            self.bridge.push_candles(("H1",), recent=True)
+        symbols = {b["symbol"] for p, b in self.server.posts if p == "/api/mt5/candles"}
+        self.assertNotIn("XAUUSD", symbols)
+        self.assertIn("EURGBP", symbols)  # the others went through
+        journal = (self.dir / "journal-2026-10-29.jsonl").read_text(encoding="utf-8")
+        self.assertIn("candles_unavailable", journal)
+        self.fake.symbol_select = lambda symbol, enable: symbol != "EURUSD"
+        with self.bridge.trader, self.assertRaises(Mt5DemoError):
+            self.bridge.push_candles(("H1",), recent=True)  # a tradable pair that does not answer is an error
 
     def test_a_large_backfill_is_sent_in_small_batches(self):
         self.fake.rates = [{**self.fake.rates[0], "time": self.fake.rates[0]["time"] + 3600 * i} for i in range(600)]
