@@ -86,3 +86,8 @@ Synthétique (tests unitaires et jeux de données de test) pour les corrections 
 ## 9. Prochaine action prioritaire
 
 Après approbation, déployer A et B, puis réaliser le Lot 3 (risque portefeuille : contrats vérifiés, limites par devise, gel sur échec de rapprochement) et la première étape de l'option retenue pour les promotions.
+
+## 10. Suite : déploiement approuvé et exécuté (2026-11-10)
+
+L'opérateur a approuvé le push et le déploiement des corrections A et B. Version en production : `970f128`. Contrôles faits après le déploiement : services web, worker, agent et pont actifs ; applications du serveur répondant ; cycles du pont normaux et aucune action inattendue dans le journal ; portail de risque publié avec tous ses contrôles réussis, dont `devise_du_compte` (compte en USD) ; les 2 positions existantes sont inchangées. L'échec de publication d'un instantané juste après le redémarrage est l'effet normal du redémarrage du site pendant le déploiement. Le risque listé en section 7 sur la version `915da73` est donc levé pour les défauts A et B ; les autres risques de la section 7 restent ouverts.
+
