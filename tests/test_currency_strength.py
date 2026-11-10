@@ -54,7 +54,7 @@ class StrengthMathTests(unittest.TestCase):
         move = 0.0295588  # ln(1.03)
         self.assertAlmostEqual(result["EUR"], move * 7 / 8, places=5)
         self.assertAlmostEqual(result["GBP"], -move / 8, places=5)
-        self.assertAlmostEqual(sum(result.values()) - result["EUR"], -move * 7 / 8, places=5)  # the dollar's share is the rest
+        self.assertAlmostEqual(sum(result.values()), move / 8, places=5)  # the dollar holds -move/8: the eight sum to zero
 
     def test_a_pair_with_the_dollar_first_gives_the_other_currency_the_opposite_move(self):
         result = currency_strengths(peers_with({"USDJPY": 1.03}), stamps(8)[4], stamps(8)[7])
