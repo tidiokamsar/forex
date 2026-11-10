@@ -103,6 +103,7 @@ class FakeServer:
         self.controls = {"entries_allowed": True, "kill_switch": {"active": False}}
         self.requests, self.results, self.fail_pending = [], [], False
         self.hourly_view = None
+        self.hourly_fail = False
 
     def __call__(self, method, path, body):
         if method == "POST":
@@ -117,6 +118,8 @@ class FakeServer:
         if path == "/api/controls":
             return 200, self.controls
         if path.startswith("/api/learn/overview?profile=H1"):
+            if self.hourly_fail:
+                return 503, {"error": "down"}
             return 200, self.hourly_view or {"pairs": []}
         return 200, self.status if path == "/api/status" else self.view
 
@@ -286,6 +289,33 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(self.fake.sent[0]["comment"], f"ASTRA:{intent['id']}")
         saved = json.loads((self.dir / "bridge-state.json").read_text(encoding="utf-8"))
         self.assertEqual(saved["intents"][intent["id"]]["status"], "EXECUTE")  # on disk, not only in memory
+
+    def test_an_hourly_read_failure_leaves_an_hourly_pair_alone_instead_of_closing_it(self):
+        hourly_short = {**SHORT, "entry_ts": "2026-10-29T08:00:00+00:00"}
+        daily_flat = {"pairs": [{"symbol": "EURUSD", "session": {"id": 1, "status": "RUNNING",
+                                                                  "account": {"positions": {}, "pending": {}}}}]}
+        self.server.view = daily_flat
+        self.server.hourly_view = {"pairs": [{"symbol": "EURUSD", "champion": {"version": 2, "run_id": 5},
+                                              "session": {"id": 2, "status": "RUNNING",
+                                                          "account": {"positions": {"EURUSD": hourly_short}, "pending": {}}}}]}
+        self.assertEqual([a["kind"] for a in self.bridge.cycle()["actions"]], ["open"])
+        self.server.hourly_fail = True  # a network incident on the hourly read: the daily view says "flat"
+        self.assertEqual(self.bridge.cycle()["actions"], [])
+        self.assertEqual(len(self.fake.open_positions), 1)  # still open
+        journal = (self.dir / "journal-2026-10-29.jsonl").read_text(encoding="utf-8")
+        self.assertIn("hourly_unavailable", journal)
+        self.server.hourly_fail = False
+        self.server.hourly_view = {"pairs": [{**self.server.hourly_view["pairs"][0], "session": {
+            "id": 2, "status": "RUNNING", "account": {"positions": {}, "pending": {}}}}]}  # the hourly pipeline is now flat
+        self.assertEqual([a["kind"] for a in self.bridge.cycle()["actions"]], ["close"])  # a real decision closes it
+
+    def test_the_gateway_sees_the_real_prices_and_currency_of_the_account(self):
+        with self.bridge.trader as trader:
+            self.bridge.cycle()
+            state = self.bridge.account_state(trader.refresh_account(), trader.positions())
+        self.assertEqual(state.currency, "USD")
+        self.assertTrue(state.positions)
+        self.assertTrue(all(p["price_open"] for p in state.positions))
 
     def test_a_probationary_champion_trades_at_half_the_usual_risk(self):
         from astra.mt5_bridge import risk_scale

@@ -10,7 +10,8 @@ from astra import mt5_risk
 from astra.mt5_risk import AccountState, OrderRequest, RiskConfigError, RiskLimits
 
 LIMITS = RiskLimits()
-ACCOUNT = AccountState(environment="DEMO", login=114765880, expected_login=114765880, equity=100_000.0, margin=5_000.0,
+ACCOUNT = AccountState(environment="DEMO", currency="USD", login=114765880, expected_login=114765880, equity=100_000.0,
+                       margin=5_000.0,
                        day_start_equity=100_000.0, peak_equity=100_000.0, positions=(), connector_ok=True,
                        algo_trading_enabled=True, entries_allowed_by_server=True, kill_switch_active=False)
 ORDER = OrderRequest(symbol="EURUSD", side="LONG", lots=0.83, loss_at_stop_usd=498.0, required_margin=900.0, bid=1.1,
@@ -89,6 +90,23 @@ class UsdExposureTests(unittest.TestCase):
 
     def held(self, *positions):
         return replace(ACCOUNT, positions=tuple({"price_open": 1.0, **p} for p in positions))
+
+    def test_a_position_is_valued_at_its_own_price_not_at_the_price_of_the_order(self):
+        # A EURUSD position at 1.10 next to a USDJPY order at 150: valuing it at 150 would multiply its weight by 136.
+        account = self.held({"symbol": "EURUSD", "side": "LONG", "volume": 2.0, "price_open": 1.10, "price_current": 1.10})
+        order = replace(ORDER, symbol="USDJPY", side="SHORT", bid=150.0, ask=150.02)
+        self.assertNotIn("exposition_nette_usd", failed(mt5_risk.evaluate_entry(account, order, LIMITS)))
+
+    def test_a_position_without_a_known_price_or_side_fails_closed(self):
+        for bad in ({"price_open": None, "price_current": None}, {"price_open": 0.0}, {"side": "?"}):
+            account = self.held({"symbol": "USDJPY", "side": "LONG", "volume": 1.0, **bad})
+            decision = mt5_risk.evaluate_entry(account, replace(ORDER, symbol="EURUSD"), LIMITS)
+            self.assertIn("exposition_nette_usd", failed(decision), bad)
+            self.assertFalse(decision.allowed)
+
+    def test_an_account_that_is_not_in_usd_is_refused(self):
+        self.assertIn("devise_du_compte", failed(mt5_risk.evaluate_entry(replace(ACCOUNT, currency="EUR"), ORDER, LIMITS)))
+        self.assertIn("devise_du_compte", failed(mt5_risk.evaluate_entry(replace(ACCOUNT, currency=None), ORDER, LIMITS)))
 
     def test_an_entry_that_piles_onto_the_same_side_of_the_dollar_is_refused(self):
         account = self.held({"symbol": "USDJPY", "side": "LONG", "volume": 2.0}, {"symbol": "USDCAD", "side": "LONG", "volume": 2.0})

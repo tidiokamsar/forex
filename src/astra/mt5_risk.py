@@ -21,6 +21,7 @@ from typing import Any
 from .marketdata import PAIRS, pip_size
 
 LIMITS_VERSION = "1"
+CONTRACT_SIZE = 100_000  # standard Forex lot; assumed for every allowed pair, not yet read from the broker's specifications
 
 
 class RiskConfigError(ValueError):
@@ -113,6 +114,7 @@ class AccountState:
     positions: tuple[dict[str, Any], ...] = ()          # ASTRA's positions: symbol, side, volume
     connector_ok: bool = False
     algo_trading_enabled: bool | None = None
+    currency: str | None = None                          # account currency: the exposure maths below assumes USD
     entries_allowed_by_server: bool | None = None        # /api/controls: kill switch and entry freezes
     kill_switch_active: bool | None = None
 
@@ -168,6 +170,8 @@ def account_checks(account: AccountState, limits: RiskLimits | RiskConfigError) 
     out = [Check("profil_de_risque", True, f"profil v{LIMITS_VERSION} valide")]
     out.append(Check("environnement_demo", account.environment == "DEMO",
                      "compte DEMO confirmé" if account.environment == "DEMO" else f"environnement {account.environment!r}"))
+    out.append(Check("devise_du_compte", account.currency == "USD",
+                     "compte en USD" if account.currency == "USD" else f"devise {account.currency!r} : calculs prévus pour l'USD"))
     pinned = account.expected_login is not None and account.login == account.expected_login
     out.append(Check("compte_autorise", pinned, "compte attendu" if pinned else f"compte {account.login} non autorisé"))
     out.append(Check("connecteur", account.connector_ok and account.algo_trading_enabled is True,
@@ -198,7 +202,9 @@ def account_checks(account: AccountState, limits: RiskLimits | RiskConfigError) 
 def usd_exposure(symbol: str, side: str, lots: float, price: float) -> float:
     """Signed USD notional: positive when the position is long the dollar. Zero for a pair without the dollar."""
 
-    notional = lots * 100_000
+    if side not in ("LONG", "SHORT"):
+        raise ValueError(f"sens inconnu : {side!r}")
+    notional = lots * CONTRACT_SIZE
     if symbol.startswith("USD"):
         return notional if side == "LONG" else -notional
     if symbol.endswith("USD"):
@@ -240,17 +246,22 @@ def order_checks(account: AccountState, order: OrderRequest, limits: RiskLimits)
     else:
         out.append(Check("marge", False, "marge requise inconnue"))
     if _ok(account.equity) and account.equity > 0 and _ok(order.bid) and _ok(order.ask):
-        def priced(p: dict[str, Any]) -> float:
-            value = p.get("price_current") or p.get("price_open")
-            return float(value) if _ok(value) else (order.bid + order.ask) / 2
-
-        before = sum(usd_exposure(str(p.get("symbol")), str(p.get("side")), float(p.get("volume", 0) or 0), priced(p))
-                     for p in account.positions)
-        after = before + usd_exposure(order.symbol, order.side, order.lots, (order.bid + order.ask) / 2)
-        cap = limits.max_net_usd_exposure_x * account.equity
-        out.append(Check("exposition_nette_usd", abs(after) <= cap or abs(after) <= abs(before),
-                         f"exposition nette au dollar après l'ordre {after / account.equity:+.2f}x les fonds propres "
-                         f"(maximum {limits.max_net_usd_exposure_x}x)"))
+        try:
+            exposures = []
+            for p in account.positions:
+                price = p.get("price_current") or p.get("price_open")
+                if not _ok(price) or price <= 0:
+                    raise ValueError(f"prix inconnu pour {p.get('symbol')}")
+                exposures.append(usd_exposure(str(p.get("symbol")), str(p.get("side")), float(p.get("volume", 0) or 0), price))
+            before = sum(exposures)
+            after = before + usd_exposure(order.symbol, order.side, order.lots, (order.bid + order.ask) / 2)
+        except (ValueError, TypeError) as exc:
+            out.append(Check("exposition_nette_usd", False, f"exposition non calculable ({exc}) : entrée refusée"))
+        else:
+            cap = limits.max_net_usd_exposure_x * account.equity
+            out.append(Check("exposition_nette_usd", abs(after) <= cap or abs(after) <= abs(before),
+                             f"exposition nette au dollar après l'ordre {after / account.equity:+.2f}x les fonds propres "
+                             f"(maximum {limits.max_net_usd_exposure_x}x)"))
     else:
         out.append(Check("exposition_nette_usd", False, "fonds propres ou cotation inconnus"))
     same = sum(1 for p in account.positions if p.get("symbol") == order.symbol)

@@ -136,6 +136,7 @@ class Bridge:
         self.state_path = workdir / "bridge-state.json"
         self.state = json.loads(self.state_path.read_text(encoding="utf-8")) if self.state_path.exists() else {}
         self.state.setdefault("mirrored", {})
+        self.state.setdefault("profiles", {})  # which pipeline decided each pair at the last good read
         self.state.setdefault("last_refusal", {})
         self.state.setdefault("intents", {})
         self.targets: dict[str, dict[str, Any]] = {}
@@ -184,8 +185,10 @@ class Bridge:
         return AccountState(
             environment=account.get("environment"), login=account.get("login"), expected_login=self.trader.expected_login,
             equity=account["equity"], margin=account.get("margin"), day_start_equity=self.state["day_start_equity"],
-            peak_equity=self.state["peak_equity"], positions=tuple({"symbol": p.symbol, "side": p.side, "volume": p.volume}
-                                                                    for p in positions if p.magic in (MAGIC, MAGIC_MANUAL)),
+            peak_equity=self.state["peak_equity"],
+            positions=tuple({"symbol": p.symbol, "side": p.side, "volume": p.volume, "price_open": p.price_open,
+                             "price_current": p.price_current} for p in positions if p.magic in (MAGIC, MAGIC_MANUAL)),
+            currency=account.get("currency"),
             connector_ok=bool(account.get("terminal_connected", True)),
             algo_trading_enabled=account.get("algo_trading_enabled"), entries_allowed_by_server=allowed,
             kill_switch_active=kill)
@@ -420,12 +423,22 @@ class Bridge:
         try:
             hourly = self.client.get("/api/learn/overview", profile="H1")
         except ApiError:
-            hourly = None  # the hourly pipeline is optional: the daily one keeps deciding
+            hourly = None
         chosen = active_pairs(daily, hourly)
         wanted = targets({"pairs": chosen})
         for pair in chosen:
             wanted[pair["symbol"]]["profile"] = pair["profile"]
         self.targets = wanted
+        held: set[str] = set()
+        if hourly is None:
+            # Without the hourly read, a pair the hourly pipeline was deciding must not fall back to the daily one and be
+            # closed because of a network incident: its positions are left alone until the read works again.
+            held = {symbol for symbol, profile in self.state["profiles"].items() if profile == "H1"}
+            if held:
+                self.note("hourly_unavailable", reason="lecture H1 indisponible : paires laissées telles quelles",
+                          symbols=sorted(held))
+        else:
+            self.state["profiles"] = {pair["symbol"]: pair["profile"] for pair in chosen}
         actions: list[dict[str, Any]] = []
         with self.trader as trader:
             account = trader.refresh_account()
@@ -434,6 +447,8 @@ class Bridge:
                 actions.append({"kind": "intent_resolved", "symbol": settled["symbol"], "side": settled["side"],
                                 "reason": f"{settled['status']} : {settled['resolved']}"})
             for symbol, target in sorted(wanted.items()):
+                if symbol in held:
+                    continue
                 mine = [p for p in positions if p.astra and p.symbol == symbol]
                 close_failed = False
                 for p in mine:
