@@ -81,8 +81,8 @@ class GatewayTests(unittest.TestCase):
 
 class UsdExposureTests(unittest.TestCase):
     def test_signs_follow_the_side_of_the_dollar(self):
-        self.assertEqual(mt5_risk.usd_exposure("EURUSD", "LONG", 1, 1.1), -110_000)
-        self.assertEqual(mt5_risk.usd_exposure("EURUSD", "SHORT", 1, 1.1), 110_000)
+        self.assertAlmostEqual(mt5_risk.usd_exposure("EURUSD", "LONG", 1, 1.1), -110_000, places=3)
+        self.assertAlmostEqual(mt5_risk.usd_exposure("EURUSD", "SHORT", 1, 1.1), 110_000, places=3)
         self.assertEqual(mt5_risk.usd_exposure("USDJPY", "LONG", 2, 150), 200_000)
         self.assertEqual(mt5_risk.usd_exposure("USDJPY", "SHORT", 2, 150), -200_000)
         self.assertEqual(mt5_risk.usd_exposure("EURGBP", "LONG", 1, 0.85), 0.0)
