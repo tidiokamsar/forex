@@ -90,6 +90,33 @@ class UnitTests(LearningCase):
                                                           "check": pick, "stress": pick})):
             self.assertIn("drawdown", learning.learn(self.candles, self.store, "EURUSD")["reason"])
 
+    def test_a_stress_test_that_cannot_be_evaluated_refuses_the_promotion_instead_of_failing(self):
+        good = {"windows": 1, "score": 3.0, "trades": 50, "worst_drawdown_pct": 5.0, "net_pnl": 500.0}
+        champ = {"windows": 1, "score": 1.0, "trades": 50, "worst_drawdown_pct": 5.0, "net_pnl": 100.0}
+        empty = {"windows": 0, "score": None, "trades": 0, "window_errors": 3, "first_error": "spread hors limites"}
+
+        def evaluate(candles, symbol, params, windows, cost_factor=1.0, purpose="selection", profile=None, **_):
+            if purpose == "cost_stress":
+                return dict(empty)
+            return dict(champ if params == self.store.champion("EURUSD")["params"] else good)
+
+        with mock.patch.object(learning, "evaluate", evaluate):
+            result = learning.learn(self.candles, self.store, "EURUSD")
+        self.assertEqual(result["decision"], "KEPT")
+        self.assertIn("aucune fenêtre évaluable", result["reason"])
+        self.assertIn("spread hors limites", result["reason"])
+
+    def test_windows_that_cannot_be_simulated_are_reported(self):
+        params = learning.default_params()
+        series = self.candles.candles("EURUSD", "D1", "ECB_EXR")
+        window = [(series[-300].timestamp, series[-50].timestamp)]
+        result = learning.evaluate(self.candles, "EURUSD", params, window, cost_factor=10_000.0)  # absurd costs
+        self.assertEqual((result["windows"], result["window_errors"]), (0, 1))
+        self.assertIn("spread", result["first_error"])
+        normal = learning.evaluate(self.candles, "EURUSD", params, window)
+        self.assertEqual(normal["windows"], 1)
+        self.assertNotIn("window_errors", normal)
+
     def test_a_promotion_reaches_the_observation_account_and_never_the_demo_feed_until_a_person_authorizes_it(self):
         created = learning.ensure_managed_sessions(self.candles, self.store, self.lab)
         self.assertEqual(len(created), 1)  # only EURUSD has data here

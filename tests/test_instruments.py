@@ -204,6 +204,7 @@ class BacktestAndLearningTests(unittest.TestCase):
         self.assertEqual((gold["costs"]["spread_pips"], gold["costs"]["slippage_pips"]), (30.0, 5.0))
         stressed = learning._request("XAUUSD", params, *window, cost_factor=2.0)
         self.assertEqual(stressed["costs"]["spread_pips"], 60.0)
+        _build(CostParams, stressed["costs"])  # the doubled costs of a metal are still valid (they once exceeded a Forex bound)
         euro = learning._request("EURUSD", params, *window)
         self.assertEqual((euro["costs"]["spread_pips"], euro["costs"]["slippage_pips"]), (1.0, 0.2))  # unchanged for the 7
 

@@ -341,11 +341,12 @@ def evaluate(candles: CandleStore, symbol: str, params: dict[str, Any], windows:
 
     ``purpose`` (selection, final_check, cost_stress) only labels the result."""
 
-    yearly, trades, worst_dd, net, returns = [], 0, 0.0, 0.0, []
+    yearly, trades, worst_dd, net, returns, errors = [], 0, 0.0, 0.0, [], []
     for start, end in windows:
         try:
             result = run_backtest(candles, _request(symbol, params, start, end, cost_factor, profile))
-        except SimulationError:
+        except SimulationError as exc:
+            errors.append(str(exc))  # a window that cannot be simulated is reported, never silently dropped
             continue
         m = result["metrics"]
         yearly.append(m["net_pnl"] / m["initial_capital"] * 100)
@@ -353,14 +354,15 @@ def evaluate(candles: CandleStore, symbol: str, params: dict[str, Any], windows:
         returns += [t["net_pnl"] / m["initial_capital"] for t in result["trades"]]
         worst_dd = max(worst_dd, m["max_drawdown_pct"])
         net += m["net_pnl"]
+    failures = {"window_errors": len(errors), "first_error": errors[0][:160]} if errors else {}
     if not yearly:
-        return {"purpose": purpose, "windows": 0, "score": None, "trades": 0}
+        return {"purpose": purpose, "windows": 0, "score": None, "trades": 0, **failures}
     mean = sum(yearly) / len(yearly)
     return {"purpose": purpose, "windows": len(yearly), "mean_return_pct": round(mean, 3),
             "worst_drawdown_pct": round(worst_dd, 3),
             "trades": trades, "net_pnl": round(net, 2), "positive_windows": sum(1 for y in yearly if y > 0),
             "score": round(mean - 0.5 * worst_dd, 3) if trades >= profile.min_trades else None,
-            "yearly_returns_pct": [round(y, 3) for y in yearly],
+            "yearly_returns_pct": [round(y, 3) for y in yearly], **failures,
             **({"returns": returns} if keep_returns else {})}
 
 
@@ -663,6 +665,9 @@ def learn(candles: CandleStore, store: LearningStore, symbol: str) -> dict[str, 
                     reason = "résultat net du candidat négatif sur la période de contrôle finale"
                 elif final_champ["windows"] and final_best["net_pnl"] < final_champ["net_pnl"]:
                     reason = "candidat moins bon que le champion sur la période de contrôle finale"
+                elif stressed["windows"] == 0:
+                    reason = ("coûts doublés : aucune fenêtre évaluable"
+                              + (f" ({stressed['first_error']})" if stressed.get("first_error") else ""))
                 elif stressed["net_pnl"] <= 0:
                     reason = "résultat net négatif avec des coûts doublés"
                 else:

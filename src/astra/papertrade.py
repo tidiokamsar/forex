@@ -154,10 +154,11 @@ class CostParams:
     commission_per_100k: float = 0.0        # USD per side per 100 000 units
 
     def validate(self) -> None:
-        if not 0 <= self.spread_pips <= 50:
-            raise SimulationError("spread entre 0 et 50 pips")
-        if not 0 <= self.slippage_pips <= 20:
-            raise SimulationError("slippage entre 0 et 20 pips par côté")
+        # In pips of the instrument: a pip of gold is 0.01 USD, so its spread counts in tens of pips (doubled in the stress test).
+        if not 0 <= self.spread_pips <= 500:
+            raise SimulationError("spread entre 0 et 500 pips")
+        if not 0 <= self.slippage_pips <= 200:
+            raise SimulationError("slippage entre 0 et 200 pips par côté")
         if not 0 <= self.commission_per_100k <= 100:
             raise SimulationError("commission entre 0 et 100 USD par côté et par 100 000 unités")
 
