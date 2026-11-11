@@ -426,6 +426,32 @@ class HourlyProfileTests(unittest.TestCase):
         self.assertEqual(self.hourly.champion("EURUSD")["version"], 1)  # the champion is untouched
         self.assertEqual(self.hourly.events("EURUSD", limit=5)[0]["kind"], "OBSERVATION_ABANDONNEE")
 
+    def test_a_person_can_adopt_the_best_followed_candidate_before_its_confirmation(self):
+        self.live_broker_candles()
+        learning.ensure_managed_sessions(self.candles, self.hourly, self.lab)  # the account the review reads
+        run_id = self.hourly.start_run("EURUSD")
+        learning.register_observed(self.candles, self.hourly, self.lab, "EURUSD", run_id,
+                                   [self.result("a", 1.0, slow=36), self.result("b", 3.0, slow=96)], None)
+        with self.assertRaises(learning.SimulationError):
+            learning.adopt_observed(self.hourly, self.lab, self.candles, "EURUSD", "", "essai")  # a person must be named
+        outcome = learning.adopt_observed(self.hourly, self.lab, self.candles, "EURUSD", "titulaire", "essai DEMO")
+        champion = self.hourly.champion("EURUSD")
+        self.assertEqual(champion["params"]["strategy"]["slow"], 96)  # the better selection score
+        self.assertEqual(champion["params"]["review_status"], "NON_CONFIRME_ADOPTE")
+        self.assertNotEqual(champion["params"]["review_status"], "CONFIRME")
+        self.assertTrue(outcome["changed"])
+        self.assertIsNotNone(self.hourly.demo_session("EURUSD"))
+        kinds = [e["kind"] for e in self.hourly.events("EURUSD", limit=6)]
+        self.assertIn("ADOPTION_NON_CONFIRMEE", kinds)
+        self.assertIn("AUTORISATION_DEMO", kinds)
+        self.assertEqual([o["status"] for o in self.hourly.observed("EURUSD", None)].count("ADOPTE"), 1)
+        # the review keeps running on the DEMO account: a negative record suspends the authorization without a person
+        stats = {"n": learning.REVIEW_MIN_OBS, "net_pnl": -90.0, "t": -2.0}
+        with mock.patch.object(learning, "live_stats", return_value=stats):
+            self.assertEqual(learning.review_live(self.hourly, self.lab, "EURUSD"), "SUSPENDED")
+        with self.assertRaises(learning.SimulationError):
+            learning.adopt_observed(self.daily, self.lab, self.candles, "EURUSD", "titulaire", "x")  # D1 has nothing to adopt
+
     def test_only_the_hourly_pipeline_follows_candidates_and_it_searches_wider(self):
         self.assertFalse(learning.D1_PROFILE.observes_candidates)
         self.assertTrue(learning.H1_PROFILE.observes_candidates)

@@ -116,6 +116,11 @@ def build_parser() -> argparse.ArgumentParser:
     learn_authorize.add_argument("--profile", default="D1", choices=("D1", "H1"))
     learn_authorize.add_argument("--accept-unconfirmed", action="store_true",
                                  help="H1 : autoriser un champion pas encore confirmé par l'observation (journalisé)")
+    learn_adopt = learn_actions.add_parser(
+        "adopt", help="H1 : mettre sur le pont DEMO le meilleur candidat suivi avant sa confirmation (action humaine)")
+    learn_adopt.add_argument("--symbol", help="un instrument ; sans lui, tous ceux qui ont un candidat suivi")
+    learn_adopt.add_argument("--operator", required=True)
+    learn_adopt.add_argument("--reason", required=True)
     learn_revoke = learn_actions.add_parser("revoke", help="Reprendre une paire au flux H1 DEMO : le flux quotidien reprend")
     learn_revoke.add_argument("--symbol", required=True)
     learn_revoke.add_argument("--operator", required=True)
@@ -443,6 +448,18 @@ def _learn(args: argparse.Namespace, config: AppConfig) -> int:
 
         candles = CandleStore(config.database_path)
         candles.initialize()
+        if args.learn_action == "adopt":
+            h1 = learning.LearningStore(config.database_path, learning.H1_PROFILE)
+            h1.initialize()
+            symbols = [args.symbol.upper()] if args.symbol else sorted({o["symbol"] for o in h1.observed()})
+            done, failed = [], []
+            for symbol in symbols:
+                try:
+                    done.append(learning.adopt_observed(h1, lab, candles, symbol, args.operator, args.reason))
+                except SimulationError as exc:
+                    failed.append({"symbol": symbol, "reason": str(exc)})
+            _write_json({"status": "ok" if not failed else "partial", "adopted": done, "failed": failed})
+            return 0 if not failed else 2
         changed = learning.authorize_demo(store, lab, args.symbol.upper(), args.operator, args.reason,
                                           candles=candles, accept_unconfirmed=args.accept_unconfirmed)
     except SimulationError as exc:

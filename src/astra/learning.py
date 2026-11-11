@@ -837,6 +837,41 @@ def review_observed(store: LearningStore, lab: LabStore, symbol: str) -> str | N
     return verdict
 
 
+def adopt_observed(store: LearningStore, lab: LabStore, candles: CandleStore, symbol: str, operator: str,
+                   reason: str) -> dict[str, Any]:
+    """A person puts the best followed candidate of ``symbol`` on the DEMO bridge before its review has confirmed it.
+
+    The candidate with the best selection score becomes the champion (marked NON_CONFIRME_ADOPTE, never CONFIRME), its
+    followed account is stopped, and the DEMO authorization is given with the unconfirmed flag; every step is audited.
+    The pre-registered review keeps running on the DEMO account: a negative one-sided test suspends it without a person.
+    No automatic process calls this function."""
+
+    if store.profile.demo_feed:
+        raise SimulationError("l'adoption concerne le profil horaire")
+    if not operator.strip() or not reason.strip():
+        raise SimulationError("un opérateur et une raison sont obligatoires")
+    items = store.observed(symbol)
+    if not items:
+        raise SimulationError(f"aucun candidat suivi pour {symbol}")
+    scores = {e["detail"].get("observed_id"): e["detail"].get("selection_score")
+              for e in store.events(symbol, limit=500) if e["kind"] == "CANDIDAT_OBSERVE"}
+    best = max(items, key=lambda o: scores.get(o["id"]) if scores.get(o["id"]) is not None else -1e9)
+    promoted = {**best["params"], "tier": "PROBATOIRE", "dsr": None, "review": best["review"],
+                "review_status": "NON_CONFIRME_ADOPTE"}
+    version = store.promote(symbol, promoted, best["run_id"],
+                            f"candidat suivi adopté par {operator} avant confirmation : {reason}")
+    store.close_observed(best["id"], "ADOPTE")
+    lab.set_session_status(best["session_id"], "STOPPED", f"cli:{operator}")
+    store.record_event(symbol, "ADOPTION_NON_CONFIRMEE", {
+        "operator": operator, "reason": reason, "observed_id": best["id"], "selection_score": scores.get(best["id"]),
+        "new_version": version, "params": best["params"], "review": best["review"],
+        "note": "décision d'une personne ; la revue prospective continue et suspend sans personne si le test est négatif"},
+        best["run_id"])
+    apply_champion(store, lab, symbol)
+    changed = authorize_demo(store, lab, symbol, operator, reason, candles=candles, accept_unconfirmed=True)
+    return {"symbol": symbol, "version": version, "changed": changed, "observed_id": best["id"]}
+
+
 # -- managed paper simulations ---------------------------------------------------------------------
 
 MANAGED_START = datetime(2025, 10, 28, tzinfo=UTC)
