@@ -183,7 +183,8 @@ class Bridge:
         if self.state.get("day") != today or not self.state.get("day_start_equity"):
             self.state["day"], self.state["day_start_equity"] = today, account["equity"]
         moment = self.clock()
-        week, month = "%d-W%02d" % moment.isocalendar()[:2], moment.strftime("%Y-%m")
+        iso = moment.isocalendar()
+        week, month = f"{iso[0]}-W{iso[1]:02d}", moment.strftime("%Y-%m")
         if self.state.get("week") != week or not self.state.get("week_start_equity"):
             self.state["week"], self.state["week_start_equity"] = week, account["equity"]
         if self.state.get("month") != month or not self.state.get("month_start_equity"):

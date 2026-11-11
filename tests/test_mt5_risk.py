@@ -86,9 +86,10 @@ class PeriodLossTests(unittest.TestCase):
     def test_a_bad_week_or_month_blocks_new_entries_even_when_today_is_fine(self):
         week = replace(ACCOUNT, equity=94_800.0, day_start_equity=94_900.0, week_start_equity=100_000.0,
                        month_start_equity=100_000.0, peak_equity=100_000.0)
-        self.assertEqual(failed(mt5_risk.evaluate_entry(week, ORDER, LIMITS)), {"perte_hebdomadaire"})  # -5.2 % this week
+        small = replace(ORDER, loss_at_stop_usd=400.0)  # within the size allowed on the lower equity
+        self.assertEqual(failed(mt5_risk.evaluate_entry(week, small, LIMITS)), {"perte_hebdomadaire"})  # -5.2 % this week
         month = replace(week, week_start_equity=95_000.0, month_start_equity=103_500.0, peak_equity=103_500.0)
-        self.assertEqual(failed(mt5_risk.evaluate_entry(month, ORDER, LIMITS)), {"perte_mensuelle"})  # -8.4 % this month
+        self.assertEqual(failed(mt5_risk.evaluate_entry(month, small, LIMITS)), {"perte_mensuelle"})  # -8.4 % this month
         self.assertIn("perte_mensuelle", failed(mt5_risk.entries_state(replace(month, month_start_equity=None), LIMITS)))
 
     def test_the_period_limits_must_stay_ordered(self):
