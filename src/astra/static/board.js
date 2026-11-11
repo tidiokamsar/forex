@@ -544,6 +544,23 @@ function wireActions() {
   refreshRequests();
 }
 
+let boardReport = null;
+
+function renderReport() {
+  const box = $("board-report");
+  if (!box) return;
+  if (!boardReport) { box.replaceChildren(el("p", "Rapport indisponible.", "empty-cell")); return; }
+  $("board-report-date").textContent = boardReport.date;
+  const list = el("ul", null, "report-lines");
+  for (const line of boardReport.summary || []) list.append(el("li", line));
+  const parts = [list];
+  for (const t of boardReport.trades || []) {
+    const r = t.r_multiple == null ? "risque prévu inconnu" : `${String(t.r_multiple).replace(".", ",")} fois le risque prévu`;
+    parts.push(el("p", `${pairLabel(t.symbol)} ${t.side === "LONG" ? "achat" : "vente"} : ${signed(t.net)} USD (${r}, ${String(t.hours).replace(".", ",")} h) · entrée : ${t.entry_reason} · sortie : ${t.exit_reason} · ${t.lesson}`, "footnote"));
+  }
+  box.replaceChildren(...parts);
+}
+
 function renderBoard() {
   if (!boardOverview) return;
   const d = boardOverview;
@@ -575,6 +592,8 @@ async function refreshBoard() {
     boardLastSlow = Date.now();
     try { boardDemo = await api("/api/demo/overview"); } catch (error) { boardDemo = null; }
     if (CAN_ACT) refreshRequests();
+    try { boardReport = await api("/api/reports/daily"); } catch (error) { boardReport = null; }
+    renderReport();
     refreshChart().catch(() => {});
   }
   renderBoard();

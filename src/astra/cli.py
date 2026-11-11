@@ -9,7 +9,7 @@ import os
 import sys
 from collections.abc import Sequence
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from .attempts import AttemptLog, AttemptStatus, TrialScope
@@ -98,6 +98,10 @@ def build_parser() -> argparse.ArgumentParser:
     massive_ingest.add_argument("--timeframe", default="H1", choices=("M5", "M15", "H1", "H4", "D1"))
     massive_ingest.add_argument("--days", type=int, default=30)
     massive_ingest.add_argument("--symbol", default="all")
+    report_cmd = commands.add_parser("report", help="Rapport quotidien : ce qu'ASTRA a observé, décidé, exécuté, appris")
+    report_actions = report_cmd.add_subparsers(dest="report_action", required=True)
+    report_daily = report_actions.add_parser("daily", help="Rapport d'une journée UTC (lecture seule)")
+    report_daily.add_argument("--date", help="AAAA-MM-JJ (défaut : aujourd'hui, UTC)")
     learn_cmd = commands.add_parser("learn", help="Apprentissage : journal d'audit, autorisation d'un champion pour le pont DEMO")
     learn_actions = learn_cmd.add_subparsers(dest="learn_action", required=True)
     learn_audit = learn_actions.add_parser("audit", help="Journal des décisions d'apprentissage (lecture seule)")
@@ -566,6 +570,13 @@ def _run(args: argparse.Namespace) -> int:
 
         if args.command == "learn":
             return _learn(args, config)
+
+        if args.command == "report":
+            from . import reports
+
+            day = date.fromisoformat(args.date) if args.date else datetime.now(UTC).date()
+            _write_json(reports.daily(config.database_path, day))
+            return 0
 
         if args.command == "ctrader-check":
             _write_json(ctrader_check(args.operator, config))

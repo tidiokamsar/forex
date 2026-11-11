@@ -281,6 +281,17 @@ class DemoRouteTests(WebAppCase):
         self.assertEqual(operator.get("/api/demo/overview").get_json()["orders"], [])
 
 
+class ReportRouteTests(WebAppCase):
+    def test_the_daily_report_is_read_only_and_checks_its_date(self):
+        self.assertEqual(self.client().get("/api/reports/daily").status_code, 401)
+        viewer = self.session_client("viewer", WebRole.READ_ONLY)
+        report = viewer.get("/api/reports/daily?date=2026-11-10").get_json()
+        self.assertEqual((report["date"], report["nature"]), ("2026-11-10", "DEMO"))
+        self.assertIn("Aucun relevé des fonds propres", report["summary"][0])
+        self.assertEqual(viewer.get("/api/reports/daily?date=hier").status_code, 400)
+        self.assertEqual(viewer.get("/api/reports/daily").status_code, 200)  # today by default
+
+
 class LearningRouteTests(WebAppCase):
     def test_learning_overview_is_read_only(self):
         self.assertEqual(self.client().get("/api/learn/overview").status_code, 401)

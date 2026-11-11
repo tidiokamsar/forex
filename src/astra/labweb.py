@@ -11,13 +11,13 @@ from __future__ import annotations
 import secrets
 import sqlite3
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from flask import Flask, Response, g, jsonify, request
 
-from . import boardstats, indicators, learning, marketdata, mt5view, riskmetrics
+from . import boardstats, indicators, learning, marketdata, mt5view, reports, riskmetrics
 from .auth import WebRole
 from .jobs import JobStore, worker_health
 from .marketdata import CandleStore, MarketDataError
@@ -128,6 +128,19 @@ def register_lab_routes(app: Flask, *, database: Path, import_dir: Path, require
     def sim_session(session_id: int) -> Response:
         item = lab.session(session_id)
         return jsonify(item) if item else error(404, "not_found")
+
+    @app.get("/api/reports/daily")
+    @require(WebRole.READ_ONLY)
+    def report_daily() -> Response:
+        def produce() -> dict[str, Any]:
+            raw = request.args.get("date") or datetime.now(UTC).date().isoformat()
+            try:
+                day = date.fromisoformat(raw)
+            except ValueError as exc:
+                raise MarketDataError("date : AAAA-MM-JJ attendu") from exc
+            return reports.daily(database, day)
+
+        return answer(produce)
 
     @app.get("/api/learn/overview")
     @require(WebRole.READ_ONLY)
