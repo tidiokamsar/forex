@@ -18,10 +18,21 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
-from .marketdata import PAIRS, pip_size
+from .marketdata import INSTRUMENTS, PAIRS, pip_size
 
 LIMITS_VERSION = "1"
 CONTRACT_SIZE = 100_000  # standard Forex lot; every order must report this size for its symbol, otherwise it is refused
+# Metals trade other contract sizes. Values read in the instrument catalogue of the DEMO account (MetaQuotes-Demo,
+# 2026-11-11: XAUUSD 100 oz, XAGUSD 5000 oz). An order whose broker-reported size differs is still refused.
+CONTRACT_SIZES = {"XAUUSD": 100.0, "XAGUSD": 5000.0}
+
+
+def contract_size_of(symbol: str) -> float:
+    return CONTRACT_SIZES.get(symbol, float(CONTRACT_SIZE))
+
+
+def has_dollar_leg(symbol: str) -> bool:
+    return symbol.startswith("USD") or symbol.endswith("USD")
 
 
 class RiskConfigError(ValueError):
@@ -48,7 +59,11 @@ class RiskLimits:
     max_drawdown_pct: float = 10.0
     max_margin_used_pct: float = 30.0      # of equity, including the new position
     max_net_usd_exposure_x: float = 3.0    # |net USD notional| as a multiple of equity (every pair holds the dollar)
-    allowed_symbols: tuple[str, ...] = field(default_factory=lambda: tuple(PAIRS))
+    # A cross (no dollar leg) has no measured dollar exposure: their number is bounded instead, next to the margin,
+    # the risk per trade and the period loss limits. Metals and the seven dollar pairs have a measured exposure.
+    max_cross_positions: int = 3
+    max_spread_cost_multiple: float = 3.0  # outside the seven pairs: spread cap = this multiple of the instrument's usual spread
+    allowed_symbols: tuple[str, ...] = field(default_factory=lambda: tuple(INSTRUMENTS))
 
     def validate(self) -> None:
         checks = (
@@ -68,7 +83,9 @@ class RiskLimits:
             (0 < self.max_drawdown_pct <= 30, "max_drawdown_pct entre 0 et 30"),
             (0 < self.max_margin_used_pct <= 60, "max_margin_used_pct entre 0 et 60"),
             (0 < self.max_net_usd_exposure_x <= 20, "max_net_usd_exposure_x entre 0 et 20"),
-            (bool(self.allowed_symbols) and all(s in PAIRS for s in self.allowed_symbols), "allowed_symbols inconnus"),
+            (1 <= self.max_cross_positions <= 10, "max_cross_positions entre 1 et 10"),
+            (1.0 <= self.max_spread_cost_multiple <= 10, "max_spread_cost_multiple entre 1 et 10"),
+            (bool(self.allowed_symbols) and all(s in INSTRUMENTS for s in self.allowed_symbols), "allowed_symbols inconnus"),
         )
         for ok, message in checks:
             if not ok:
@@ -230,7 +247,7 @@ def usd_exposure(symbol: str, side: str, lots: float, price: float) -> float:
 
     if side not in ("LONG", "SHORT"):
         raise ValueError(f"sens inconnu : {side!r}")
-    notional = lots * CONTRACT_SIZE
+    notional = lots * contract_size_of(symbol)
     if symbol.startswith("USD"):
         return notional if side == "LONG" else -notional
     if symbol.endswith("USD"):
@@ -248,18 +265,21 @@ def order_checks(account: AccountState, order: OrderRequest, limits: RiskLimits)
     out.append(Check("volume_conforme", bool(steps_ok and 0 < order.lots <= limits.max_lots_per_position),
                      f"{order.lots} lot (spécifications du courtier et maximum {limits.max_lots_per_position})"))
     out.append(Check("stop_present", order.has_stop, "stop défini" if order.has_stop else "pas de stop"))
-    out.append(Check("taille_de_contrat", order.contract_size == CONTRACT_SIZE,
-                     f"taille de contrat {order.contract_size} (calculs prévus pour {CONTRACT_SIZE:g})"))
+    expected_size = contract_size_of(order.symbol)
+    out.append(Check("taille_de_contrat", order.contract_size == expected_size,
+                     f"taille de contrat {order.contract_size} (calculs prévus pour {expected_size:g})"))
     if _ok(order.loss_at_stop_usd) and _ok(account.equity) and account.equity > 0:
         allowed = account.equity * limits.risk_per_trade_pct / 100 * limits.risk_tolerance
         out.append(Check("taille_de_position", order.loss_at_stop_usd <= allowed,
                          f"perte au stop {order.loss_at_stop_usd:.2f} USD (autorisé {allowed:.2f})"))
     else:
         out.append(Check("taille_de_position", False, "perte au stop incalculable"))
-    if _ok(order.bid) and _ok(order.ask) and 0 < order.bid <= order.ask and order.symbol in PAIRS:
+    if _ok(order.bid) and _ok(order.ask) and 0 < order.bid <= order.ask and order.symbol in INSTRUMENTS:
         spread = (order.ask - order.bid) / pip_size(order.symbol)
-        out.append(Check("spread", spread <= limits.max_spread_pips,
-                         f"spread {spread:.1f} pips (maximum {limits.max_spread_pips})"))
+        cap = limits.max_spread_pips
+        if order.symbol not in PAIRS:  # crosses and metals: a multiple of the spread the instrument usually shows
+            cap = max(cap, limits.max_spread_cost_multiple * INSTRUMENTS[order.symbol].spread_pips)
+        out.append(Check("spread", spread <= cap, f"spread {spread:.1f} pips (maximum {cap:g})"))
     else:
         out.append(Check("spread", False, "cotation absente ou incohérente"))
     if _ok(order.quote_age_seconds):
@@ -292,6 +312,12 @@ def order_checks(account: AccountState, order: OrderRequest, limits: RiskLimits)
                              f"(maximum {limits.max_net_usd_exposure_x}x)"))
     else:
         out.append(Check("exposition_nette_usd", False, "fonds propres ou cotation inconnus"))
+    if has_dollar_leg(order.symbol):
+        out.append(Check("croisees_sans_dollar", True, "instrument avec une jambe en dollar : exposition mesurée"))
+    else:
+        crosses = sum(1 for p in account.positions if not has_dollar_leg(str(p.get("symbol")))) + 1
+        out.append(Check("croisees_sans_dollar", crosses <= limits.max_cross_positions,
+                         f"{crosses} position(s) sur croisées sans dollar après l'ordre (maximum {limits.max_cross_positions})"))
     same = sum(1 for p in account.positions if p.get("symbol") == order.symbol)
     out.append(Check("exposition_par_instrument", same < limits.max_positions_per_symbol,
                      f"{same} position(s) déjà ouverte(s) sur {order.symbol} (maximum {limits.max_positions_per_symbol})"))

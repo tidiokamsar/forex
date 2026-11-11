@@ -77,6 +77,10 @@ def feed_pairs(daily: dict[str, Any], hourly: dict[str, Any] | None) -> list[dic
         other = hourly_by.get(pair["symbol"])
         demo = other.get("demo_session") if other else None
         chosen.append({**pair, "session": demo, "profile": "H1"} if demo else {**pair, "profile": "D1"})
+    daily_symbols = {pair["symbol"] for pair in daily.get("pairs", [])}
+    for symbol, other in hourly_by.items():  # an instrument that only has an hourly pipeline (crosses, metals)
+        if symbol not in daily_symbols and other.get("demo_session"):
+            chosen.append({**other, "session": other["demo_session"], "profile": "H1"})
     return chosen
 
 
@@ -477,6 +481,10 @@ class Bridge:
             for settled in self.resolve_intents(positions):
                 actions.append({"kind": "intent_resolved", "symbol": settled["symbol"], "side": settled["side"],
                                 "reason": f"{settled['status']} : {settled['resolved']}"})
+            for p in positions:  # an instrument no longer fed (authorization suspended or revoked): its position is closed
+                if p.astra and p.symbol not in wanted and p.symbol not in held:
+                    wanted[p.symbol] = {"side": "FLAT",
+                                        "reason": "instrument retiré du flux DEMO (autorisation suspendue ou retirée)"}
             for symbol, target in sorted(wanted.items()):
                 if symbol in held:
                     continue

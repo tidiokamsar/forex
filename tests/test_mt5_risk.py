@@ -42,7 +42,7 @@ class GatewayTests(unittest.TestCase):
             "perte_journaliere": (replace(ACCOUNT, equity=96_500.0), ORDER),
             "drawdown": (replace(ACCOUNT, peak_equity=115_000.0), ORDER),
             "nombre_de_positions": (replace(ACCOUNT, positions=tuple({"symbol": f"X{i}", "volume": 0.1} for i in range(7))), ORDER),
-            "instrument": (ACCOUNT, replace(ORDER, symbol="XAUUSD")),
+            "instrument": (ACCOUNT, replace(ORDER, symbol="BTCUSD")),
             "volume_conforme": (ACCOUNT, replace(ORDER, lots=0.835)),
             "stop_present": (ACCOUNT, replace(ORDER, has_stop=False)),
             "taille_de_position": (ACCOUNT, replace(ORDER, loss_at_stop_usd=900.0)),
@@ -118,6 +118,42 @@ class FreezeTests(unittest.TestCase):
             self.assertIn("taille_de_contrat", failed(mt5_risk.evaluate_entry(ACCOUNT, replace(ORDER, contract_size=size), LIMITS)))
 
 
+class WiderInstrumentTests(unittest.TestCase):
+    GOLD = replace(ORDER, symbol="XAUUSD", lots=0.1, loss_at_stop_usd=300.0, required_margin=400.0, bid=2650.0, ask=2650.2,
+                   contract_size=100.0)
+
+    def test_gold_and_silver_use_their_own_contract_size_and_a_wrong_one_is_refused(self):
+        self.assertEqual(failed(mt5_risk.evaluate_entry(ACCOUNT, self.GOLD, LIMITS)), set())
+        self.assertIn("taille_de_contrat", failed(mt5_risk.evaluate_entry(ACCOUNT, replace(self.GOLD, contract_size=100_000.0), LIMITS)))
+        silver = replace(self.GOLD, symbol="XAGUSD", bid=31.0, ask=31.01, contract_size=5000.0)
+        self.assertEqual(failed(mt5_risk.evaluate_entry(ACCOUNT, silver, LIMITS)), set())
+        self.assertIn("taille_de_contrat", failed(mt5_risk.evaluate_entry(ACCOUNT, replace(silver, contract_size=100.0), LIMITS)))
+
+    def test_the_exposure_of_metals_is_valued_with_their_contract(self):
+        self.assertAlmostEqual(mt5_risk.usd_exposure("XAUUSD", "LONG", 2, 2650.0), -530_000.0, places=3)
+        self.assertAlmostEqual(mt5_risk.usd_exposure("XAGUSD", "SHORT", 1, 31.0), 155_000.0, places=3)
+
+    def test_the_spread_cap_outside_the_seven_pairs_follows_the_instrument(self):
+        wide = replace(self.GOLD, ask=2652.5)  # 250 pips at 0.01: far above 3 times the usual 30
+        self.assertIn("spread", failed(mt5_risk.evaluate_entry(ACCOUNT, wide, LIMITS)))
+        cross = replace(ORDER, symbol="EURGBP", bid=0.85, ask=0.85015, loss_at_stop_usd=400.0, required_margin=500.0)
+        self.assertEqual(failed(mt5_risk.evaluate_entry(ACCOUNT, cross, LIMITS)), set())  # 1.5 pips, cap 3
+        self.assertIn("spread", failed(mt5_risk.evaluate_entry(ACCOUNT, replace(cross, ask=0.8504), LIMITS)))  # 4 pips
+
+    def test_the_number_of_crosses_without_a_dollar_leg_is_bounded(self):
+        cross = replace(ORDER, symbol="EURGBP", bid=0.85, ask=0.85015, loss_at_stop_usd=400.0, required_margin=500.0)
+        held = tuple({"symbol": s, "volume": 0.1, "side": "LONG", "price_open": 1.0, "price_current": 1.0}
+                     for s in ("EURJPY", "AUDCAD", "CHFJPY"))
+        self.assertIn("croisees_sans_dollar", failed(mt5_risk.evaluate_entry(replace(ACCOUNT, positions=held), cross, LIMITS)))
+        self.assertNotIn("croisees_sans_dollar", failed(mt5_risk.evaluate_entry(replace(ACCOUNT, positions=held[:2]), cross, LIMITS)))
+        self.assertNotIn("croisees_sans_dollar", failed(mt5_risk.evaluate_entry(replace(ACCOUNT, positions=held), ORDER, LIMITS)))
+
+    def test_every_instrument_of_the_registry_is_allowed_by_default_and_nothing_else(self):
+        from astra.marketdata import INSTRUMENTS
+
+        self.assertEqual(set(LIMITS.allowed_symbols), set(INSTRUMENTS))
+
+
 class UsdExposureTests(unittest.TestCase):
     def test_signs_follow_the_side_of_the_dollar(self):
         self.assertAlmostEqual(mt5_risk.usd_exposure("EURUSD", "LONG", 1, 1.1), -110_000, places=3)
@@ -188,7 +224,7 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(limits.public()["version"], "1")
 
     def test_invalid_files_are_refused(self):
-        for payload in ({"risk_per_trade_pct": 50}, {"max_positions": 0}, {"unknown": 1}, {"allowed_symbols": ["XAUUSD"]},
+        for payload in ({"risk_per_trade_pct": 50}, {"max_positions": 0}, {"unknown": 1}, {"allowed_symbols": ["BTCUSD"]},
                         {"max_drawdown_pct": float("nan")}, [1, 2]):
             with self.subTest(payload=payload), self.assertRaises(RiskConfigError):
                 mt5_risk.load_limits(self.write(payload))

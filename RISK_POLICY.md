@@ -119,3 +119,11 @@ This section documents `mt5_risk.py`, which the bridge calls before every openin
 - **Per-currency limits.** With the seven current pairs every non-dollar currency appears in exactly one pair, so its net exposure is that pair's single position, already bounded by the per-position and per-symbol limits: the dollar is the only concentrated currency, and it has its own limit. A generic per-currency limit becomes meaningful when cross pairs are added and is to be written then.
 - **Site requests (Lot 3).** The bridge remembers the requests it has executed (written to disk before the answer is sent). If the answer does not reach the server, only the answer is sent again: a request is never executed twice, even after a restart.
 - **Not implemented yet.** Volatility- or VaR-based limits, scenario stress (correlated adverse moves), a derived value for the 3x dollar limit.
+
+## Addendum 2026-11-11 : instruments du registre ouverts au portail DEMO
+
+- Le portail accepte désormais les 19 instruments du registre (7 paires, 10 croisées, XAUUSD, XAGUSD) ; un instrument absent du registre reste refusé. Un instrument n'envoie un ordre que si un compte papier le nourrit : H1 confirmé par l'observation, puis autorisation permanente DEMO.
+- Taille de contrat par symbole, relevée dans le catalogue du compte DEMO : 100 000 pour le Forex, 100 pour XAUUSD, 5 000 pour XAGUSD. Une taille différente rapportée par le courtier refuse l'ordre.
+- Écart maximal : 3 pips pour les sept paires (inchangé) ; pour les croisées et les métaux, le plus grand de 3 pips et de 3 fois l'écart habituel de l'instrument.
+- Les croisées n'ont pas d'exposition au dollar mesurée : leur nombre simultané est borné (3) en plus de la marge, du risque par transaction (0,5 %) et des limites de perte du jour, de la semaine et du mois. Limite connue : pas encore d'exposition nette par devise.
+- Une position ouverte par ASTRA sur un instrument qui n'est plus nourri (autorisation suspendue ou retirée) est fermée au cycle suivant.

@@ -607,7 +607,8 @@ def authorize_demo(store: LearningStore, lab: LabStore, symbol: str, operator: s
 
 # Standing authorization given by the account holder on 2026-11-11: a champion that its own prospective review has
 # confirmed (the criteria were written down at its promotion) feeds the DEMO bridge without a new command. It covers
-# the seven tradable pairs only, never LIVE, never the risk limits; it is a constant of the code, so no process can change it.
+# the instruments of the registry that the risk gateway allows, never LIVE, never the risk limits; it is a constant of
+# the code, so no process can change it.
 AUTO_AUTHORIZE_CONFIRMED = True
 STANDING_OPERATOR = "politique:autorisation-permanente"
 
@@ -618,8 +619,8 @@ def apply_standing_authorization(store: LearningStore, lab: LabStore, candles: C
 
     if verdict != "CONFIRMED" or not AUTO_AUTHORIZE_CONFIRMED:
         return None
-    if symbol not in PAIRS:
-        return {"authorized": False, "reason": "instrument hors des paires négociables par le pont"}
+    if symbol not in INSTRUMENTS:
+        return {"authorized": False, "reason": "instrument inconnu du registre"}
     try:
         changed = authorize_demo(store, lab, symbol, STANDING_OPERATOR,
                                  "autorisation permanente du titulaire : champion confirmé par l'observation prospective",

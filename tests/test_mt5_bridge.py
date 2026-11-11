@@ -365,6 +365,24 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(second[0]["id"], 7)
         self.assertEqual(self.server.results[-1][1]["status"], "EXECUTE")  # only the answer was sent again
 
+    def test_a_cross_with_its_own_hourly_demo_account_is_traded_and_its_position_is_closed_when_the_authorization_goes(self):
+        entry = {**SHORT, "entry_ts": "2026-10-29T08:00:00+00:00"}
+
+        def hourly(session):
+            return {"pairs": [{"symbol": "EURGBP", "champion": {"version": 2, "run_id": 5}, "demo_session": session}]}
+
+        self.server.view = overview()  # the daily feed has nothing to hold
+        self.server.hourly_view = hourly({"id": 8, "status": "RUNNING",
+                                          "account": {"positions": {"EURGBP": entry}, "pending": {}}})
+        self.assertEqual([(a["kind"], a["symbol"]) for a in self.bridge.cycle()["actions"]], [("open", "EURGBP")])
+        self.assertEqual(self.fake.sent[0]["symbol"], "EURGBP")
+        self.assertEqual(len(self.fake.open_positions), 1)
+        self.server.hourly_view = hourly(None)  # suspended by the review or taken back: no feed any more
+        actions = self.bridge.cycle()["actions"]
+        self.assertEqual([(a["kind"], a["symbol"]) for a in actions], [("close", "EURGBP")])
+        self.assertIn("retiré du flux DEMO", actions[0]["reason"])
+        self.assertEqual(self.fake.open_positions, [])
+
     def test_the_bridge_follows_the_hourly_demo_account_of_an_authorized_pair_and_holds_it_when_the_hourly_read_fails(self):
         from astra.mt5_bridge import feed_pairs
 
@@ -379,6 +397,12 @@ class BridgeTests(unittest.TestCase):
 
         self.assertEqual(feed_pairs(daily_flat, hourly({}))[0]["profile"], "H1")
         self.assertEqual(feed_pairs(daily_flat, None)[0]["profile"], "D1")
+        # an instrument with only an hourly pipeline is followed when, and only when, a DEMO account exists for it
+        cross = {"symbol": "EURGBP", "demo_session": {"id": 9, "status": "RUNNING"}}
+        silent = {"symbol": "EURJPY", "demo_session": None}
+        chosen = feed_pairs(daily_flat, {"pairs": [cross, silent]})
+        self.assertEqual([p["symbol"] for p in chosen if p["symbol"] in ("EURGBP", "EURJPY")], ["EURGBP"])
+        self.assertEqual([p["profile"] for p in chosen if p["symbol"] == "EURGBP"], ["H1"])
         self.server.view = daily_flat
         self.server.hourly_view = hourly({"EURUSD": hourly_short})
         self.assertEqual([a["kind"] for a in self.bridge.cycle()["actions"]], ["open"])  # the authorized hourly feed opens it

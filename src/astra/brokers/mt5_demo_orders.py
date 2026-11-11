@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from ..marketdata import PAIRS
+from ..marketdata import INSTRUMENTS
 from .mt5_demo import ALLOWED_SERVERS, Mt5DemoError, Mt5DemoFeed
 
 MAGIC = 20261028
@@ -159,7 +159,7 @@ class Mt5DemoTrader(Mt5DemoFeed):
     def open(self, symbol: str, side: str, lots: float, sl: float, comment: str = COMMENT, magic: int = MAGIC) -> dict[str, Any]:
         self._guard()
         mt5 = self.mt5
-        if symbol not in PAIRS or side not in ("LONG", "SHORT"):
+        if symbol not in INSTRUMENTS or side not in ("LONG", "SHORT"):
             raise Mt5DemoError(f"ordre refusé : {symbol} {side}")
         if not 0 < lots <= MAX_LOTS or not sl:
             raise Mt5DemoError("ordre refusé : volume hors limites ou stop absent")
