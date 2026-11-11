@@ -222,10 +222,12 @@ class Worker:
         if job["kind"] == "learn":
             symbol = str(params["symbol"])
             store = self.learning_h1 if params.get("profile") == "H1" else self.learning
-            result = learning.learn(self.candles, store, symbol)
+            result = learning.learn(self.candles, store, symbol, self.lab)
             if result["decision"] == "PROMOTED":
                 result["applied_to_simulation"] = learning.apply_champion(store, self.lab, symbol)
             verdict = learning.review_live(store, self.lab, symbol)
+            if store.profile.observes_candidates and learning.review_observed(store, self.lab, symbol) == "CONFIRMED":
+                verdict = "CONFIRMED"
             if verdict:
                 result["live_verdict"] = verdict
             granted = learning.apply_standing_authorization(store, self.lab, self.candles, symbol, verdict)

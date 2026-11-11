@@ -69,7 +69,8 @@ SPACE = {
 DEFAULT_RISK = RiskParams()
 DEFAULT_COSTS = CostParams()
 
-Z_FAMILIES = ("mean_reversion", "currency_momentum", "currency_reversion")  # families that use the z threshold
+Z_FAMILIES = ("mean_reversion", "currency_momentum", "currency_reversion", "rsi_reversion",
+              "trend_pullback")  # families that use the z threshold
 DSR_VALID = 0.95          # deflated Sharpe probability from which a promotion counts as statistically solid (protocol value)
 # Pre-registered review of a promoted champion on its own prospective (observation) trades, one-sided t-test on the mean
 # net result per trade. Confirmation at 5 % (z 1.645) once enough trades could confirm half of the in-sample edge;
@@ -77,17 +78,21 @@ DSR_VALID = 0.95          # deflated Sharpe probability from which a promotion c
 REVIEW_MIN_OBS = 8
 Z_CONFIRM = 1.645
 Z_SUSPEND = -1.28
-SPACE_H1 = {  # bars are hours: 6 to 48 hours fast, 2 to 14 days slow (the strategy accepts up to 400 bars)
-    "family": SPACE["family"],
-    "z_entry": SPACE["z_entry"],
-    "fast": (6, 12, 24, 48),
-    "slow": (48, 96, 168, 336),
-    "atr_window": (14, 24),
+SPACE_H1 = {  # bars are hours: 4 to 48 hours fast, 1.5 to 14 days slow (the strategy accepts up to 400 bars)
+    "family": (*SPACE["family"], "rsi_reversion", "trend_pullback"),
+    "z_entry": (0.75, 1.0, 1.25, 1.5, 2.0, 2.5),
+    "fast": (4, 6, 8, 12, 24, 48),
+    "slow": (36, 48, 96, 168, 336),
+    "atr_window": (14, 24, 48),
     "min_atr_pct": (0.0, 0.00003, 0.0001),  # an hourly ATR is a small share of the price
-    "stop_atr_multiple": SPACE["stop_atr_multiple"],
+    "stop_atr_multiple": (1.0, 1.5, 2.0, 3.0, 4.0),
     "regime": SPACE["regime"],
-    "take_profit_r": SPACE["take_profit_r"],
+    "take_profit_r": (0.0, 1.0, 1.5, 2.5, 4.0),
 }
+H1_CANDIDATES_PER_RUN = 120  # a run of 36 takes about 11 s: the wider space is searched, every trial counts in the DSR
+# Candidates a hourly run does not promote are still followed, without any order, on their own paper account: the
+# independent evidence is the prospective record, not the selection. At most OBSERVED_MAX per instrument at a time.
+OBSERVED_PER_RUN, OBSERVED_MAX = 2, 4
 
 
 @dataclass(frozen=True)
@@ -111,6 +116,8 @@ class Profile:
     selection_text: str
     demo_feed: bool        # True: its managed account feeds the DEMO bridge (frozen until a human authorizes a change)
     universe: tuple[str, ...] = ()  # the instruments this pipeline learns on
+    candidates_per_run: int = CANDIDATES_PER_RUN
+    observes_candidates: bool = False  # follow the best non-promoted candidates on their own paper accounts
 
 
 D1_PROFILE = Profile("D1", TIMEFRAME, SOURCE, SOURCE, "", "ASTRA auto", MIN_TRADES, 4 * 260, FINAL_CHECK_DAYS, None, SPACE,
@@ -119,7 +126,7 @@ H1_WINDOW_DAYS, H1_FINAL_CHECK_DAYS, H1_MIN_WINDOWS = 90, 120, 3
 H1_PROFILE = Profile("H1", "H1", "MASSIVE_FX_QUOTES", "MT5_METAQUOTES_DEMO", "h1_", "ASTRA H1", 30, 6000, H1_FINAL_CHECK_DAYS,
                      H1_WINDOW_DAYS, SPACE_H1,
                      "walk-forward par blocs de 90 jours hors échantillon, coûts inclus, "
-                     "contrôle final sur les 120 derniers jours", False, tuple(INSTRUMENTS))
+                     "contrôle final sur les 120 derniers jours", False, tuple(INSTRUMENTS), H1_CANDIDATES_PER_RUN, True)
 PROFILES = {"D1": D1_PROFILE, "H1": H1_PROFILE}
 
 _SCHEMA = """
@@ -134,6 +141,11 @@ CREATE TABLE IF NOT EXISTS {p}learn_runs (
 );
 CREATE TABLE IF NOT EXISTS {p}learn_managed (symbol TEXT PRIMARY KEY, session_id INTEGER NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS {p}learn_shadow (symbol TEXT PRIMARY KEY, session_id INTEGER NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS {p}learn_observed (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, session_id INTEGER NOT NULL, run_id INTEGER NOT NULL,
+    registered_at TEXT NOT NULL, params_json TEXT NOT NULL, review_json TEXT NOT NULL, status TEXT NOT NULL,
+    closed_at TEXT
+);
 CREATE TABLE IF NOT EXISTS {p}learn_demo (
     symbol TEXT PRIMARY KEY, session_id INTEGER NOT NULL, active INTEGER NOT NULL, authorized_at TEXT NOT NULL,
     champion_version INTEGER NOT NULL
@@ -284,6 +296,28 @@ class LearningStore:
             db.execute(f"INSERT INTO {self._p}learn_shadow(symbol, session_id, created_at) VALUES (?,?,?) ON CONFLICT(symbol)"
                        " DO UPDATE SET session_id = excluded.session_id", (symbol, session_id, _iso(_now())))
 
+    def observed(self, symbol: str | None = None, status: str | None = "ACTIVE") -> list[dict[str, Any]]:
+        query, args = f"SELECT * FROM {self._p}learn_observed WHERE 1 = 1", []
+        for column, value in (("symbol", symbol), ("status", status)):
+            if value is not None:
+                query += f" AND {column} = ?"
+                args.append(value)
+        with self._connect() as db:
+            rows = db.execute(query + " ORDER BY id", args).fetchall()
+        return [{**dict(r), "params": json.loads(r["params_json"]), "review": json.loads(r["review_json"])} for r in rows]
+
+    def add_observed(self, symbol: str, session_id: int, run_id: int, params: dict[str, Any], review: dict[str, Any]) -> int:
+        with self._connect() as db:
+            return int(db.execute(f"INSERT INTO {self._p}learn_observed(symbol, session_id, run_id, registered_at, params_json,"
+                                  " review_json, status) VALUES (?,?,?,?,?,?,'ACTIVE')",
+                                  (symbol, session_id, run_id, _iso(_now()), json.dumps(params, sort_keys=True),
+                                   json.dumps(review, sort_keys=True))).lastrowid)
+
+    def close_observed(self, observed_id: int, status: str) -> None:
+        with self._connect() as db:
+            db.execute(f"UPDATE {self._p}learn_observed SET status = ?, closed_at = ? WHERE id = ?",
+                       (status, _iso(_now()), observed_id))
+
     def demo_session(self, symbol: str) -> int | None:
         """The account that feeds the DEMO bridge for this pair under a person's authorization (None when not authorized)."""
 
@@ -366,8 +400,9 @@ def evaluate(candles: CandleStore, symbol: str, params: dict[str, Any], windows:
             **({"returns": returns} if keep_returns else {})}
 
 
-def candidates(seed: int, champion: dict[str, Any], count: int = CANDIDATES_PER_RUN,
+def candidates(seed: int, champion: dict[str, Any], count: int | None = None,
                profile: Profile = D1_PROFILE) -> list[dict[str, Any]]:
+    count = profile.candidates_per_run if count is None else count
     rng = random.Random(seed)
     space = profile.space
     found: list[dict[str, Any]] = []
@@ -606,7 +641,7 @@ def revoke_demo(store: LearningStore, symbol: str, operator: str, reason: str) -
     return revoked
 
 
-def learn(candles: CandleStore, store: LearningStore, symbol: str) -> dict[str, Any]:
+def learn(candles: CandleStore, store: LearningStore, symbol: str, lab: LabStore | None = None) -> dict[str, Any]:
     """One learning run for a pair; returns the decision (promoted or kept) with its evidence."""
 
     profile = store.profile
@@ -685,6 +720,10 @@ def learn(candles: CandleStore, store: LearningStore, symbol: str) -> dict[str, 
             solid = f", Sharpe dégonflé {dsr['probability']:.2f}" if dsr else ", Sharpe dégonflé incalculable"
             reason += f" ; niveau {tier.lower()}{solid}"
             decision["reason"], decision["tier"] = reason, tier
+        observed = (register_observed(candles, store, lab, symbol, run_id, results[1:], best if verdict == "PROMOTED" else None)
+                    if profile.observes_candidates and lab is not None else [])
+        if observed:
+            decision["observed"] = observed
         for r in results:
             r["selection"].pop("returns", None)
         if verdict == "PROMOTED":
@@ -710,6 +749,91 @@ def learn(candles: CandleStore, store: LearningStore, symbol: str) -> dict[str, 
         store.finish_run(run_id, status="FAILED", error=f"{type(exc).__name__}: {exc}")
         store.record_event(symbol, "ECHEC", {"error": f"{type(exc).__name__}: {exc}"}, run_id)
         raise
+
+
+# -- observation of the candidates that were not promoted ------------------------------------------------------
+
+def observed_z_confirm() -> float:
+    """Confirmation threshold of an observed candidate: the one-sided 5 % level split over OBSERVED_MAX candidates
+    followed at the same time on one instrument (Bonferroni), so that watching several does not inflate false confirmations."""
+
+    return round(statistics.NormalDist().inv_cdf(1 - 0.05 / OBSERVED_MAX), 3)
+
+
+def register_observed(candles: CandleStore, store: LearningStore, lab: LabStore, symbol: str, run_id: int,
+                      pool: list[dict[str, Any]], promoted: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Follow the best candidates of a run that were not promoted, without any order, on their own paper accounts.
+
+    Eligible: a valid selection score, a positive mean return, a drawdown within the limit. The criteria of their
+    review are written down now from their own selection trades (never changed afterwards). Returns what was registered."""
+
+    profile = store.profile
+    active = store.observed(symbol)
+    known = {json.dumps(o["params"], sort_keys=True) for o in active}
+    eligible = [r for r in pool if r["selection"]["score"] is not None and (r["selection"].get("mean_return_pct") or 0) > 0
+                and r["selection"]["worst_drawdown_pct"] <= MAX_DRAWDOWN_PCT and r is not promoted
+                and json.dumps(r["params"], sort_keys=True) not in known]
+    eligible.sort(key=lambda r: r["selection"]["score"], reverse=True)
+    done: list[dict[str, Any]] = []
+    begin = _now().replace(minute=0, second=0, microsecond=0)
+    for r in eligible[:max(0, min(OBSERVED_PER_RUN, OBSERVED_MAX - len(active)))]:
+        review = preregistered_review(r["selection"].get("returns") or [])
+        review["z_confirm"] = observed_z_confirm()
+        review["n_required"] = None
+        if review["mu"] and review["mu"] > 0 and review["sigma"]:
+            review["n_required"] = max(REVIEW_MIN_OBS,
+                                       math.ceil((review["z_confirm"] * review["sigma"] / (0.5 * review["mu"])) ** 2))
+        try:
+            request = simulation_request({"name": f"{profile.session_label} · {symbol} (candidat observé)", "symbols": [symbol],
+                                          "timeframe": profile.timeframe, "source": profile.live_source,
+                                          "start": begin.isoformat(), "strategy_params": r["params"]["strategy"],
+                                          "risk": {"stop_atr_multiple": r["params"]["stop_atr_multiple"],
+                                                   "take_profit_r": r["params"].get("take_profit_r", 0.0),
+                                                   "max_positions": 1}}, candles)
+            session_id = lab.create_session(request, "worker:apprentissage")
+        except SimulationError as exc:
+            store.record_event(symbol, "OBSERVATION_IMPOSSIBLE", {"reason": str(exc), "label": r["label"]}, run_id)
+            continue
+        observed_id = store.add_observed(symbol, session_id, run_id, r["params"], review)
+        store.record_event(symbol, "CANDIDAT_OBSERVE", {
+            "observed_id": observed_id, "session_id": session_id, "label": r["label"], "params": r["params"],
+            "selection_score": r["selection"]["score"], "review": review,
+            "note": "suivi en simulation sans aucun ordre ; critères de confirmation figés à l'enregistrement"}, run_id)
+        done.append({"observed_id": observed_id, "label": r["label"], "review": review})
+    return done
+
+
+def review_observed(store: LearningStore, lab: LabStore, symbol: str) -> str | None:
+    """Judge each followed candidate on its own prospective trades, against the criteria registered with it.
+
+    Abandon (account stopped) on a negative one-sided test; confirmation, when enough trades confirm half of the in-sample
+    edge at the corrected threshold, makes the candidate the champion of the pair (probationary tier, audited).
+    Simulation only: the DEMO bridge changes only through the standing authorization applied afterwards."""
+
+    verdict = None
+    for item in store.observed(symbol):
+        review = item["review"]
+        stats = live_stats({"promoted_at": item["registered_at"]}, lab.session(item["session_id"], item_limit=1000))
+        if stats["t"] is None or stats["n"] < review["min_obs"]:
+            continue
+        detail = {"observed_id": item["id"], "trades": stats["n"], "net_pnl": stats["net_pnl"], "t": round(stats["t"], 3),
+                  "criteria": review, "params": item["params"]}
+        if stats["t"] <= review["z_suspend"]:
+            store.close_observed(item["id"], "ABANDONNE")
+            lab.set_session_status(item["session_id"], "STOPPED", "worker:apprentissage")
+            store.record_event(symbol, "OBSERVATION_ABANDONNEE", detail, item["run_id"])
+        elif review.get("n_required") and stats["n"] >= review["n_required"] and stats["t"] >= review["z_confirm"]:
+            promoted = {**item["params"], "tier": "PROBATOIRE", "dsr": None, "review": review, "review_status": "CONFIRME"}
+            version = store.promote(symbol, promoted, item["run_id"],
+                                    f"candidat observé confirmé : {stats['n']} transactions, t = {stats['t']:.2f}, "
+                                    f"résultat net {stats['net_pnl']:+.2f} USD")
+            store.close_observed(item["id"], "CONFIRME")
+            lab.set_session_status(item["session_id"], "STOPPED", "worker:apprentissage")
+            store.record_event(symbol, "CONFIRMATION_PROSPECTIVE", {**detail, "new_version": version}, item["run_id"])
+            apply_champion(store, lab, symbol)
+            verdict = "CONFIRMED"
+            break  # one champion at a time; the others are judged at the next review
+    return verdict
 
 
 # -- managed paper simulations ---------------------------------------------------------------------

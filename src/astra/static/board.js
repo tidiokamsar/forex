@@ -231,7 +231,7 @@ function badge(decision) {
   return el("span", text, `badge ${decision === "ACHAT" ? "badge-buy" : decision === "VENTE" ? "badge-sell" : "badge-wait"}`);
 }
 
-const FAMILY = { sma_trend: "tendance SMA", momentum: "momentum", mean_reversion: "retour à la moyenne", breakout: "cassure de canal", currency_momentum: "force relative (suivre)", currency_reversion: "force relative (inverse)" };
+const FAMILY = { sma_trend: "tendance SMA", momentum: "momentum", mean_reversion: "retour à la moyenne", breakout: "cassure de canal", currency_momentum: "force relative (suivre)", currency_reversion: "force relative (inverse)", rsi_reversion: "retour par RSI", trend_pullback: "repli dans la tendance" };
 
 function renderDecision(d) {
   const s = (d.signals || []).find((x) => x.symbol === boardPair);

@@ -312,8 +312,9 @@ class HourlyProfileTests(unittest.TestCase):
         self.assertEqual(pool, learning.candidates(7, learning.default_params(), profile=learning.H1_PROFILE))
         self.assertTrue(all(c["strategy"]["fast"] in learning.SPACE_H1["fast"] for c in pool))
         self.assertTrue(all(c["strategy"]["slow"] in learning.SPACE_H1["slow"] for c in pool))
-        self.assertIn("breakout", {c["strategy"]["family"] for c in learning.candidates(
-            1, learning.default_params(), count=200, profile=learning.H1_PROFILE)})
+        families = {c["strategy"]["family"] for c in learning.candidates(
+            1, learning.default_params(), count=300, profile=learning.H1_PROFILE)}
+        self.assertTrue({"breakout", "rsi_reversion", "trend_pullback"} <= families)
 
     def test_each_profile_keeps_its_own_champions_and_runs(self):
         self.assertEqual(self.daily.champion("EURUSD")["version"], 1)  # the reference strategy is created on first read
@@ -357,6 +358,78 @@ class HourlyProfileTests(unittest.TestCase):
         self.assertTrue(session["name"].startswith("ASTRA H1"))
         self.assertGreaterEqual(datetime.fromisoformat(session["start_at"]), now)  # no old bar is traded after the fact
         self.assertEqual(learning.ensure_managed_sessions(self.candles, self.hourly, self.lab), [])
+
+    # -- candidates followed without any order ------------------------------------------------------------------
+
+    @staticmethod
+    def result(label, score, mean=0.4, drawdown=3.0, slow=48):
+        params = {**learning.default_params(), "strategy": {**learning.default_params()["strategy"], "slow": slow}}
+        return {"label": label, "params": params, "selection": {
+            "score": score, "mean_return_pct": mean, "worst_drawdown_pct": drawdown,
+            "returns": [0.004, -0.001, 0.003, 0.002, -0.0005, 0.0035, 0.001]}}
+
+    def test_the_best_refused_candidates_are_followed_on_their_own_paper_accounts_with_frozen_criteria(self):
+        self.live_broker_candles()
+        run_id = self.hourly.start_run("EURUSD")
+        pool = [self.result("a", 3.0, slow=36), self.result("b", 2.0, slow=96), self.result("c", 1.0, slow=168),
+                self.result("negative", 5.0, mean=-0.2, slow=336), self.result("deep", 4.0, drawdown=40.0, slow=48),
+                self.result("unscored", None, slow=200)]
+        done = learning.register_observed(self.candles, self.hourly, self.lab, "EURUSD", run_id, pool, None)
+        self.assertEqual([d["label"] for d in done], ["a", "b"])  # per-run cap, best score first, no loser, no deep drawdown
+        followed = self.hourly.observed("EURUSD")
+        self.assertEqual(len(followed), 2)
+        self.assertEqual(followed[0]["review"]["z_confirm"], learning.observed_z_confirm())
+        self.assertGreater(learning.observed_z_confirm(), learning.Z_CONFIRM)  # corrected for several candidates at once
+        self.assertGreaterEqual(followed[0]["review"]["n_required"], learning.REVIEW_MIN_OBS)
+        session = self.lab.session(followed[0]["session_id"], item_limit=0)
+        self.assertEqual((session["timeframe"], session["source"]), ("H1", "MT5_METAQUOTES_DEMO"))
+        self.assertEqual(self.hourly.events("EURUSD", limit=5)[0]["kind"], "CANDIDAT_OBSERVE")
+        # the same candidates are not registered twice, and the cap per instrument holds
+        again = learning.register_observed(self.candles, self.hourly, self.lab, "EURUSD", run_id, pool, None)
+        self.assertEqual([d["label"] for d in again], ["c"])
+        learning.register_observed(self.candles, self.hourly, self.lab, "EURUSD", run_id,
+                                   [self.result("d", 9.0, slow=400)], None)
+        self.assertLessEqual(len(self.hourly.observed("EURUSD")), learning.OBSERVED_MAX)
+
+    def observed_one(self):
+        self.live_broker_candles()
+        run_id = self.hourly.start_run("EURUSD")
+        learning.register_observed(self.candles, self.hourly, self.lab, "EURUSD", run_id, [self.result("a", 3.0)], None)
+        return self.hourly.observed("EURUSD")[0]
+
+    def test_an_observed_candidate_is_confirmed_only_on_enough_trades_and_becomes_a_probationary_champion(self):
+        item = self.observed_one()
+        needed = item["review"]["n_required"]
+        with mock.patch.object(learning, "live_stats", return_value={"n": needed - 1, "net_pnl": 90.0, "t": 5.0}):
+            self.assertIsNone(learning.review_observed(self.hourly, self.lab, "EURUSD"))  # not enough trades yet
+        with mock.patch.object(learning, "live_stats", return_value={"n": needed, "net_pnl": 90.0, "t": 1.7}):
+            self.assertIsNone(learning.review_observed(self.hourly, self.lab, "EURUSD"))  # below the corrected threshold
+        with mock.patch.object(learning, "live_stats", return_value={"n": needed, "net_pnl": 90.0, "t": 2.6}):
+            self.assertEqual(learning.review_observed(self.hourly, self.lab, "EURUSD"), "CONFIRMED")
+        champion = self.hourly.champion("EURUSD")
+        self.assertEqual((champion["params"]["review_status"], champion["params"]["tier"]), ("CONFIRME", "PROBATOIRE"))
+        self.assertEqual(champion["run_id"], item["run_id"])
+        self.assertEqual(self.hourly.observed("EURUSD"), [])
+        self.assertEqual(self.hourly.events("EURUSD", limit=5)[0]["kind"], "CONFIRMATION_PROSPECTIVE")
+        # a confirmed champion then receives the standing authorization of the account holder
+        granted = learning.apply_standing_authorization(self.hourly, self.lab, self.candles, "EURUSD", "CONFIRMED")
+        self.assertEqual(granted, {"authorized": True, "changed": True})
+        self.assertIsNotNone(self.hourly.demo_session("EURUSD"))
+
+    def test_an_observed_candidate_that_loses_is_abandoned_and_its_account_stopped(self):
+        item = self.observed_one()
+        stats = {"n": learning.REVIEW_MIN_OBS, "net_pnl": -80.0, "t": -2.0}
+        with mock.patch.object(learning, "live_stats", return_value=stats):
+            self.assertIsNone(learning.review_observed(self.hourly, self.lab, "EURUSD"))
+        self.assertEqual(self.hourly.observed("EURUSD"), [])
+        self.assertEqual(self.lab.session(item["session_id"], item_limit=0)["status"], "STOPPED")
+        self.assertEqual(self.hourly.champion("EURUSD")["version"], 1)  # the champion is untouched
+        self.assertEqual(self.hourly.events("EURUSD", limit=5)[0]["kind"], "OBSERVATION_ABANDONNEE")
+
+    def test_only_the_hourly_pipeline_follows_candidates_and_it_searches_wider(self):
+        self.assertFalse(learning.D1_PROFILE.observes_candidates)
+        self.assertTrue(learning.H1_PROFILE.observes_candidates)
+        self.assertGreater(learning.H1_PROFILE.candidates_per_run, learning.D1_PROFILE.candidates_per_run)
 
     # -- hourly DEMO authorization (a person, never a process) -------------------------------------------------
 
@@ -517,6 +590,21 @@ class FamilyTests(unittest.TestCase):
     def test_the_regime_filter_does_not_block_when_the_history_is_too_short_to_judge(self):
         short = [1.10 + 0.002 * i for i in range(12)]
         self.assertEqual(self.decide(short, family="momentum", regime="match", slow=10).action, BUY)
+
+    def test_rsi_reversion_buys_an_oversold_market_and_sells_an_overbought_one(self):
+        falling = [1.20 - 0.004 * i for i in range(12)]
+        self.assertEqual(self.decide(falling, family="rsi_reversion", z_entry=1.0).action, BUY)
+        self.assertEqual(self.decide(falling[::-1], family="rsi_reversion", z_entry=1.0).action, SELL)
+        decision = self.decide([1.10, 1.101] * 6, family="rsi_reversion", z_entry=2.0)  # RSI 66.7, inside 26 to 74
+        self.assertEqual(decision.action, FLAT)
+        self.assertIn("rsi", decision.indicators)
+
+    def test_trend_pullback_buys_a_dip_above_the_slow_average_and_sells_a_rebound_below_it(self):
+        up = [1.10 + 0.002 * i for i in range(12)]
+        self.assertEqual(self.decide([*up, up[-1] - 0.006], family="trend_pullback", z_entry=1.0).action, BUY)
+        down = [1.30 - 0.002 * i for i in range(12)]
+        self.assertEqual(self.decide([*down, down[-1] + 0.006], family="trend_pullback", z_entry=1.0).action, SELL)
+        self.assertEqual(self.decide(up, family="trend_pullback", z_entry=2.0).action, FLAT)
 
     def test_old_parameters_keep_the_sma_trend_and_unknown_families_are_refused(self):
         from astra.papertrade import SimulationError, StrategyParams, _build

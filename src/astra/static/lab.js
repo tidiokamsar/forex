@@ -360,7 +360,7 @@ function renderJobs(payload) {
 function paramsText(p) {
   if (!p) return "—";
   const s = p.strategy || {};
-  const family = { momentum: "Momentum", mean_reversion: `Retour à la moyenne (z ${s.z_entry})`, breakout: "Cassure de canal", currency_momentum: "Force relative (suivre)", currency_reversion: "Force relative (inverse)" }[s.family] || "Tendance SMA";
+  const family = { momentum: "Momentum", mean_reversion: `Retour à la moyenne (z ${s.z_entry})`, breakout: "Cassure de canal", currency_momentum: "Force relative (suivre)", currency_reversion: "Force relative (inverse)", rsi_reversion: `Retour par RSI (z ${s.z_entry})`, trend_pullback: `Repli dans la tendance (z ${s.z_entry})` }[s.family] || "Tendance SMA";
   return `${family} · ${s.fast}/${s.slow} · ATR ${s.atr_window} · stop ${p.stop_atr_multiple} ATR · ATR min ${num((s.min_atr_pct || 0) * 100)} %${p.take_profit_r ? ` · objectif ${p.take_profit_r} R` : ""}`;
 }
 

@@ -44,7 +44,7 @@ from .marketdata import (
 
 ENGINE_VERSION = "1.0.0"
 STRATEGY_NAME = "sma_atr_trend"
-STRATEGY_VERSION = "1.2.0"  # 1.2.0: breakout family; 1.1.0: momentum and mean-reversion families next to the SMA trend
+STRATEGY_VERSION = "1.3.0"  # 1.3.0: RSI reversion and trend pullback; 1.2.0: breakout; 1.1.0: momentum and mean reversion
 FAMILIES = {
     "sma_trend": "tendance SMA",
     "momentum": "momentum",
@@ -52,6 +52,8 @@ FAMILIES = {
     "breakout": "cassure de canal",
     "currency_momentum": "force relative des devises (suivre)",
     "currency_reversion": "force relative des devises (inverse)",
+    "rsi_reversion": "retour à la moyenne par RSI",
+    "trend_pullback": "repli dans la tendance",
 }
 CROSS_FAMILIES = ("currency_momentum", "currency_reversion")  # these read the prices of the other pairs too
 REGIME_FILTERS = ("none", "match")
@@ -311,7 +313,7 @@ def decide(history: Sequence[Candle], params: StrategyParams, peers: PeerPrices 
         market = riskmetrics.regime([c.close for c in history[-(riskmetrics.EFFICIENCY_WINDOW + 1):]])
         if market["trend"] is not None:
             indicators = {**indicators, "efficacite": market["efficiency"]}
-            wants_trend = params.family not in ("mean_reversion", "currency_reversion")
+            wants_trend = params.family not in ("mean_reversion", "currency_reversion", "rsi_reversion")
             if (market["trend"] == "tendance") != wants_trend:
                 kind = "en tendance" if market["trend"] == "tendance" else "sans tendance"
                 needed = "tendance" if wants_trend else "range"
@@ -325,6 +327,10 @@ def decide(history: Sequence[Candle], params: StrategyParams, peers: PeerPrices 
         return _mean_reversion(params, closes, slow, price, vol_ok, indicators, atr_pct)
     if params.family == "breakout":
         return _breakout(params, history, price, vol_ok, indicators, atr_pct)
+    if params.family == "rsi_reversion":
+        return _rsi_reversion(params, closes, price, vol_ok, indicators, atr_pct)
+    if params.family == "trend_pullback":
+        return _trend_pullback(params, closes, slow, price, vol_ok, indicators, atr_pct)
     trend_up, trend_down = fast > slow, fast < slow
     conditions = {"moyenne_rapide_au_dessus": trend_up, "moyenne_rapide_au_dessous": trend_down,
                   "volatilite_dans_la_plage": vol_ok}
@@ -386,6 +392,61 @@ def _mean_reversion(params: StrategyParams, closes: list[float], mean: float, pr
     return Decision(FLAT, price, indicators, conditions, f"écart {z:.2f} dans la plage ±{params.z_entry} : pas de position")
 
 
+def _rsi(closes: Sequence[float]) -> float:
+    """Relative strength index of the last ``len(closes) - 1`` changes (plain averages, no smoothing)."""
+
+    gains = losses = 0.0
+    for previous, current in itertools.pairwise(closes):
+        change = current - previous
+        gains += max(change, 0.0)
+        losses += max(-change, 0.0)
+    if gains + losses == 0:
+        return 50.0
+    return 100.0 * gains / (gains + losses)
+
+
+def _rsi_reversion(params: StrategyParams, closes: list[float], price: float, vol_ok: bool,
+                   indicators: dict[str, float | None], atr_pct: float) -> Decision:
+    """RSI reversion: buy when the RSI over ``fast`` bars is far below 50, sell when far above (threshold 50 -/+ 12 z_entry)."""
+
+    rsi = _rsi(closes[-(params.fast + 1):])
+    margin = 12.0 * params.z_entry
+    low, high = rsi < 50 - margin, rsi > 50 + margin
+    indicators = {**indicators, "rsi": round(rsi, 2)}
+    conditions = {"rsi_survendu": low, "rsi_surachete": high, "volatilite_dans_la_plage": vol_ok}
+    if not vol_ok:
+        return _quiet_or_wild(params, price, indicators, conditions, atr_pct)
+    if low:
+        return Decision(BUY, price, indicators, conditions, f"RSI{params.fast} {rsi:.1f} sous {50 - margin:.1f}")
+    if high:
+        return Decision(SELL, price, indicators, conditions, f"RSI{params.fast} {rsi:.1f} au-dessus de {50 + margin:.1f}")
+    return Decision(FLAT, price, indicators, conditions,
+                    f"RSI{params.fast} {rsi:.1f} entre {50 - margin:.1f} et {50 + margin:.1f} : pas de position")
+
+
+def _trend_pullback(params: StrategyParams, closes: list[float], slow_mean: float, price: float, vol_ok: bool,
+                    indicators: dict[str, float | None], atr_pct: float) -> Decision:
+    """Pullback in a trend: with the price above the slow SMA, buy a dip of ``z_entry`` deviations under the fast SMA
+    (mirror for sells below the slow SMA)."""
+
+    recent = closes[-params.fast:]
+    mean = sum(recent) / len(recent)
+    std = (sum((c - mean) ** 2 for c in recent) / len(recent)) ** 0.5
+    z = (price - mean) / std if std > 0 else 0.0
+    buy, sell = price > slow_mean and z < -params.z_entry, price < slow_mean and z > params.z_entry
+    indicators = {**indicators, "ecart_z_rapide": round(z, 4)}
+    conditions = {"repli_en_hausse": buy, "rebond_en_baisse": sell, "volatilite_dans_la_plage": vol_ok}
+    if not vol_ok:
+        return _quiet_or_wild(params, price, indicators, conditions, atr_pct)
+    if buy:
+        return Decision(BUY, price, indicators, conditions,
+                        f"repli de {z:.2f} écarts-types sous la SMA{params.fast}, au-dessus de la SMA{params.slow}")
+    if sell:
+        return Decision(SELL, price, indicators, conditions,
+                        f"rebond de {z:.2f} écarts-types au-dessus de la SMA{params.fast}, sous la SMA{params.slow}")
+    return Decision(FLAT, price, indicators, conditions, "pas de repli assez marqué dans le sens de la tendance")
+
+
 def _breakout(params: StrategyParams, history: Sequence[Candle], price: float, vol_ok: bool,
               indicators: dict[str, float | None], atr_pct: float) -> Decision:
     """Channel breakout: buy above the highest high of the ``slow`` previous bars, sell below the lowest low.
@@ -414,12 +475,14 @@ STRATEGIES = {
     STRATEGY_NAME: {
         "version": STRATEGY_VERSION,
         "label": "Tendance SMA, momentum, retour à la moyenne ou cassure + filtre ATR (expérimentales, non validées)",
-        "description": ("Six familles. Tendance SMA : ACHAT si la moyenne rapide est au-dessus de la lente, VENTE "
+        "description": ("Huit familles. Tendance SMA : ACHAT si la moyenne rapide est au-dessus de la lente, VENTE "
                         "au-dessous. Momentum : ACHAT si le cours a monté sur la période lente et reste au-dessus de "
                         "la moyenne rapide, VENTE à l'inverse. Retour à la moyenne : ACHAT si le cours est à plus de "
                         "z écarts-types sous la moyenne lente, VENTE au-dessus. Cassure : ACHAT au-dessus du plus haut du canal "
                         "des bougies lentes précédentes, VENTE au-dessous du plus bas. Force relative des devises : "
-                        "suit la devise la plus forte contre le panier (ou fait l'inverse). AUCUNE POSITION si la volatilité "
+                        "suit la devise la plus forte contre le panier (ou fait l'inverse). RSI : ACHAT si le RSI est très bas, "
+                        "VENTE s'il est très haut. Repli : ACHAT d'un creux sous la moyenne rapide quand le cours reste "
+                        "au-dessus de la lente (miroir pour la vente). AUCUNE POSITION si la volatilité "
                         "(ATR/prix) sort de la plage. Aucune performance n'est démontrée."),
         "params": asdict(StrategyParams()),
     },
