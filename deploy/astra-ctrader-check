@@ -1,0 +1,21 @@
+#!/bin/bash
+# Read-only check of the cTrader DEMO connection (demo.ctraderapi.com). The three secrets of the Open API application are
+# typed on the keyboard (not echoed), kept only in the environment of this process and of the check it starts, and never
+# written to a file, a log, the command line or the conversation. The check sends no order: the code refuses it and the
+# audit line records the number of order requests sent (always 0).
+set -euo pipefail
+[ "$(id -u)" -eq 0 ] || { echo "Lancer en root (sudo astra-ctrader-check)"; exit 1; }
+read -r -p "Numéro du compte démo affiché dans cTrader (par exemple 5961066) : " account
+[[ "$account" =~ ^[0-9]{3,20}$ ]] || { echo "Numéro invalide"; exit 2; }
+read -r -s -p "Client ID de l'application Open API (invisible) : " cid; echo
+read -r -s -p "Client secret de l'application (invisible) : " csecret; echo
+read -r -s -p "Access token (invisible) : " token; echo
+for value in "$cid" "$csecret" "$token"; do
+  [[ "$value" =~ ^[A-Za-z0-9_.-]{8,256}$ ]] || { echo "Valeur invalide (lettres, chiffres, point, tiret ou souligné)"; exit 2; }
+done
+set -a; . /etc/astra/web.env; set +a
+export PYTHONPATH=/opt/astra/app/src ASTRA_CTRADER_ACCOUNT_ID="$account"
+export ASTRA_SECRET_CTRADER_CLIENT_ID="$cid" ASTRA_SECRET_CTRADER_CLIENT_SECRET="$csecret" ASTRA_SECRET_CTRADER_ACCESS_TOKEN="$token"
+unset cid csecret token
+cd /opt/astra/app
+exec setpriv --reuid=astra --regid=astra --init-groups /opt/astra/venv/bin/python -m astra ctrader-check --operator titulaire

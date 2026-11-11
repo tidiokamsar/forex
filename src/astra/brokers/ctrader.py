@@ -508,7 +508,15 @@ class CTraderAdapter(BrokerAdapter):
             )["payload"].get("ctidTraderAccount", [])
             match = [a for a in accounts if int(a.get("ctidTraderAccountId", -1)) == account_id]
             if not match:
-                raise CTraderConfigurationError("configured ctidTraderAccountId is not granted to this access token")
+                # The number a person sees in cTrader is the trader login: accept it and use the account's API identifier.
+                match = [a for a in accounts if str(a.get("traderLogin", "")) == str(account_id)]
+                if match:
+                    account_id = int(match[0]["ctidTraderAccountId"])
+                    self._credentials = replace(self._credentials, ctid_trader_account_id=account_id)
+            if not match:
+                granted = ", ".join(f"login {a.get('traderLogin')} (API id {a.get('ctidTraderAccountId')}, "
+                                    f"{'live' if a.get('isLive') else 'demo'})" for a in accounts) or "none"
+                raise CTraderConfigurationError(f"the configured account is not granted to this access token; granted: {granted}")
             is_live = match[0].get("isLive")
             self._is_live = is_live if isinstance(is_live, bool) else None
             if self._is_live is True:

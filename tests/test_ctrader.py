@@ -53,6 +53,21 @@ class CTraderAdapterTests(unittest.TestCase):
     def sent_types(self):
         return [m["payloadType"] for m in self.server.received]
 
+    def test_the_login_shown_in_ctrader_is_accepted_and_resolved_to_the_api_account(self):
+        adapter = self.connected(account_id=123)  # the fake account has trader login 123 and API id 4242
+        self.assertEqual(adapter.account_snapshot().account_ref_masked, "CTRADER-****4242")
+        auth = [m for m in self.server.received if m["payloadType"] == P.ACCOUNT_AUTH_REQ]
+        self.assertEqual(auth[0]["payload"]["ctidTraderAccountId"], 4242)
+
+    def test_an_account_not_granted_to_the_token_lists_what_the_token_does_grant(self):
+        from astra.brokers.ctrader import CTraderConfigurationError
+
+        adapter = self.make(account_id=999)
+        with self.assertRaises(CTraderConfigurationError) as caught:
+            adapter.connect()
+        self.assertIn("login 123 (API id 4242, demo)", str(caught.exception))
+        self.assertNotIn("token-xyz", str(caught.exception))
+
     def test_connect_demo_account_reports_provider_verified_demo(self):
         adapter = self.connected()
         caps = adapter.capabilities()
