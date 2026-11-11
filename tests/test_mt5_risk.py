@@ -10,7 +10,8 @@ from astra import mt5_risk
 from astra.mt5_risk import AccountState, OrderRequest, RiskConfigError, RiskLimits
 
 LIMITS = RiskLimits()
-ACCOUNT = AccountState(environment="DEMO", currency="USD", reconciliation_ok=True, unknown_orders=0, login=114765880,
+ACCOUNT = AccountState(environment="DEMO", currency="USD", reconciliation_ok=True, unknown_orders=0,
+                       week_start_equity=100_000.0, month_start_equity=100_000.0, login=114765880,
                        expected_login=114765880, equity=100_000.0, margin=5_000.0,
                        day_start_equity=100_000.0, peak_equity=100_000.0, positions=(), connector_ok=True,
                        algo_trading_enabled=True, entries_allowed_by_server=True, kill_switch_active=False)
@@ -79,6 +80,22 @@ class GatewayTests(unittest.TestCase):
         decision = mt5_risk.evaluate_entry(ACCOUNT, ORDER, error)
         self.assertFalse(decision.allowed)
         self.assertEqual([c.name for c in decision.checks], ["profil_de_risque"])
+
+
+class PeriodLossTests(unittest.TestCase):
+    def test_a_bad_week_or_month_blocks_new_entries_even_when_today_is_fine(self):
+        week = replace(ACCOUNT, equity=94_800.0, day_start_equity=94_900.0, week_start_equity=100_000.0,
+                       month_start_equity=100_000.0, peak_equity=100_000.0)
+        self.assertEqual(failed(mt5_risk.evaluate_entry(week, ORDER, LIMITS)), {"perte_hebdomadaire"})  # -5.2 % this week
+        month = replace(week, week_start_equity=95_000.0, month_start_equity=103_500.0, peak_equity=103_500.0)
+        self.assertEqual(failed(mt5_risk.evaluate_entry(month, ORDER, LIMITS)), {"perte_mensuelle"})  # -8.4 % this month
+        self.assertIn("perte_mensuelle", failed(mt5_risk.entries_state(replace(month, month_start_equity=None), LIMITS)))
+
+    def test_the_period_limits_must_stay_ordered(self):
+        with self.assertRaises(RiskConfigError):
+            replace(LIMITS, weekly_loss_limit_pct=2.0).validate()  # below the daily limit
+        with self.assertRaises(RiskConfigError):
+            replace(LIMITS, monthly_loss_limit_pct=4.0).validate()  # below the weekly limit
 
 
 class FreezeTests(unittest.TestCase):

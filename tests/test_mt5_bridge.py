@@ -392,6 +392,18 @@ class BridgeTests(unittest.TestCase):
                                               "demo_session": None}]}  # revoked or suspended: the daily feed is back
         self.assertEqual([a["kind"] for a in self.bridge.cycle()["actions"]], ["close"])  # and it says flat
 
+    def test_the_week_and_month_start_equity_are_kept_and_renewed_by_period(self):
+        with self.bridge.trader as trader:
+            state = self.bridge.account_state(trader.refresh_account(), trader.positions())
+            self.assertEqual((state.week_start_equity, state.month_start_equity), (100000.0, 100000.0))
+            self.assertEqual((self.bridge.state["week"], self.bridge.state["month"]), ("2026-W44", "2026-10"))
+            self.fake.equity = 97000.0
+            state = self.bridge.account_state(trader.refresh_account(), trader.positions())
+            self.assertEqual(state.week_start_equity, 100000.0)  # same week: the start is kept
+            self.bridge.clock = lambda: datetime(2026, 11, 2, 9, tzinfo=UTC)  # a new week and a new month
+            state = self.bridge.account_state(trader.refresh_account(), trader.positions())
+            self.assertEqual((state.week_start_equity, state.month_start_equity), (97000.0, 97000.0))
+
     def test_the_gateway_sees_the_real_prices_and_currency_of_the_account(self):
         with self.bridge.trader as trader:
             self.bridge.cycle()

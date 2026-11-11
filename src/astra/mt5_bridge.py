@@ -182,6 +182,12 @@ class Bridge:
         today = self.clock().date().isoformat()
         if self.state.get("day") != today or not self.state.get("day_start_equity"):
             self.state["day"], self.state["day_start_equity"] = today, account["equity"]
+        moment = self.clock()
+        week, month = "%d-W%02d" % moment.isocalendar()[:2], moment.strftime("%Y-%m")
+        if self.state.get("week") != week or not self.state.get("week_start_equity"):
+            self.state["week"], self.state["week_start_equity"] = week, account["equity"]
+        if self.state.get("month") != month or not self.state.get("month_start_equity"):
+            self.state["month"], self.state["month_start_equity"] = month, account["equity"]
         self.state["peak_equity"] = max(self.state.get("peak_equity") or 0.0, account["equity"])
         allowed, kill = self.controls()
         if (self.workdir / "STOP").exists():
@@ -189,6 +195,7 @@ class Bridge:
         return AccountState(
             environment=account.get("environment"), login=account.get("login"), expected_login=self.trader.expected_login,
             equity=account["equity"], margin=account.get("margin"), day_start_equity=self.state["day_start_equity"],
+            week_start_equity=self.state["week_start_equity"], month_start_equity=self.state["month_start_equity"],
             peak_equity=self.state["peak_equity"],
             reconciliation_ok=not any(d["code"] in BLOCKING_ALERTS for d in self.reconcile(positions)["divergences"]),
             unknown_orders=sum(1 for i in self.state["intents"].values() if i["status"] == "INCONNU"),

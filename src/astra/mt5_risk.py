@@ -41,6 +41,10 @@ class RiskLimits:
     max_spread_pips: float = 3.0
     max_quote_age_seconds: float = 30.0
     daily_loss_limit_pct: float = 3.0
+    # A bad week or month made of days each under the daily limit. Starting values: a little under two bad days a week,
+    # and under the 10 % drawdown for a month, so the drawdown stop is not the first line hit. Policy values, to review.
+    weekly_loss_limit_pct: float = 5.0
+    monthly_loss_limit_pct: float = 8.0
     max_drawdown_pct: float = 10.0
     max_margin_used_pct: float = 30.0      # of equity, including the new position
     max_net_usd_exposure_x: float = 3.0    # |net USD notional| as a multiple of equity (every pair holds the dollar)
@@ -57,6 +61,9 @@ class RiskLimits:
             (0 < self.max_spread_pips <= 20, "max_spread_pips entre 0 et 20"),
             (1 <= self.max_quote_age_seconds <= 600, "max_quote_age_seconds entre 1 et 600"),
             (0 < self.daily_loss_limit_pct <= 10, "daily_loss_limit_pct entre 0 et 10"),
+            (self.daily_loss_limit_pct <= self.weekly_loss_limit_pct <= 20, "weekly_loss_limit_pct entre la limite du jour et 20"),
+            (self.weekly_loss_limit_pct <= self.monthly_loss_limit_pct <= 30,
+             "monthly_loss_limit_pct entre la limite de la semaine et 30"),
             (0 < self.max_drawdown_pct <= 30, "max_drawdown_pct entre 0 et 30"),
             (0 < self.max_margin_used_pct <= 60, "max_margin_used_pct entre 0 et 60"),
             (0 < self.max_net_usd_exposure_x <= 20, "max_net_usd_exposure_x entre 0 et 20"),
@@ -110,6 +117,8 @@ class AccountState:
     equity: float | None = None
     margin: float | None = None
     day_start_equity: float | None = None
+    week_start_equity: float | None = None               # equity at the first reading of the ISO week (UTC)
+    month_start_equity: float | None = None              # equity at the first reading of the month (UTC)
     peak_equity: float | None = None
     positions: tuple[dict[str, Any], ...] = ()          # ASTRA's positions: symbol, side, volume
     connector_ok: bool = False
@@ -196,6 +205,13 @@ def account_checks(account: AccountState, limits: RiskLimits | RiskConfigError) 
                          f"perte du jour {max(loss, 0):.2f} % (limite {limits.daily_loss_limit_pct} %)"))
     else:
         out.append(Check("perte_journaliere", False, "capital de départ du jour inconnu"))
+    for name, start, limit, label in (("perte_hebdomadaire", account.week_start_equity, limits.weekly_loss_limit_pct, "semaine"),
+                                      ("perte_mensuelle", account.month_start_equity, limits.monthly_loss_limit_pct, "mois")):
+        if _ok(account.equity) and _ok(start) and start > 0:
+            loss = (start - account.equity) / start * 100
+            out.append(Check(name, loss < limit, f"perte de la {label} {max(loss, 0):.2f} % (limite {limit} %)"))
+        else:
+            out.append(Check(name, False, f"capital de départ de la {label} inconnu"))
     if _ok(account.equity) and _ok(account.peak_equity) and account.peak_equity > 0:
         dd = (account.peak_equity - account.equity) / account.peak_equity * 100
         out.append(Check("drawdown", dd < limits.max_drawdown_pct,
