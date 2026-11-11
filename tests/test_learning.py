@@ -375,6 +375,29 @@ class HourlyProfileTests(unittest.TestCase):
         pair = next(p for p in learning.overview(self.hourly, self.lab)["pairs"] if p["symbol"] == "EURUSD")
         self.assertEqual(pair["demo_session"]["id"], session_id)
 
+    def test_the_standing_authorization_feeds_the_bridge_only_after_a_confirmation_and_only_for_tradable_pairs(self):
+        self.live_broker_candles()
+        self.promote_hourly(status="CONFIRME")
+        args = (self.hourly, self.lab, self.candles, "EURUSD")
+        for verdict in (None, "SUSPENDED"):
+            self.assertIsNone(learning.apply_standing_authorization(*args, verdict))  # nothing but a confirmation counts
+        self.assertIsNone(self.hourly.demo_session("EURUSD"))
+        granted = learning.apply_standing_authorization(*args, "CONFIRMED")
+        self.assertEqual(granted, {"authorized": True, "changed": True})
+        self.assertIsNotNone(self.hourly.demo_session("EURUSD"))
+        audit = next(e for e in self.hourly.events("EURUSD") if e["kind"] == "AUTORISATION_DEMO")
+        self.assertEqual((audit["detail"]["operator"], audit["detail"]["unconfirmed"]),
+                         (learning.STANDING_OPERATOR, False))
+        gold = learning.apply_standing_authorization(self.hourly, self.lab, self.candles, "XAUUSD", "CONFIRMED")
+        self.assertFalse(gold["authorized"])  # an instrument the bridge may not trade
+        self.assertIsNone(self.hourly.demo_session("XAUUSD"))
+
+    def test_the_standing_authorization_reports_a_refusal_instead_of_failing_when_a_prerequisite_is_missing(self):
+        self.hourly.champion("EURUSD")  # only the reference strategy: nothing was promoted by a run
+        refused = learning.apply_standing_authorization(self.hourly, self.lab, self.candles, "EURUSD", "CONFIRMED")
+        self.assertFalse(refused["authorized"])
+        self.assertIn("promu", refused["reason"])
+
     def test_a_champion_confirmed_by_the_prospective_review_needs_no_acceptance_flag(self):
         self.live_broker_candles()
         self.promote_hourly(status="CONFIRME")

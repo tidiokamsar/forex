@@ -228,6 +228,9 @@ class Worker:
             verdict = learning.review_live(store, self.lab, symbol)
             if verdict:
                 result["live_verdict"] = verdict
+            granted = learning.apply_standing_authorization(store, self.lab, self.candles, symbol, verdict)
+            if granted:
+                result["standing_authorization"] = granted
             return result
         if job["kind"] == "backtest":
             backtest_id = int(params["backtest_id"])
