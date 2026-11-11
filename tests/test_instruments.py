@@ -59,13 +59,14 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(set(massive.SYMBOL_MAP), set(INSTRUMENTS))
         self.assertEqual(massive.SYMBOL_MAP["XAUUSD"], "C:XAUUSD")
 
-    def test_no_extension_instrument_can_be_traded_by_the_bridge_the_site_or_the_gateway(self):
+    def test_extension_instruments_pass_the_gateway_but_the_site_manual_panel_stays_on_the_seven_pairs(self):
         for symbol in ("EURGBP", "XAUUSD"):
             decision = mt5_risk.evaluate_entry(ACCOUNT, replace(ORDER, symbol=symbol), LIMITS)
-            self.assertIn("instrument", {c.name for c in decision.checks if not c.passed})
-            self.assertFalse(decision.allowed)
+            self.assertNotIn("instrument", {c.name for c in decision.checks if not c.passed})  # allowed since 2026-11-11
             with self.assertRaises(mt5view.Mt5ViewError):
                 mt5view.validate_request({"kind": "order", "symbol": symbol, "side": "LONG", "stop_pips": 30})
+        unknown = mt5_risk.evaluate_entry(ACCOUNT, replace(ORDER, symbol="BTCUSD"), LIMITS)
+        self.assertIn("instrument", {c.name for c in unknown.checks if not c.passed})
         self.assertEqual(mt5view.PAIR_SYMBOLS, tuple(PAIRS))
 
 
