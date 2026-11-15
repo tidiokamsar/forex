@@ -30,6 +30,12 @@ from .mt5_risk import AccountState, RiskConfigError, RiskLimits, load_required_l
 WATCH_SECONDS = 30
 
 
+def _native(path: str) -> str:
+    """A Linux path seen from Windows Python under Wine (same rule as the bridge)."""
+
+    return "Z:" + path.replace("/", "\\") if os.name == "nt" and path.startswith("/") else path
+
+
 def trigger(account: AccountState, limits: RiskLimits) -> str | None:
     """The reason to stop everything now, or None."""
 
@@ -87,7 +93,7 @@ def main(argv: list[str] | None = None, module: ModuleType | None = None, login:
     if not args.workdir:
         print("astra mt5 emergency : --workdir ou ASTRA_MT5_DIR obligatoire", file=sys.stderr)
         return 2
-    workdir = Path(args.workdir)
+    workdir = Path(_native(args.workdir))
     login = login if login is not None else int(os.environ.get("ASTRA_MT5_LOGIN", "0") or 0)
     if not login:
         print("astra mt5 emergency : ASTRA_MT5_LOGIN obligatoire", file=sys.stderr)
@@ -99,7 +105,8 @@ def main(argv: list[str] | None = None, module: ModuleType | None = None, login:
         print(json.dumps(report, ensure_ascii=False))
         return 0 if not report["failed"] else 1
     try:
-        limits: RiskLimits | None = load_required_limits(os.environ.get("ASTRA_MT5_RISK_FILE", "").strip() or None)
+        limits: RiskLimits | None = load_required_limits(
+            _native(os.environ.get("ASTRA_MT5_RISK_FILE", "").strip()) or None)
     except RiskConfigError as exc:
         limits = None
         _journal(workdir, {"ts": datetime.now(UTC).isoformat(), "watch": "limites illisibles", "reason": str(exc)})

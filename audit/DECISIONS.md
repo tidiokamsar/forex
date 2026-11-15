@@ -73,3 +73,11 @@ Règle : option la plus prudente au sens du document maître. Chaque décision d
 - Si le terminal est arrêté, aucun processus ne peut fermer de position. Les stops posés côté serveur chez le courtier restent alors la protection.
 
 **Écarté :** un second terminal MT5, qui demanderait une seconde connexion avec le mot de passe, donc un secret de plus.
+
+## D-009 - 15-11 - LOT 4 déployé tout de suite, sur instruction du propriétaire (D-007 révisée)
+
+**Choix :** le propriétaire a demandé de déployer le LOT 4. Le pont est donc redémarré pendant la fenêtre du LOT 1.
+
+**Raison :** le redémarrage ne crée pas de trou de données. Le curseur des ticks est gardé sur disque, et au redémarrage le pont relit dans l'historique du terminal les ticks de la coupure. Un trou se mesure sur l'horodatage des ticks, pas sur leur heure d'arrivée. Le rapport de trous du 16-11 le montrera.
+
+**Écarté :** attendre le 21-11, contraire à l'instruction.
