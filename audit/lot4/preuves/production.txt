@@ -1,0 +1,22 @@
+== EMERGENCY
+arrêt d'urgence 2026-11-15T23:42:27.380136+00:00 : test de porte LOT 4 depuis un processus separe
+== emergency.jsonl (dernieres lignes)
+{"ts": "2026-11-15T23:45:47.487090+00:00", "watch": "terminal inaccessible", "reason": "Mt5DemoError: terminal MT5 injoignable : (-10005, 'IPC timeout')", "decision": "fonds propres enregistrés par le pont dans les limites"}
+{"ts": "2026-11-15T23:46:37.694827+00:00", "watch": "terminal inaccessible", "reason": "Mt5DemoError: terminal MT5 injoignable : (-10005, 'IPC timeout')", "decision": "fonds propres enregistrés par le pont dans les limites"}
+{"ts": "2026-11-15T23:47:27.866565+00:00", "watch": "terminal inaccessible", "reason": "Mt5DemoError: terminal MT5 injoignable : (-10005, 'IPC timeout')", "decision": "fonds propres enregistrés par le pont dans les limites"}
+{"ts": "2026-11-15T23:48:18.923298+00:00", "watch": "terminal inaccessible", "reason": "Mt5DemoError: terminal MT5 injoignable : (-10005, 'IPC timeout')", "decision": "fonds propres enregistrés par le pont dans les limites"}
+== journal du pont
+{"ts": "2026-11-15T23:44:49.479393+00:00", "kind": "halted", "reason": "arrêt d'urgence déclaré : aucune position ASTRA, aucun ordre"}
+== suite
+Ran 1393 tests in 351.475s
+OK (skipped=1, expected failures=15)
+== limites
+e5f5635fa4a765755bf03fe4325efb7b1c2a9fc432586e31a71e6945be7d38f9  /etc/astra-risk/mt5-risk.json
+total 12
+drwxr-xr-x   2 root root 4096 Nov 15 23:39 .
+drwxr-xr-x 120 root root 4096 Nov 15 23:39 ..
+-rw-r--r--   1 root root  230 Nov 15 23:39 mt5-risk.json
+== services
+active
+active
+/var/lib/astra-mt5/bridge/STOP
