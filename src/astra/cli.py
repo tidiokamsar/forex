@@ -102,6 +102,9 @@ def build_parser() -> argparse.ArgumentParser:
     report_actions = report_cmd.add_subparsers(dest="report_action", required=True)
     report_daily = report_actions.add_parser("daily", help="Rapport d'une journée UTC (lecture seule)")
     report_daily.add_argument("--date", help="AAAA-MM-JJ (défaut : aujourd'hui, UTC)")
+    study_cmd = commands.add_parser("study", help="Études de recherche en lecture seule (aucun ordre)")
+    study_actions = study_cmd.add_subparsers(dest="study_action", required=True)
+    study_actions.add_parser("spreads", help="Écart réel par heure (cotations du pont) et effet horaire avec ces écarts")
     learn_cmd = commands.add_parser("learn", help="Apprentissage : journal d'audit, autorisation d'un champion pour le pont DEMO")
     learn_actions = learn_cmd.add_subparsers(dest="learn_action", required=True)
     learn_audit = learn_actions.add_parser("audit", help="Journal des décisions d'apprentissage (lecture seule)")
@@ -587,6 +590,16 @@ def _run(args: argparse.Namespace) -> int:
 
         if args.command == "learn":
             return _learn(args, config)
+
+        if args.command == "study":
+            from . import spreadstudy
+            from .marketdata import CandleStore
+            from .mt5view import Mt5View
+
+            view = Mt5View(config.database_path)
+            view.initialize()
+            _write_json(spreadstudy.study(CandleStore(config.database_path), view, datetime.now(UTC)))
+            return 0
 
         if args.command == "report":
             from . import reports

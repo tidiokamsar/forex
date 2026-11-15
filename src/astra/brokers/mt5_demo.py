@@ -28,7 +28,15 @@ from types import ModuleType
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from ..marketdata import INSTRUMENTS, KIND_OHLC, PAIRS, Candle, MarketDataError, canonical_symbol, canonical_timeframe
+from ..marketdata import (
+    INSTRUMENTS,
+    KIND_OHLC,
+    PAIRS,  # noqa: F401 - re-exported: the bridge's tradable pairs
+    Candle,
+    MarketDataError,
+    canonical_symbol,
+    canonical_timeframe,
+)
 
 DEFAULT_TERMINAL = r"C:\Program Files\MetaTrader 5\terminal64.exe"
 SERVER_ZONES = {"MetaQuotes-Demo": "Europe/Athens"}  # server -> IANA zone with the same offsets and switch dates
@@ -131,10 +139,10 @@ class Mt5DemoFeed:
         return wall.astimezone(UTC).isoformat()
 
     def quotes(self) -> list[dict[str, Any]]:
-        """Latest bid and ask of the pairs the terminal quotes, with the tick time in UTC."""
+        """Latest bid and ask of every registry instrument the terminal quotes, with the tick time in UTC."""
 
         out = []
-        for symbol in PAIRS:
+        for symbol in INSTRUMENTS:
             if not self.mt5.symbol_select(symbol, True):
                 continue
             tick = self.mt5.symbol_info_tick(symbol)
@@ -165,7 +173,10 @@ class Mt5DemoFeed:
                         "digits": int(getattr(s, "digits", 0) or 0), "volume_min": float(getattr(s, "volume_min", 0) or 0),
                         "volume_max": float(getattr(s, "volume_max", 0) or 0),
                         "volume_step": float(getattr(s, "volume_step", 0) or 0),
-                        "trade_mode": int(getattr(s, "trade_mode", 0) or 0), "spread": int(getattr(s, "spread", 0) or 0)})
+                        "trade_mode": int(getattr(s, "trade_mode", 0) or 0), "spread": int(getattr(s, "spread", 0) or 0),
+                        "swap_long": float(getattr(s, "swap_long", 0) or 0),
+                        "swap_short": float(getattr(s, "swap_short", 0) or 0),
+                        "swap_mode": int(getattr(s, "swap_mode", 0) or 0)})
         return out
 
     def _deal(self, d: Any) -> dict[str, Any]:

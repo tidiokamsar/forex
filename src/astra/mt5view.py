@@ -39,7 +39,8 @@ MAX_EVENTS_KEPT = 500
 MAX_EQUITY_POINTS = 30_000
 EQUITY_EVERY_SECONDS = 60
 QUOTES_STALE_AFTER_SECONDS = 60
-MAX_QUOTES = 10
+MAX_QUOTES = 40
+QUOTE_HISTORY_DAYS = 90  # one bid and ask per instrument and minute, kept this long (spread studies)
 STALE_AFTER_SECONDS = 15 * 60
 ACCOUNT_FIELDS = ("balance", "equity", "margin", "margin_free", "leverage")
 
@@ -71,6 +72,8 @@ CREATE TABLE IF NOT EXISTS mt5_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, actor TEXT NOT NULL, kind TEXT NOT NULL, params_json TEXT NOT NULL,
     status TEXT NOT NULL, result_json TEXT, finished_at TEXT);
 CREATE INDEX IF NOT EXISTS mt5_deals_position ON mt5_deals(position_id);
+CREATE TABLE IF NOT EXISTS mt5_quote_history (
+    minute TEXT NOT NULL, symbol TEXT NOT NULL, bid REAL NOT NULL, ask REAL NOT NULL, PRIMARY KEY (minute, symbol));
 """
 
 
@@ -171,6 +174,14 @@ def _number(value: Any, label: str) -> float:
     return float(value)
 
 
+def _optional(value: Any) -> float | None:
+    """A finite number, or None when the field is absent or not a number (older bridges do not send it)."""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value or abs(value) == float("inf"):
+        return None
+    return float(value)
+
+
 def _text(value: Any, label: str, limit: int = 40) -> str:
     if not isinstance(value, str) or not value or len(value) > limit:
         raise Mt5ViewError(f"{label} : texte de 1 à {limit} caractères attendu")
@@ -257,6 +268,10 @@ class Mt5View:
     def initialize(self) -> None:
         with self._connect() as db:
             db.executescript(_SCHEMA)
+            columns = {r[1] for r in db.execute("PRAGMA table_info(mt5_instruments)")}
+            for name, kind in (("swap_long", "REAL"), ("swap_short", "REAL"), ("swap_mode", "INTEGER")):
+                if name not in columns:  # added on 2026-11-15: the carry the broker pays or charges per lot and night
+                    db.execute(f"ALTER TABLE mt5_instruments ADD COLUMN {name} {kind}")
 
     def record(self, payload: Any, actor: str) -> dict[str, Any]:
         snapshot = validate(payload)
@@ -292,7 +307,7 @@ class Mt5View:
 
         quotes = payload.get("quotes") if isinstance(payload, dict) else None
         if not isinstance(quotes, list) or not 1 <= len(quotes) <= MAX_QUOTES:
-            raise Mt5ViewError("cotations : liste de 1 à 10 attendue")
+            raise Mt5ViewError(f"cotations : liste de 1 à {MAX_QUOTES} attendue")
         clean = []
         for q in quotes:
             if not isinstance(q, dict):
@@ -302,12 +317,24 @@ class Mt5View:
             if not (0 < bid <= ask < 1e6):
                 raise Mt5ViewError("cotation incohérente (0 < bid <= ask attendu)")
             clean.append((symbol, bid, ask, _text(q.get("time"), "heure", 40)))
-        now = _now().isoformat()
+        moment = _now()
+        now = moment.isoformat()
+        cutoff = (moment - timedelta(days=QUOTE_HISTORY_DAYS)).isoformat()[:16]
         with self._connect() as db:
             for symbol, bid, ask, tick_time in clean:
                 db.execute("INSERT OR REPLACE INTO mt5_quotes(symbol, bid, ask, tick_time, received_at) VALUES (?,?,?,?,?)",
                            (symbol, bid, ask, tick_time, now))
+                # the first quote of each minute is kept: the real, executable spread hour by hour
+                db.execute("INSERT OR IGNORE INTO mt5_quote_history(minute, symbol, bid, ask) VALUES (?,?,?,?)",
+                           (tick_time[:16], symbol, bid, ask))
+            db.execute("DELETE FROM mt5_quote_history WHERE minute < ?", (cutoff,))
         return {"quotes": len(clean)}
+
+    def quote_history(self, symbol: str, since: str | None = None) -> list[tuple[str, float, float]]:
+        with self._connect() as db:
+            rows = db.execute("SELECT minute, bid, ask FROM mt5_quote_history WHERE symbol = ? AND minute >= ? ORDER BY minute",
+                              (symbol, since or "")).fetchall()
+        return [(r["minute"], r["bid"], r["ask"]) for r in rows]
 
     def quotes(self) -> dict[str, Any]:
         with self._connect() as db:
@@ -344,11 +371,16 @@ class Mt5View:
                          text["currency_margin"], int(_number(item.get("digits"), "digits")),
                          _number(item.get("volume_min"), "volume_min"), _number(item.get("volume_max"), "volume_max"),
                          _number(item.get("volume_step"), "volume_step"), int(_number(item.get("trade_mode"), "trade_mode")),
-                         int(_number(item.get("spread"), "spread"))))
+                         int(_number(item.get("spread"), "spread")), _optional(item.get("swap_long")),
+                         _optional(item.get("swap_short")),
+                         None if _optional(item.get("swap_mode")) is None else int(item["swap_mode"])))
         now = _now().isoformat()
         with self._connect() as db:
             for row in rows:
-                db.execute("INSERT OR REPLACE INTO mt5_instruments VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (*row, now))
+                db.execute("INSERT OR REPLACE INTO mt5_instruments(server, name, grp, path, description, contract_size, "
+                           "currency_base, currency_profit, currency_margin, digits, volume_min, volume_max, volume_step, "
+                           "trade_mode, spread, swap_long, swap_short, swap_mode, received_at) "
+                           "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (*row, now))
             db.execute("INSERT OR REPLACE INTO mt5_sync(key, value) VALUES ('instruments_synced_at', ?)", (now,))
         return {"stored": len(rows)}
 

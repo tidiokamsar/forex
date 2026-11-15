@@ -202,7 +202,9 @@ class BridgeTests(unittest.TestCase):
     def test_stream_sends_quotes_account_and_positions_without_trading(self):
         with self.bridge.trader:
             sent = self.bridge.stream()
-        self.assertEqual(sent["quotes"], 7)
+        from astra.marketdata import INSTRUMENTS
+
+        self.assertEqual(sent["quotes"], len(INSTRUMENTS))  # every registry instrument, for the spread history
         paths = [p for p, _ in self.server.posts]
         self.assertEqual(paths, ["/api/mt5/quotes", "/api/mt5/snapshot"])
         quote = self.server.posts[0][1]["quotes"][0]
