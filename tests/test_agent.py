@@ -223,7 +223,7 @@ class Mt5FlowTests(AgentTokenCase):
         for name, scopes in (("reader", ("read",)), ("labber", ("read", "lab"))):
             other, _ = self.tokens.issue("cli:test", name, "owner", list(scopes))
             self.assertEqual(self.send(other, "/api/mt5/ticks", body).status_code, 403)
-        item = {"name": "EURUSD", "path": "Forex\EURUSD", "group": "Forex", "description": "x", "contract_size": 100000.0,
+        item = {"name": "EURUSD", "path": r"Forex\EURUSD", "group": "Forex", "description": "x", "contract_size": 100000.0,
                 "currency_base": "EUR", "currency_profit": "USD", "currency_margin": "EUR", "digits": 5,
                 "volume_min": 0.01, "volume_max": 100.0, "volume_step": 0.01, "trade_mode": 4, "spread": 2,
                 "swap_long": -6.1, "swap_short": 1.2, "swap_mode": 1}
