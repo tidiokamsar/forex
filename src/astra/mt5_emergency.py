@@ -114,9 +114,8 @@ def main(argv: list[str] | None = None, module: ModuleType | None = None, login:
                     AccountState(equity=equity, peak_equity=peak), limits)
                 if reason and not (workdir / "STOP").exists():
                     run(trader, workdir, reason)
-                elif reason:  # already stopped: close anything still open, without a new STOP line each round
-                    if any(p.magic in (MAGIC, MAGIC_MANUAL) for p in trader.positions()):
-                        run(trader, workdir, reason)
+                elif reason and any(p.magic in (MAGIC, MAGIC_MANUAL) for p in trader.positions()):
+                    run(trader, workdir, reason)  # already stopped: close what is still open
         except Mt5DemoError as exc:
             _journal(workdir, {"ts": datetime.now(UTC).isoformat(), "watch": "terminal indisponible",
                                "reason": str(exc)[:160]})

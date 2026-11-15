@@ -30,7 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from . import __version__
+from . import __version__, mt5_emergency
 from .agent import AgentHalt, ApiError, AstraClient, http_transport
 from .brokers import mt5_demo
 from .brokers.mt5_demo import DEFAULT_TERMINAL, Mt5DemoError
@@ -44,7 +44,6 @@ from .brokers.mt5_demo_orders import (
     Mt5OrderUnknown,
 )
 from .marketdata import INSTRUMENTS, pip_size
-from . import mt5_emergency
 from .mt5_risk import (
     AccountState,
     OrderRequest,
