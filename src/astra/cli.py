@@ -526,7 +526,12 @@ def _mt5_test_order(login: int) -> int:
     from .brokers.mt5_demo import Mt5DemoError
     from .brokers.mt5_demo_orders import Mt5DemoTrader
 
-    try:
+    # LOT 4 (audit/lot4/VERIFICATION.md, defect 1): this command sent an order without the risk gateway and the
+    # STOP file. It no longer sends anything; a controlled DEMO order goes through a site request (same gateway).
+    _write_json({"status": "refused", "reason": "ordre de test hors passerelle désactivé : utiliser une demande "
+                 "d'ordre du site, qui passe par la passerelle de risque"})
+    return 2
+    try:  # kept unreachable for reference until LOT 5 replaces it with gateway test orders
         with Mt5DemoTrader(expected_login=login) as trader:
             info = trader.mt5.symbol_info("EURUSD")
             tick = trader.mt5.symbol_info_tick("EURUSD")

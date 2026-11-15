@@ -216,8 +216,11 @@ class Bridge:
         if self.state.get("month") != month or not self.state.get("month_start_equity"):
             self.state["month"], self.state["month_start_equity"] = month, account["equity"]
         self.state["peak_equity"] = max(self.state.get("peak_equity") or 0.0, account["equity"])
+        # read by the separate emergency watcher when the terminal only answers the bridge
+        self.state["last_equity"], self.state["last_equity_at"] = account["equity"], self.clock().isoformat()
+        self.save()
         allowed, kill = self.controls()
-        if (self.workdir / "STOP").exists():
+        if (self.workdir / "STOP").exists() or (self.workdir / "EMERGENCY").exists():
             allowed, kill = False, True
         return AccountState(
             environment=account.get("environment"), login=account.get("login"), expected_login=self.trader.expected_login,
@@ -445,6 +448,8 @@ class Bridge:
             stop.write_text("", encoding="utf-8")
             return "EXECUTE", {"message": "ordres automatiques suspendus (fichier STOP posé)"}, []
         if kind == "resume":
+            if (self.workdir / "EMERGENCY").exists():
+                return "REFUSE", {"message": "arrêt d'urgence déclaré : seule une personne retire le fichier EMERGENCY"}, []
             allowed, kill = self.controls()
             if allowed is not True or kill is not False:
                 return "REFUSE", {"message": "arrêt d'urgence ou gel actif, ou état illisible : le STOP reste en place"}, []
@@ -454,7 +459,7 @@ class Bridge:
         positions = trader.positions()
         if kind == "order":
             self.controls_cache_clear()
-            if stop.exists():
+            if stop.exists() or (self.workdir / "EMERGENCY").exists():
                 return "REFUSE", {"message": "fichier STOP présent : aucun ordre d'ouverture"}, []
             outcome, actions = self._enter(trader, item["symbol"], item["side"], item["stop_pips"] * pip_size(item["symbol"]),
                                            f"manuel:{item['id']}", f"ordre manuel demandé par {item.get('actor')}", manual=True)
@@ -497,6 +502,14 @@ class Bridge:
         status = self.client.get("/api/status")
         if status.get("mode") != "SIMULATION" or not status.get("live_locked", False):
             raise AgentHalt(f"server not in SIMULATION with LIVE locked: {status.get('mode')}")
+        if (self.workdir / "EMERGENCY").exists():  # declared by the watcher: close every ASTRA position
+            with self.trader as trader:
+                if any(p.magic in (MAGIC, MAGIC_MANUAL) for p in trader.positions()):
+                    report = mt5_emergency.run(trader, self.workdir, "arrêt d'urgence déclaré : fermeture par le pont")
+                    self.note("emergency", **report)
+                    return {"halted": True, "emergency": report, "actions": []}
+            self.note("halted", reason="arrêt d'urgence déclaré : aucune position ASTRA, aucun ordre")
+            return {"halted": True, "actions": []}
         if (self.workdir / "STOP").exists():
             self.note("halted", reason="fichier STOP présent : aucun ordre")
             return {"halted": True, "actions": []}

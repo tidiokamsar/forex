@@ -1,20 +1,24 @@
 """Emergency stop of the MT5 DEMO account: a separate process (master document, section VIII).
 
-``run`` first writes the ``STOP`` file in the bridge's work directory (the bridge then sends no order at all), then
-closes every position ASTRA opened (automatic and site orders). Positions opened by hand are never touched. A close
-that fails is reported and the STOP file stays: only a person removes it (``astra mt5 emergency`` never does).
+``declare`` writes two files in the bridge's work directory: ``STOP`` (the bridge sends no new order) and ``EMERGENCY``
+(the bridge closes every ASTRA position at its next cycle; a "resume" from the site never lifts it, only a person
+removing the file does). ``run`` declares, then closes every ASTRA position itself through the terminal. Positions
+opened by hand are never touched. A close that fails is reported; the files stay.
 
-``trigger`` says when the stop is due on its own: equity ``emergency_drawdown_pct`` below its peak, or a peak that
-cannot be read.
+``trigger`` says when the stop is due: equity ``emergency_drawdown_pct`` below its peak, or figures that are not finite.
 
-``main`` runs alone: it attaches to the terminal already signed in (no password), reads the peak kept by the bridge,
-and either stops at once (``--reason``) or watches (``--watch``). It works when the bridge is down.
+``main --watch`` runs apart from the bridge, every 30 s. It reads the equity from the terminal when it can attach to
+it; the terminal often answers only one process (the bridge), so otherwise it uses the equity the bridge recorded in
+its state file within the last ``FRESH_SECONDS``. When the stop is due and it cannot reach the terminal, it declares
+the emergency and the bridge does the closing. With no fresh figure at all it writes a journal line and does nothing:
+a bridge that is down cannot close anything either, and every position keeps its stop on the broker's server.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -28,6 +32,7 @@ from .brokers.mt5_demo_orders import MAGIC, MAGIC_MANUAL, Mt5DemoTrader
 from .mt5_risk import AccountState, RiskConfigError, RiskLimits, load_required_limits
 
 WATCH_SECONDS = 30
+FRESH_SECONDS = 180
 
 
 def _native(path: str) -> str:
@@ -36,10 +41,14 @@ def _native(path: str) -> str:
     return "Z:" + path.replace("/", "\\") if os.name == "nt" and path.startswith("/") else path
 
 
-def trigger(account: AccountState, limits: RiskLimits) -> str | None:
-    """The reason to stop everything now, or None."""
+def _finite(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
-    if not account.peak_equity or not account.equity or account.peak_equity <= 0:
+
+def trigger(account: AccountState, limits: RiskLimits) -> str | None:
+    """The reason to stop everything now, or None. Figures that are not finite or not positive stop everything."""
+
+    if not (_finite(account.peak_equity) and _finite(account.equity) and account.peak_equity > 0 and account.equity > 0):
         return "sommet des fonds propres ou fonds propres illisibles"
     drawdown = (account.peak_equity - account.equity) / account.peak_equity * 100
     if drawdown >= limits.emergency_drawdown_pct:
@@ -48,18 +57,25 @@ def trigger(account: AccountState, limits: RiskLimits) -> str | None:
 
 
 def _journal(workdir: Path, entry: dict[str, Any]) -> None:
+    workdir.mkdir(parents=True, exist_ok=True)
     with (workdir / "emergency.jsonl").open("a", encoding="utf-8") as out:
         out.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
 
 
-def run(trader: Mt5DemoTrader, workdir: Path, reason: str) -> dict[str, Any]:
-    """STOP first, then close every ASTRA position. Idempotent: a second run closes what is left."""
+def declare(workdir: Path, reason: str) -> None:
+    """STOP and EMERGENCY files: no new order, and the bridge closes every ASTRA position."""
 
     workdir.mkdir(parents=True, exist_ok=True)
-    now = datetime.now(UTC).isoformat()
-    stop = workdir / "STOP"
-    with stop.open("a", encoding="utf-8") as out:
-        out.write(f"arrêt d'urgence {now} : {reason}\n")
+    line = f"arrêt d'urgence {datetime.now(UTC).isoformat()} : {reason}\n"
+    for name in ("STOP", "EMERGENCY"):
+        with (workdir / name).open("a", encoding="utf-8") as out:
+            out.write(line)
+
+
+def run(trader: Mt5DemoTrader, workdir: Path, reason: str) -> dict[str, Any]:
+    """Declare, then close every ASTRA position. Idempotent: a second run closes what is left."""
+
+    declare(workdir, reason)
     closed, failed, kept = [], [], []
     for position in trader.positions():
         if position.magic not in (MAGIC, MAGIC_MANUAL):
@@ -68,10 +84,10 @@ def run(trader: Mt5DemoTrader, workdir: Path, reason: str) -> dict[str, Any]:
         try:
             trader.close(position)
             closed.append(position.ticket)
-        except Mt5DemoError as exc:  # rejected, unknown outcome, terminal changed: reported, STOP stays
+        except Mt5DemoError as exc:  # rejected, unknown outcome, terminal changed: reported, the files stay
             failed.append({"ticket": position.ticket, "symbol": position.symbol, "reason": str(exc)[:160]})
-    report = {"ts": now, "reason": reason, "closed": closed, "failed": failed, "untouched_manual": kept,
-              "stop_file": str(stop)}
+    report = {"ts": datetime.now(UTC).isoformat(), "reason": reason, "closed": closed, "failed": failed,
+              "untouched_manual": kept, "stop_file": str(workdir / "STOP")}
     _journal(workdir, report)
     return report
 
@@ -83,8 +99,48 @@ def _state(workdir: Path) -> dict[str, Any]:
         return {}
 
 
+def _recorded_equity(state: dict[str, Any]) -> float | None:
+    try:
+        age = (datetime.now(UTC) - datetime.fromisoformat(state["last_equity_at"])).total_seconds()
+        equity = float(state["last_equity"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return equity if 0 <= age <= FRESH_SECONDS else None
+
+
+def watch_once(trader: Mt5DemoTrader, workdir: Path, limits: RiskLimits | None) -> None:
+    state = _state(workdir)
+    problem = None
+    try:
+        with trader:
+            equity = trader.refresh_account()["equity"]
+            peak = max(float(state.get("peak_equity") or 0.0), equity)
+            reason = "fichier de limites illisible" if limits is None else trigger(
+                AccountState(equity=equity, peak_equity=peak), limits)
+            if reason and (not (workdir / "EMERGENCY").exists()
+                           or any(p.magic in (MAGIC, MAGIC_MANUAL) for p in trader.positions())):
+                run(trader, workdir, reason)
+            return
+    except Exception as exc:  # noqa: BLE001 - the watcher must outlive any error; each one is written down
+        problem = f"{type(exc).__name__}: {exc}"[:160]
+    equity = _recorded_equity(state)
+    entry: dict[str, Any] = {"ts": datetime.now(UTC).isoformat(), "watch": "terminal inaccessible", "reason": problem}
+    if equity is None:
+        entry["decision"] = "aucun chiffre récent du pont : rien à décider"
+    else:
+        peak = max(float(state.get("peak_equity") or 0.0), equity)
+        reason = "fichier de limites illisible" if limits is None else trigger(
+            AccountState(equity=equity, peak_equity=peak), limits)
+        if reason and not (workdir / "EMERGENCY").exists():
+            declare(workdir, reason)
+            entry["decision"] = f"arrêt d'urgence déclaré, fermeture confiée au pont : {reason}"
+        else:
+            entry["decision"] = "fonds propres enregistrés par le pont dans les limites" if not reason else "déjà déclaré"
+    _journal(workdir, entry)
+
+
 def main(argv: list[str] | None = None, module: ModuleType | None = None, login: int | None = None,
-         sleep: Any = time.sleep, rounds: int | None = None) -> int:
+         sleep: Any = time.sleep, rounds: int | None = None, limits: RiskLimits | None = None) -> int:
     parser = argparse.ArgumentParser(prog="astra mt5 emergency")
     parser.add_argument("--workdir", default=os.environ.get("ASTRA_MT5_DIR", ""))
     parser.add_argument("--reason", default="")
@@ -100,32 +156,23 @@ def main(argv: list[str] | None = None, module: ModuleType | None = None, login:
         return 2
     trader = Mt5DemoTrader(os.environ.get("ASTRA_MT5_TERMINAL", DEFAULT_TERMINAL), module=module, expected_login=login)
     if not args.watch:
-        with trader:
-            report = run(trader, workdir, args.reason or "arrêt manuel")
-        print(json.dumps(report, ensure_ascii=False))
-        return 0 if not report["failed"] else 1
-    try:
-        limits: RiskLimits | None = load_required_limits(
-            _native(os.environ.get("ASTRA_MT5_RISK_FILE", "").strip()) or None)
-    except RiskConfigError as exc:
-        limits = None
-        _journal(workdir, {"ts": datetime.now(UTC).isoformat(), "watch": "limites illisibles", "reason": str(exc)})
-    done = 0
-    while rounds is None or done < rounds:
         try:
             with trader:
-                equity = trader.refresh_account()["equity"]
-                state = _state(workdir)
-                peak = max(float(state.get("peak_equity") or 0.0), equity)
-                reason = "fichier de limites illisible" if limits is None else trigger(
-                    AccountState(equity=equity, peak_equity=peak), limits)
-                if reason and not (workdir / "STOP").exists():
-                    run(trader, workdir, reason)
-                elif reason and any(p.magic in (MAGIC, MAGIC_MANUAL) for p in trader.positions()):
-                    run(trader, workdir, reason)  # already stopped: close what is still open
-        except Mt5DemoError as exc:
-            _journal(workdir, {"ts": datetime.now(UTC).isoformat(), "watch": "terminal indisponible",
-                               "reason": str(exc)[:160]})
+                report = run(trader, workdir, args.reason or "arrêt manuel")
+        except Mt5DemoError as exc:  # no terminal: the bridge closes at its next cycle
+            declare(workdir, args.reason or "arrêt manuel")
+            report = {"declared": True, "closed": [], "failed": [], "reason": str(exc)[:160]}
+            _journal(workdir, report)
+        print(json.dumps(report, ensure_ascii=False))
+        return 0 if not report["failed"] else 1
+    if limits is None:
+        try:
+            limits = load_required_limits(_native(os.environ.get("ASTRA_MT5_RISK_FILE", "").strip()) or None)
+        except RiskConfigError as exc:
+            _journal(workdir, {"ts": datetime.now(UTC).isoformat(), "watch": "limites illisibles", "reason": str(exc)})
+    done = 0
+    while rounds is None or done < rounds:
+        watch_once(trader, workdir, limits)
         done += 1
         if rounds is None or done < rounds:
             sleep(WATCH_SECONDS)

@@ -81,3 +81,15 @@ Règle : option la plus prudente au sens du document maître. Chaque décision d
 **Raison :** le redémarrage ne crée pas de trou de données. Le curseur des ticks est gardé sur disque, et au redémarrage le pont relit dans l'historique du terminal les ticks de la coupure. Un trou se mesure sur l'horodatage des ticks, pas sur leur heure d'arrivée. Le rapport de trous du 16-11 le montrera.
 
 **Écarté :** attendre le 21-11, contraire à l'instruction.
+
+## D-010 - 15-11 - Corrections après la vérification n° 1 du LOT 4 (porte non franchie)
+
+**Défauts et corrections :**
+1. **`astra mt5 test-order` envoyait un ordre hors passerelle et hors STOP.** La commande est désactivée et ne fait plus que refuser. Les ordres de test du LOT 5 passeront par la passerelle.
+2. **Des fonds propres NaN ou infinis ne déclenchaient pas l'arrêt.** C'est corrigé : un chiffre non fini déclenche maintenant l'arrêt.
+3. **Une erreur autre que `Mt5DemoError` faisait tomber le veilleur.** Toute erreur est désormais écrite au journal, et le veilleur continue.
+4. **Une demande « resume » du site retirait aussi le STOP posé par l'arrêt d'urgence.** Un fichier `EMERGENCY` distinct, que « resume » ne retire jamais, règle le problème.
+
+**Constaté en production au premier déploiement :**
+- **Le veilleur ne pouvait pas lire `/etc/astra/mt5-risk.json`.** Le dossier est en 0750 root:astra et `astra-mt5` n'est pas dans ce groupe. Le fichier passe dans `/etc/astra-risk/` (dossier 0755 root, fichier 0644 root), sans toucher aux droits de `/etc/astra`, qui contient des secrets.
+- **Le terminal MT5 ne répondait pas au second processus** (`IPC timeout`). Le veilleur décide donc à partir des fonds propres que le pont enregistre toutes les 5 s, avec une fraîcheur de 180 s au plus. Il déclare l'urgence, et c'est le pont qui ferme les positions. Le veilleur ne ferme lui-même que s'il arrive à s'attacher au terminal.
