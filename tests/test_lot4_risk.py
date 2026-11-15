@@ -87,8 +87,9 @@ class PresetChecksTests(unittest.TestCase):
         held = ({"symbol": "EURUSD", "side": "LONG", "volume": 0.6, "price_open": 1.1, "price_current": 1.1},)
         cross = order("EURGBP", lots=0.5, loss=95.0, bid=0.846, ask=0.84602)
         self.assertIn("exposition_par_devise", self.failed(account(positions=held), cross))
-        # a currency without a known USD rate cannot be measured: refused
-        self.assertIn("exposition_par_devise", self.failed(account(usd_rates={"USD": 1.0}), order()))
+        # a currency without a known USD rate cannot be measured: refused (a cross; a dollar pair prices itself, D-006)
+        self.assertIn("exposition_par_devise", self.failed(account(usd_rates={"USD": 1.0}),
+                                                           order("EURGBP", lots=0.1, loss=95.0, bid=0.846, ask=0.84602)))
 
     def test_r4_gross_leverage_is_capped_at_three(self):
         held = tuple({"symbol": s, "side": "LONG", "volume": 0.9, "price_open": p, "price_current": p}

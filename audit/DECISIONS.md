@@ -45,3 +45,13 @@ Règle : option la plus prudente au sens du document maître. Chaque décision d
 **Choix :** fichier `/etc/astra/mt5-risk.json`, propriété de root, mode 0644, lu par le pont via `ASTRA_MT5_RISK_FILE` (drop-in systemd). Sans ce fichier, toute entrée est refusée.
 
 **Limite connue :** l'agent dispose d'un accès root par SSH. Le principe 5 n'est donc tenu que par discipline et par trace : toute modification du fichier change son empreinte SHA-256, et le pont publie cette empreinte. Une séparation réelle demanderait un accès que seul le propriétaire contrôle (voir BESOINS B-002).
+
+## D-006 - 15-11 - Deux tests corrigés pour l'exposition par devise (commit séparé)
+
+**Choix :** le moteur prend le taux en USD d'une devise dans le prix même d'une paire qui a une jambe en dollar : l'ordre, ou une position ouverte. Une croisée exige, elle, des taux venant des cotations du terminal. Sans eux, elle est refusée.
+
+**Correction de deux tests :**
+- `test_lot4_risk` R3 supposait qu'un ordre EURUSD ne permettait pas de mesurer l'EUR, ce qui était faux : son propre prix le donne. L'assertion de refus porte maintenant sur une croisée, EURGBP.
+- `test_mt5_risk` (écart sur les croisées) acceptait une croisée sans aucun taux. Le LOT 4 l'interdit, puisque l'exposition n'y est pas mesurable. Le test fournit désormais des taux, et ce qu'il vérifie (le plafond d'écart) n'a pas changé.
+
+**Écarté :** autoriser une exposition non mesurable, ce qui contredit la règle du refus par défaut.

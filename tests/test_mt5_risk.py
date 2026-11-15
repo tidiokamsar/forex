@@ -137,7 +137,8 @@ class WiderInstrumentTests(unittest.TestCase):
         wide = replace(self.GOLD, ask=2652.5)  # 250 pips at 0.01: far above 3 times the usual 30
         self.assertIn("spread", failed(mt5_risk.evaluate_entry(ACCOUNT, wide, LIMITS)))
         cross = replace(ORDER, symbol="EURGBP", bid=0.85, ask=0.85015, loss_at_stop_usd=400.0, required_margin=500.0)
-        self.assertEqual(failed(mt5_risk.evaluate_entry(ACCOUNT, cross, LIMITS)), set())  # 1.5 pips, cap 3
+        rated = replace(ACCOUNT, usd_rates={"USD": 1.0, "EUR": 1.10, "GBP": 1.29})  # LOT 4: a cross needs both rates (D-006)
+        self.assertEqual(failed(mt5_risk.evaluate_entry(rated, cross, LIMITS)), set())  # 1.5 pips, cap 3
         self.assertIn("spread", failed(mt5_risk.evaluate_entry(ACCOUNT, replace(cross, ask=0.8504), LIMITS)))  # 4 pips
 
     def test_the_number_of_crosses_without_a_dollar_leg_is_bounded(self):
