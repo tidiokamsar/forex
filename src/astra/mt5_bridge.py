@@ -76,12 +76,19 @@ def feed_pairs(daily: dict[str, Any], hourly: dict[str, Any] | None) -> list[dic
     for pair in daily.get("pairs", []):
         other = hourly_by.get(pair["symbol"])
         demo = other.get("demo_session") if other else None
-        chosen.append({**pair, "session": demo, "profile": "H1"} if demo else {**pair, "profile": "D1"})
+        chosen.append({**pair, "session": demo, "profile": "H1", "confirmed": _confirmed(other)} if demo
+                      else {**pair, "profile": "D1"})
     daily_symbols = {pair["symbol"] for pair in daily.get("pairs", [])}
     for symbol, other in hourly_by.items():  # an instrument that only has an hourly pipeline (crosses, metals)
         if symbol not in daily_symbols and other.get("demo_session"):
-            chosen.append({**other, "session": other["demo_session"], "profile": "H1"})
+            chosen.append({**other, "session": other["demo_session"], "profile": "H1", "confirmed": _confirmed(other)})
     return chosen
+
+
+def _confirmed(pair: dict[str, Any]) -> bool:
+    """True when the hourly champion of the pair was confirmed by its own prospective review."""
+
+    return (((pair.get("champion") or {}).get("params") or {}).get("review_status")) == "CONFIRME"
 
 
 def targets(overview: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -101,6 +108,7 @@ def targets(overview: dict[str, Any]) -> dict[str, dict[str, Any]]:
             result[symbol] = {"side": "FLAT", "reason": f"décision en attente : {pending['label']}"}
         elif position:
             result[symbol] = {"side": side, "entry_ts": position["entry_ts"], "session_id": session["id"],
+                              "unconfirmed": pair.get("profile") == "H1" and not pair.get("confirmed"),
                               "stop_distance": abs(position["entry_ref"] - position["stop"]),
                               "reason": f"position {side} du compte simulé depuis {position['entry_ts']}"}
         else:
@@ -299,7 +307,7 @@ class Bridge:
         return [{k: v for k, v in i.items() if k in keep} for i in recent]
 
     def _enter(self, trader: Mt5DemoTrader, symbol: str, side: str, stop_distance: float, entry_ts: str, reason: str,
-               manual: bool = False) -> tuple[str, list[dict[str, Any]]]:
+               manual: bool = False, unconfirmed: bool = False) -> tuple[str, list[dict[str, Any]]]:
         """One opening order through the gateway, the written intention and the outcome handling. Automatic and manual
         orders share this path. The volume always comes from the risk limit. Returns (outcome, actions) with outcome
         OUVERT, REFUSE, REJETE or INCONNU."""
@@ -310,6 +318,8 @@ class Bridge:
         state = self.account_state(trader.refresh_account(), trader.positions())
         limits = self.limits
         risk_pct = limits.risk_per_trade_pct if isinstance(limits, RiskLimits) else 0.0
+        if unconfirmed and isinstance(limits, RiskLimits):
+            risk_pct *= limits.unconfirmed_risk_scale  # an adopted, not yet confirmed champion: reduced size
         risk_usd = state.equity * risk_pct / 100
         entry = trader.prepare_entry(symbol, side, stop_distance, risk_usd)
         age = None
@@ -523,7 +533,7 @@ class Bridge:
                 if self.pending_intent(symbol) is not None:
                     continue  # an earlier order on this pair has no known outcome yet: look first, never send again
                 actions.extend(self._enter(trader, symbol, target["side"], target["stop_distance"], target["entry_ts"],
-                                           target["reason"])[1])
+                                           target["reason"], unconfirmed=bool(target.get("unconfirmed")))[1])
             everything = trader.positions()
             account = trader.refresh_account()
             manual_positions = [asdict(p) for p in everything if not p.astra]

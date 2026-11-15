@@ -377,6 +377,7 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual([(a["kind"], a["symbol"]) for a in self.bridge.cycle()["actions"]], [("open", "EURGBP")])
         self.assertEqual(self.fake.sent[0]["symbol"], "EURGBP")
         self.assertEqual(len(self.fake.open_positions), 1)
+        self.assertAlmostEqual(self.fake.sent[0]["volume"], 0.16, places=2)  # not confirmed: a fifth of the usual 0.83 lot
         self.server.hourly_view = hourly(None)  # suspended by the review or taken back: no feed any more
         actions = self.bridge.cycle()["actions"]
         self.assertEqual([(a["kind"], a["symbol"]) for a in actions], [("close", "EURGBP")])
@@ -406,6 +407,10 @@ class BridgeTests(unittest.TestCase):
         self.server.view = daily_flat
         self.server.hourly_view = hourly({"EURUSD": hourly_short})
         self.assertEqual([a["kind"] for a in self.bridge.cycle()["actions"]], ["open"])  # the authorized hourly feed opens it
+        self.assertAlmostEqual(self.fake.sent[-1]["volume"], 0.16, places=2)  # champion without a confirmation: reduced size
+        confirmed = hourly({"EURUSD": {**hourly_short, "entry_ts": "2026-10-29T09:00:00+00:00"}})
+        confirmed["pairs"][0]["champion"]["params"] = {"review_status": "CONFIRME"}
+        self.assertTrue(feed_pairs(daily_flat, confirmed)[0]["confirmed"])  # a confirmed champion trades at the full size
         self.server.hourly_fail = True  # a network incident on the hourly read: the daily view says "flat"
         self.assertEqual(self.bridge.cycle()["actions"], [])
         self.assertEqual(len(self.fake.open_positions), 1)  # still open

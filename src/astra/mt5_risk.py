@@ -45,6 +45,9 @@ class RiskLimits:
 
     risk_per_trade_pct: float = 0.5        # loss at the stop, % of equity
     risk_tolerance: float = 1.05           # volume rounding may exceed the target by this factor
+    # A hourly champion a person put on the bridge before its prospective review confirmed it trades at this share of
+    # the risk per trade (0.2: 0.1 % of equity): it is there to be measured, not trusted.
+    unconfirmed_risk_scale: float = 0.2
     max_lots_per_position: float = 2.0
     max_positions: int = 7
     max_positions_per_symbol: int = 1
@@ -69,6 +72,7 @@ class RiskLimits:
         checks = (
             (0 < self.risk_per_trade_pct <= 2.0, "risk_per_trade_pct entre 0 et 2"),
             (1.0 <= self.risk_tolerance <= 1.5, "risk_tolerance entre 1 et 1,5"),
+            (0 < self.unconfirmed_risk_scale <= 1.0, "unconfirmed_risk_scale entre 0 et 1"),
             (0 < self.max_lots_per_position <= 10, "max_lots_per_position entre 0 et 10"),
             (1 <= self.max_positions <= 50, "max_positions entre 1 et 50"),
             (1 <= self.max_positions_per_symbol <= 5, "max_positions_per_symbol entre 1 et 5"),
