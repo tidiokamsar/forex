@@ -58,7 +58,7 @@ class FixTests(unittest.TestCase):
         mt5_emergency.declare(self.dir, "test")  # the watcher could not reach the terminal: it hands over to the bridge
         self.assertTrue((self.dir / "STOP").exists() and (self.dir / "EMERGENCY").exists())
         with bridge.trader:
-            status, result, _ = bridge._handle_request({"id": 1, "kind": "resume"})
+            status, _result, _ = bridge._handle_request({"id": 1, "kind": "resume"})
         self.assertEqual(status, "REFUSE")
         self.assertTrue((self.dir / "EMERGENCY").exists())
         bridge.cycle()
