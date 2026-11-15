@@ -11,10 +11,11 @@ Pure functions and dataclasses: this module imports no broker, no execution code
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from collections.abc import Iterable
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +68,12 @@ class RiskLimits:
     max_cross_positions: int = 3
     max_spread_cost_multiple: float = 3.0  # outside the seven pairs: spread cap = this multiple of the instrument's usual spread
     allowed_symbols: tuple[str, ...] = field(default_factory=lambda: tuple(INSTRUMENTS))
+    # LOT 4 (master document, section VIII, PRESET values; audit/DECISIONS.md D-003)
+    max_net_currency_exposure_x: float = 1.0   # |net notional per currency| in USD, as a multiple of equity
+    max_gross_leverage_x: float = 3.0          # sum of the positions' notional in USD, as a multiple of equity
+    monthly_halving_pct: float = 4.0           # a month down this much: every new size is halved
+    emergency_drawdown_pct: float = 12.0       # this far below the peak: the emergency stop closes everything
+    file_sha256: str = ""                      # fingerprint of the limits file this profile was read from
 
     def validate(self) -> None:
         checks = (
@@ -90,6 +97,10 @@ class RiskLimits:
             (1 <= self.max_cross_positions <= 10, "max_cross_positions entre 1 et 10"),
             (1.0 <= self.max_spread_cost_multiple <= 10, "max_spread_cost_multiple entre 1 et 10"),
             (bool(self.allowed_symbols) and all(s in INSTRUMENTS for s in self.allowed_symbols), "allowed_symbols inconnus"),
+            (0 < self.max_net_currency_exposure_x <= 20, "max_net_currency_exposure_x entre 0 et 20"),
+            (0 < self.max_gross_leverage_x <= 50, "max_gross_leverage_x entre 0 et 50"),
+            (0 < self.monthly_halving_pct <= 30, "monthly_halving_pct entre 0 et 30"),
+            (1 <= self.emergency_drawdown_pct <= 30, "emergency_drawdown_pct entre 1 et 30"),
         )
         for ok, message in checks:
             if not ok:
@@ -97,6 +108,18 @@ class RiskLimits:
 
     def public(self) -> dict[str, Any]:
         return {**asdict(self), "allowed_symbols": list(self.allowed_symbols), "version": LIMITS_VERSION}
+
+
+def load_required_limits(path: str | Path | None) -> RiskLimits:
+    """The limits file outside the repository (principle 5). No file, no entry: there is no default profile."""
+
+    if not path:
+        raise RiskConfigError("aucun fichier de limites (ASTRA_MT5_RISK_FILE) : entrées refusées")
+    try:
+        digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError as exc:
+        raise RiskConfigError(f"fichier de limites illisible : {exc}") from exc
+    return replace(load_limits(path), file_sha256=digest)
 
 
 def load_limits(path: str | Path | None) -> RiskLimits:
@@ -110,7 +133,7 @@ def load_limits(path: str | Path | None) -> RiskLimits:
             raise RiskConfigError(f"profil de risque illisible : {exc}") from exc
         if not isinstance(raw, dict):
             raise RiskConfigError("profil de risque : objet JSON attendu")
-        known = {f.name for f in fields(RiskLimits)}
+        known = {f.name for f in fields(RiskLimits)} - {"file_sha256"}
         unknown = set(raw) - known
         if unknown:
             raise RiskConfigError(f"paramètres inconnus : {', '.join(sorted(unknown))}")
@@ -150,6 +173,7 @@ class AccountState:
     unknown_orders: int | None = None                    # orders sent whose outcome is not yet known
     entries_allowed_by_server: bool | None = None        # /api/controls: kill switch and entry freezes
     kill_switch_active: bool | None = None
+    usd_rates: dict[str, float] | None = None            # USD value of one unit of each currency, from live quotes
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,6 +284,87 @@ def usd_exposure(symbol: str, side: str, lots: float, price: float) -> float:
     return 0.0
 
 
+def size_scale(account: AccountState, limits: RiskLimits) -> float:
+    """1.0, or 0.5 once the month is down ``monthly_halving_pct``. Never above 1: size only falls after a loss and never
+    rises after gains. An unknown month start counts as a losing month."""
+
+    if not (_ok(account.equity) and _ok(account.month_start_equity) and account.month_start_equity > 0):
+        return 0.5
+    loss = (account.month_start_equity - account.equity) / account.month_start_equity * 100
+    return 0.5 if loss >= limits.monthly_halving_pct else 1.0
+
+
+def currency_exposures(symbol: str, side: str, lots: float, price: float,
+                       rates: dict[str, float]) -> dict[str, float]:
+    """Signed USD value per currency of one position: long the base currency, short the quote currency.
+    Raises KeyError when a currency has no USD rate (the exposure cannot be measured)."""
+
+    if side not in ("LONG", "SHORT"):
+        raise ValueError(f"sens inconnu : {side!r}")
+    spec = INSTRUMENTS[symbol]
+    sign = 1 if side == "LONG" else -1
+    units = lots * contract_size_of(symbol)
+    out = {spec.base: sign * units * rates[spec.base]}
+    out[spec.quote] = out.get(spec.quote, 0.0) - sign * units * price * rates[spec.quote]
+    return out
+
+
+def _book(positions: Iterable[dict[str, Any]], rates: dict[str, float]) -> tuple[dict[str, float], float]:
+    net: dict[str, float] = {}
+    gross = 0.0
+    for p in positions:
+        price = p.get("price_current") or p.get("price_open")
+        if not _ok(price) or price <= 0:
+            raise ValueError(f"prix inconnu pour {p.get('symbol')}")
+        legs = currency_exposures(str(p.get("symbol")), str(p.get("side")), float(p.get("volume", 0) or 0), price, rates)
+        for currency, value in legs.items():
+            net[currency] = net.get(currency, 0.0) + value
+        gross += abs(next(iter(legs.values())))
+    return net, gross
+
+
+def exposure_checks(account: AccountState, order: OrderRequest, limits: RiskLimits) -> list[Check]:
+    """Net exposure per currency and gross leverage after the order (a currency the order reduces is never blocked)."""
+
+    rates = dict(account.usd_rates or {})
+    rates.setdefault("USD", 1.0)
+    # A pair with a dollar leg prices its other currency in dollars by itself: the order's mid and each position's
+    # current price fill the rates the live table may lack. A cross still needs a rate from the table.
+    priced = [(order.symbol, (order.bid + order.ask) / 2 if _ok(order.bid) and _ok(order.ask) else None)]
+    priced += [(str(p.get("symbol")), p.get("price_current") or p.get("price_open")) for p in account.positions]
+    for symbol, price in priced:
+        if symbol in INSTRUMENTS and _ok(price) and price > 0:
+            spec = INSTRUMENTS[symbol]
+            if spec.quote == "USD":
+                rates.setdefault(spec.base, price)
+            elif spec.base == "USD":
+                rates.setdefault(spec.quote, 1 / price)
+    if not (_ok(account.equity) and account.equity > 0 and _ok(order.bid) and _ok(order.ask) and order.symbol in INSTRUMENTS):
+        return [Check("exposition_par_devise", False, "fonds propres ou cotation inconnus"),
+                Check("levier_brut", False, "fonds propres ou cotation inconnus")]
+    try:
+        net_before, gross_before = _book(account.positions, rates)
+        legs = currency_exposures(order.symbol, order.side, order.lots, (order.bid + order.ask) / 2, rates)
+    except (KeyError, ValueError, TypeError) as exc:
+        reason = f"exposition non mesurable ({exc}) : entrée refusée"
+        return [Check("exposition_par_devise", False, reason), Check("levier_brut", False, reason)]
+    cap = limits.max_net_currency_exposure_x * account.equity
+    ok, worst, worst_currency = True, 0.0, ""
+    for currency, value in legs.items():
+        before = net_before.get(currency, 0.0)
+        after = before + value
+        if abs(after) > cap and abs(after) > abs(before):
+            ok = False
+        if abs(after) >= abs(worst):
+            worst, worst_currency = after, currency
+    out = [Check("exposition_par_devise", ok, f"exposition nette la plus forte après l'ordre : {worst_currency} "
+                 f"{worst / account.equity:+.2f}x les fonds propres (maximum {limits.max_net_currency_exposure_x}x)")]
+    gross_after = gross_before + abs(next(iter(legs.values())))
+    out.append(Check("levier_brut", gross_after <= limits.max_gross_leverage_x * account.equity,
+                     f"levier brut après l'ordre {gross_after / account.equity:.2f}x (maximum {limits.max_gross_leverage_x}x)"))
+    return out
+
+
 def order_checks(account: AccountState, order: OrderRequest, limits: RiskLimits) -> list[Check]:
     out = [Check("instrument", order.symbol in limits.allowed_symbols and order.side in ("LONG", "SHORT"),
                  f"{order.symbol} {order.side}")]
@@ -328,6 +433,7 @@ def order_checks(account: AccountState, order: OrderRequest, limits: RiskLimits)
     total = sum(float(p.get("volume", 0) or 0) for p in account.positions) + order.lots
     out.append(Check("exposition_totale", total <= limits.max_total_lots,
                      f"{total:.2f} lots au total (maximum {limits.max_total_lots})"))
+    out.extend(exposure_checks(account, order, limits))
     return out
 
 

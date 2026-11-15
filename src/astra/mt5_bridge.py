@@ -44,7 +44,17 @@ from .brokers.mt5_demo_orders import (
     Mt5OrderUnknown,
 )
 from .marketdata import INSTRUMENTS, pip_size
-from .mt5_risk import AccountState, OrderRequest, RiskConfigError, RiskLimits, entries_state, evaluate_entry, load_limits
+from . import mt5_emergency
+from .mt5_risk import (
+    AccountState,
+    OrderRequest,
+    RiskConfigError,
+    RiskLimits,
+    entries_state,
+    evaluate_entry,
+    load_required_limits,
+    size_scale,
+)
 from .ticks import MAX_TICKS_PER_POST
 
 DEFAULT_INTERVAL_SECONDS = 300
@@ -222,7 +232,27 @@ class Bridge:
             currency=account.get("currency"),
             connector_ok=bool(account.get("terminal_connected", True)),
             algo_trading_enabled=account.get("algo_trading_enabled"), entries_allowed_by_server=allowed,
-            kill_switch_active=kill)
+            kill_switch_active=kill, usd_rates=self.usd_rates())
+
+    def usd_rates(self) -> dict[str, float]:
+        """USD value of one unit of each currency, from the terminal's live mid prices (missing ones stay missing:
+        the gateway then refuses what it cannot measure)."""
+
+        rates = {"USD": 1.0}
+        try:
+            quotes = self.trader.quotes()
+        except (Mt5DemoError, AttributeError, TypeError):
+            return rates
+        for q in quotes:
+            symbol, mid = q["symbol"], (q["bid"] + q["ask"]) / 2
+            if mid <= 0 or symbol not in INSTRUMENTS:
+                continue
+            spec = INSTRUMENTS[symbol]
+            if spec.quote == "USD":
+                rates.setdefault(spec.base, mid)
+            elif spec.base == "USD":
+                rates.setdefault(spec.quote, 1 / mid)
+        return rates
 
     def risk_panel(self, state: AccountState) -> dict[str, Any]:
         decision = entries_state(state, self.limits)
@@ -325,6 +355,8 @@ class Bridge:
         risk_pct = limits.risk_per_trade_pct if isinstance(limits, RiskLimits) else 0.0
         if unconfirmed and isinstance(limits, RiskLimits):
             risk_pct *= limits.unconfirmed_risk_scale  # an adopted, not yet confirmed champion: reduced size
+        if isinstance(limits, RiskLimits):
+            risk_pct *= size_scale(state, limits)  # a losing month halves every new size; nothing ever scales up
         risk_usd = state.equity * risk_pct / 100
         entry = trader.prepare_entry(symbol, side, stop_distance, risk_usd)
         age = None
@@ -493,6 +525,12 @@ class Bridge:
         with self.trader as trader:
             account = trader.refresh_account()
             positions = trader.positions()
+            if isinstance(self.limits, RiskLimits):  # the separate watcher does the same; whichever sees it first acts
+                reason = mt5_emergency.trigger(self.account_state(account, positions), self.limits)
+                if reason:
+                    report = mt5_emergency.run(trader, self.workdir, reason)
+                    self.note("emergency", **report)
+                    return {"halted": True, "emergency": report, "actions": []}
             for settled in self.resolve_intents(positions):
                 actions.append({"kind": "intent_resolved", "symbol": settled["symbol"], "side": settled["side"],
                                 "reason": f"{settled['status']} : {settled['resolved']}"})
@@ -772,7 +810,7 @@ def run_from_env(once: bool = False) -> int:
     workdir = Path(_native(os.environ.get("ASTRA_MT5_DIR") or "var/mt5-bridge"))
     risk_file = os.environ.get("ASTRA_MT5_RISK_FILE", "").strip()
     try:
-        limits: RiskLimits | RiskConfigError = load_limits(_native(risk_file) if risk_file else None)
+        limits: RiskLimits | RiskConfigError = load_required_limits(_native(risk_file) if risk_file else None)
     except RiskConfigError as exc:
         limits = exc  # an invalid profile refuses every entry; exits and the dashboard keep working
     interval = max(60, int(os.environ.get("ASTRA_MT5_INTERVAL_SECONDS") or DEFAULT_INTERVAL_SECONDS))

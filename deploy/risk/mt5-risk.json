@@ -1,0 +1,9 @@
+{
+  "risk_per_trade_pct": 0.1,
+  "unconfirmed_risk_scale": 1.0,
+  "max_quote_age_seconds": 5.0,
+  "max_net_currency_exposure_x": 1.0,
+  "max_gross_leverage_x": 3.0,
+  "monthly_halving_pct": 4.0,
+  "emergency_drawdown_pct": 12.0
+}

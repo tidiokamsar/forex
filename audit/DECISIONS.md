@@ -55,3 +55,21 @@ Règle : option la plus prudente au sens du document maître. Chaque décision d
 - `test_mt5_risk` (écart sur les croisées) acceptait une croisée sans aucun taux. Le LOT 4 l'interdit, puisque l'exposition n'y est pas mesurable. Le test fournit désormais des taux, et ce qu'il vérifie (le plafond d'écart) n'a pas changé.
 
 **Écarté :** autoriser une exposition non mesurable, ce qui contredit la règle du refus par défaut.
+
+## D-007 - 15-11 - Déploiement du LOT 4 différé à la fin de la fenêtre du LOT 1
+
+**Choix :** le code du LOT 4 est construit et testé maintenant. Le redémarrage du pont, qui est aussi l'enregistreur de ticks, attend la fin de la fenêtre de 5 jours du LOT 1 : le samedi 21-11, après le scellement du vendredi.
+
+**Raison :** mandat 6.1, « Ne redémarre pas l'enregistreur ». Le risque est nul en attendant, puisque le DEMO est suspendu (fichier STOP) et qu'aucune position ASTRA n'est ouverte.
+
+**Écarté :** redémarrer le pont tout de suite et créer un trou dans la fenêtre du LOT 1.
+
+## D-008 - 15-11 - Indépendance de l'arrêt d'urgence
+
+**Choix :** un service séparé, `astra-mt5-emergency`, avec son propre processus Python et sans jeton de site ni mot de passe. Il s'attache au terminal MT5 déjà connecté.
+
+**Limite connue :**
+- Il partage le serveur Wine du pont. Quand le pont s'arrête, son `ExecStopPost` (`wineserver -k`) tue aussi le terminal et le veilleur ; celui-ci redémarre seul (`Restart=always`).
+- Si le terminal est arrêté, aucun processus ne peut fermer de position. Les stops posés côté serveur chez le courtier restent alors la protection.
+
+**Écarté :** un second terminal MT5, qui demanderait une seconde connexion avec le mot de passe, donc un secret de plus.

@@ -1,0 +1,53 @@
+# ASTRA MT5 emergency watcher (LOT 4): a process apart from the bridge. Every 30 s it reads the DEMO account's equity
+# from the terminal already signed in (no password, no token) and the peak kept by the bridge. At the drawdown limit of
+# /etc/astra/mt5-risk.json it writes the STOP file, then closes every ASTRA position (never a position opened by hand).
+# Host drop-in, as for the bridge: Environment=ASTRA_MT5_LOGIN=<demo account number>
+[Unit]
+Description=ASTRA MT5 emergency watcher (separate process: closes every ASTRA position at the drawdown limit)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/astra/mt5-demo.cred
+ConditionPathExists=/etc/astra/mt5-risk.json
+StartLimitIntervalSec=900
+StartLimitBurst=5
+OnFailure=astra-alert@%n.service
+
+[Service]
+Type=simple
+User=astra-mt5
+Group=astra-mt5
+WorkingDirectory=/var/lib/astra-mt5
+Environment=HOME=/var/lib/astra-mt5
+Environment=WINEPREFIX=/var/lib/astra-mt5/.wine
+Environment=WINEDEBUG=-all
+Environment=WINEDLLOVERRIDES=mscoree,mshtml=
+Environment=PYTHONPATH=Z:/opt/astra/app/src
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=ASTRA_MT5_SERVER=MetaQuotes-Demo
+Environment=ASTRA_MT5_DIR=/var/lib/astra-mt5/bridge
+Environment="ASTRA_MT5_TERMINAL=C:/Program Files/MetaTrader 5/terminal64.exe"
+Environment=ASTRA_MT5_RISK_FILE=/etc/astra/mt5-risk.json
+ExecStartPre=+/usr/bin/install -d -o astra-mt5 -g astra-mt5 -m 0700 /var/lib/astra-mt5/bridge
+ExecStart=/usr/bin/xvfb-run -a -s "-screen 0 1280x800x24 -nolisten tcp" /opt/wine-devel/bin/wine /var/lib/astra-mt5/.wine/drive_c/Python312/python.exe -m astra.mt5_emergency --watch
+Restart=always
+RestartSec=30
+UMask=0077
+MemoryMax=2G
+TasksMax=256
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/astra-mt5
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
