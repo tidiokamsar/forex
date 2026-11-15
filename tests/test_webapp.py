@@ -42,10 +42,11 @@ LAB_READ_ROUTES = ["/api/market/overview", "/api/market/quality", "/api/market/c
                    "/api/lab/backtests", "/api/lab/backtests/<int:backtest_id>", "/api/sim/sessions",
                    "/api/sim/sessions/<int:session_id>", "/api/system/jobs", "/api/learn/overview",
                    "/api/mt5/overview", "/api/market/chart", "/api/dashboard/overview", "/api/mt5/requests",
-                   "/api/mt5/requests/pending", "/api/mt5/instruments", "/api/reports/daily"]
+                   "/api/mt5/requests/pending", "/api/mt5/instruments", "/api/reports/daily",
+                   "/api/mt5/ticks/status"]
 LAB_REQUEST_ROUTES = ["/api/market/import", "/api/market/ingest", "/api/lab/backtests", "/api/sim/sessions",
                       "/api/sim/sessions/<int:session_id>/<action>", "/api/mt5/snapshot", "/api/mt5/quotes", "/api/mt5/candles",
-                      "/api/mt5/history", "/api/mt5/instruments",
+                      "/api/mt5/history", "/api/mt5/instruments", "/api/mt5/ticks",
                       "/api/mt5/requests", "/api/mt5/requests/<int:request_id>/result"]
 # Binance Spot DEMO account: the state is READ_ONLY (its orders OPERATOR), requests (pause, resume, controlled
 # test) are OPERATOR and only recorded; astra-demo acts on them through the gateway.

@@ -24,9 +24,9 @@ EXPECTED_AGENT_ENDPOINTS = {
     "read": {"agent_whoami", "status", "summary", "runs", "model_versions", "experiments", "controls",
              "market_overview", "market_quality", "market_candles", "lab_catalog", "lab_backtests", "lab_backtest",
              "sim_sessions", "sim_session", "learn_overview", "system_jobs", "mt5_overview", "market_chart",
-             "dashboard_overview", "mt5_instruments_summary"},
+             "dashboard_overview", "mt5_instruments_summary", "mt5_ticks_status"},
     "lab": {"market_ingest", "lab_backtest_create", "sim_create", "sim_action"},
-    "mt5": {"mt5_snapshot", "mt5_quotes", "mt5_candles", "mt5_history", "mt5_instruments", "mt5_requests_pending",
+    "mt5": {"mt5_snapshot", "mt5_quotes", "mt5_candles", "mt5_history", "mt5_instruments", "mt5_ticks", "mt5_requests_pending",
             "mt5_request_result"},
 }
 
@@ -208,6 +208,30 @@ class Mt5FlowTests(AgentTokenCase):
         for name, scopes in (("reader", ("read",)), ("labber", ("read", "lab"))):
             other, _ = self.tokens.issue("cli:test", name, "owner", list(scopes))
             self.assertEqual(self.send(other, "/api/mt5/instruments", body).status_code, 403)  # only the mt5 scope writes
+
+    def test_raw_ticks_are_stored_by_the_mt5_scope_only_and_the_account_facts_are_published(self):
+        token = self.issue(scopes=("read", "mt5"))
+        t = int(datetime(2026, 11, 18, 10, tzinfo=UTC).timestamp() * 1000)
+        body = {"server": "MetaQuotes-Demo", "bridge_ms": t, "bridge_version": "test",
+                "batches": [{"symbol": "EURUSD", "ticks": [[t, 1.1, 1.10002, 6], [t + 250, 1.1, 1.0999, 6]]}]}
+        answer = self.send(token, "/api/mt5/ticks", body)
+        self.assertEqual(answer.status_code, 200)
+        self.assertEqual((answer.get_json()["stored"], answer.get_json()["rejected"]), (1, {"ask_inferieur_bid": 1}))
+        self.assertEqual(self.send(token, "/api/mt5/ticks", body).get_json()["duplicates"], 1)
+        for bad in ({**body, "server": "Broker-Live"}, {**body, "batches": []}, {"server": "MetaQuotes-Demo"}):
+            self.assertEqual(self.send(token, "/api/mt5/ticks", bad).status_code, 400)
+        for name, scopes in (("reader", ("read",)), ("labber", ("read", "lab"))):
+            other, _ = self.tokens.issue("cli:test", name, "owner", list(scopes))
+            self.assertEqual(self.send(other, "/api/mt5/ticks", body).status_code, 403)
+        item = {"name": "EURUSD", "path": "Forex\EURUSD", "group": "Forex", "description": "x", "contract_size": 100000.0,
+                "currency_base": "EUR", "currency_profit": "USD", "currency_margin": "EUR", "digits": 5,
+                "volume_min": 0.01, "volume_max": 100.0, "volume_step": 0.01, "trade_mode": 4, "spread": 2,
+                "swap_long": -6.1, "swap_short": 1.2, "swap_mode": 1}
+        account = {"company": "MetaQuotes Ltd.", "margin_mode": 2, "currency": "USD"}
+        sent = self.send(token, "/api/mt5/instruments", {"server": "MetaQuotes-Demo", "items": [item], "account": account})
+        self.assertEqual(sent.get_json()["spec_versions_new"], 1)
+        status = self.bearer(token, "/api/mt5/ticks/status").get_json()
+        self.assertEqual((status["account"]["margin_mode"], status["account"]["costs"]), ("HEDGING", "NON_REPRESENTATIF"))
 
     def test_bad_quotes_and_candles_are_refused(self):
         token = self.issue(scopes=("read", "mt5"))
