@@ -37,6 +37,7 @@ from ..marketdata import (
     canonical_symbol,
     canonical_timeframe,
 )
+from ..ticks import server_ms_to_utc_ms
 
 DEFAULT_TERMINAL = r"C:\Program Files\MetaTrader 5\terminal64.exe"
 SERVER_ZONES = {"MetaQuotes-Demo": "Europe/Athens"}  # server -> IANA zone with the same offsets and switch dates
@@ -114,6 +115,8 @@ class Mt5DemoFeed:
                         "margin": getattr(info, "margin", 0.0), "margin_free": getattr(info, "margin_free", info.equity),
                         "terminal_connected": bool(terminal and terminal.connected),
                         "algo_trading_enabled": bool(terminal and terminal.trade_allowed),
+                        "company": str(getattr(info, "company", "") or "")[:80],
+                        "margin_mode": int(getattr(info, "margin_mode", -1)),  # 0 netting, 1 exchange, 2 hedging
                         "source": source_name(info.server)}
         return self.account
 
@@ -176,7 +179,41 @@ class Mt5DemoFeed:
                         "trade_mode": int(getattr(s, "trade_mode", 0) or 0), "spread": int(getattr(s, "spread", 0) or 0),
                         "swap_long": float(getattr(s, "swap_long", 0) or 0),
                         "swap_short": float(getattr(s, "swap_short", 0) or 0),
-                        "swap_mode": int(getattr(s, "swap_mode", 0) or 0)})
+                        "swap_mode": int(getattr(s, "swap_mode", 0) or 0),
+                        "swap_rollover3days": int(getattr(s, "swap_rollover3days", 0) or 0),
+                        "spread_float": bool(getattr(s, "spread_float", False)),
+                        "trade_calc_mode": int(getattr(s, "trade_calc_mode", 0) or 0),
+                        "trade_stops_level": int(getattr(s, "trade_stops_level", 0) or 0),
+                        "margin_initial": float(getattr(s, "margin_initial", 0) or 0)})
+        return out
+
+    def ticks_since(self, symbol: str, after_raw_ms: int | None, count: int) -> list[tuple[int, int, float, float, int]]:
+        """Raw ticks of ``symbol`` from ``after_raw_ms`` (server clock, milliseconds) on, at most ``count``.
+
+        Each tick is (raw server-clock ms, UTC ms, bid, ask, flags). Times stay in the server clock to ask the terminal
+        (no conversion on the way in), and are converted to UTC once for the server. On the first call the last minute
+        is read. Ticks at exactly ``after_raw_ms`` come again: the server stores each tick once."""
+
+        mt5 = self.mt5
+        if not hasattr(mt5, "copy_ticks_from"):
+            raise Mt5DemoError("ce terminal ne fournit pas les ticks")
+        if not mt5.symbol_select(symbol, True):
+            raise Mt5DemoError(f"{symbol} indisponible")
+        if after_raw_ms is None:
+            last = mt5.symbol_info_tick(symbol)
+            if last is None or not getattr(last, "time", 0):
+                return []
+            after_raw_ms = int(getattr(last, "time_msc", 0) or last.time * 1000) - 60_000
+        rows = mt5.copy_ticks_from(symbol, after_raw_ms // 1000, count, getattr(mt5, "COPY_TICKS_ALL", -1))
+        if rows is None:
+            raise Mt5DemoError(f"ticks {symbol} indisponibles : {mt5.last_error()}")
+        zone = self._zone()
+        out = []
+        for row in rows:
+            raw = int(row["time_msc"])
+            if raw < after_raw_ms:
+                continue
+            out.append((raw, server_ms_to_utc_ms(raw, zone), float(row["bid"]), float(row["ask"]), int(row["flags"])))
         return out
 
     def _deal(self, d: Any) -> dict[str, Any]:

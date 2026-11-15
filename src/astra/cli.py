@@ -102,6 +102,14 @@ def build_parser() -> argparse.ArgumentParser:
     report_actions = report_cmd.add_subparsers(dest="report_action", required=True)
     report_daily = report_actions.add_parser("daily", help="Rapport d'une journée UTC (lecture seule)")
     report_daily.add_argument("--date", help="AAAA-MM-JJ (défaut : aujourd'hui, UTC)")
+    ticks_cmd = commands.add_parser("ticks", help="Socle de données : ticks Bid/Ask bruts, trous, coûts, empreintes")
+    ticks_actions = ticks_cmd.add_subparsers(dest="ticks_action", required=True)
+    ticks_actions.add_parser("status", help="Fraîcheur, horloge, rejets, compte (serveur, mode de marge)")
+    gaps_cmd = ticks_actions.add_parser("gaps", help="Trous d'un jour UTC, étiquetés")
+    gaps_cmd.add_argument("--day", required=True)
+    costs_cmd = ticks_actions.add_parser("costs", help="Spread médian et 90e centile par heure UTC, depuis les ticks")
+    costs_cmd.add_argument("--days", required=True, help="jours UTC séparés par des virgules")
+    ticks_actions.add_parser("verify", help="Rejoue les empreintes des jours scellés")
     study_cmd = commands.add_parser("study", help="Études de recherche en lecture seule (aucun ordre)")
     study_actions = study_cmd.add_subparsers(dest="study_action", required=True)
     study_actions.add_parser("spreads", help="Écart réel par heure (cotations du pont) et effet horaire avec ces écarts")
@@ -590,6 +598,24 @@ def _run(args: argparse.Namespace) -> int:
 
         if args.command == "learn":
             return _learn(args, config)
+
+        if args.command == "ticks":
+            from . import ticks as tick_data
+            from .marketdata import INSTRUMENTS
+
+            store = tick_data.TickStore.beside(config.database_path)
+            store.initialize()
+            now_ms = int(datetime.now(UTC).timestamp() * 1000)
+            if args.ticks_action == "status":
+                _write_json(store.status(now_ms))
+            elif args.ticks_action == "gaps":
+                _write_json({s: store.gaps(s, args.day, now_ms=now_ms) for s in INSTRUMENTS})
+            elif args.ticks_action == "costs":
+                days = [d.strip() for d in args.days.split(",") if d.strip()]
+                _write_json({s: store.costs(s, days) for s in INSTRUMENTS})
+            else:
+                _write_json(store.verify_seals())
+            return 0
 
         if args.command == "study":
             from . import spreadstudy

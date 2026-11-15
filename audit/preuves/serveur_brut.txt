@@ -1,0 +1,67 @@
+== 1 version
+lrwxrwxrwx 1 root root 27 Nov 15 06:22 /opt/astra/app -> /opt/astra/releases/591c5cf
+astra-591c5cf.tar
+astra-0d02412.tar
+astra-1f2cec4.tar
+astra-9789a09.tar
+astra-7237c0f.tar
+== 2 services
+  UNIT                                         LOAD   ACTIVE   SUB     DESCRIPTION
+  astra-agent.service                          loaded active   running ASTRA agent (SIMULATION only, agent token, no orders)
+  astra-alert@astra-agent.service.service      loaded inactive dead    ASTRA alert for astra-agent.service
+  astra-alert@astra-backup.service.service     loaded inactive dead    ASTRA alert for astra-backup.service
+  astra-alert@astra-cert-check.service.service loaded inactive dead    ASTRA alert for astra-cert-check.service
+  astra-alert@astra-demo.service.service       loaded inactive dead    ASTRA alert for astra-demo.service
+  astra-alert@astra-mt5-bridge.service.service loaded inactive dead    ASTRA alert for astra-mt5-bridge.service
+  astra-alert@astra-web.service.service        loaded inactive dead    ASTRA alert for astra-web.service
+  astra-alert@astra-worker.service.service     loaded inactive dead    ASTRA alert for astra-worker.service
+  astra-backup.service                         loaded inactive dead    ASTRA database backups
+  astra-cert-check.service                     loaded inactive dead    ASTRA certificate expiry check
+  astra-demo.service                           loaded inactive dead    ASTRA DEMO account service (Binance Spot Demo Mode; no real orders)
+  astra-mt5-bridge.service                     loaded active   running ASTRA MT5 DEMO bridge (Wine, DEMO account only)
+  astra-nft.service                            loaded active   exited  ASTRA loopback port filter (only the proxy may reach 127.0.0.1:8765)
+  astra-web.service                            loaded active   running ASTRA dashboard (authenticated, SIMULATION only)
+  astra-worker.service                         loaded active   running ASTRA worker (data acquisition, backtests, paper simulations; SIMULATION only)
+  astra-backup.timer                           loaded active   waiting Daily ASTRA database backups
+  astra-cert-check.timer                       loaded active   waiting ASTRA certificate expiry check, every 6 hours
+
+Legend: LOAD   → Reflects whether the unit definition was properly loaded.
+        ACTIVE → The high-level unit activation state, i.e. generalization of SUB.
+        SUB    → The low-level unit activation state, values depend on unit type.
+
+17 loaded units listed.
+To show all installed unit files use 'systemctl list-unit-files'.
+== 5 tests
+Ran 1360 tests in 387.822s
+FAILED (failures=1, expected failures=15)
+== DB
+/var/lib/astra/astra.sqlite3
+bash: line 8: sqlite3: command not found
+== deals
+bash: line 9: sqlite3: command not found
+== journal orders
+bash: line 6: sqlite3: command not found
+bash: line 7: sqlite3: command not found
+bash: line 10: sqlite3: command not found
+23499
+bridge-state.json
+journal-2026-10-29.jsonl
+journal-2026-10-30.jsonl
+journal-2026-10-31.jsonl
+journal-2026-11-01.jsonl
+journal-2026-11-02.jsonl
+journal-2026-11-03.jsonl
+journal-2026-11-04.jsonl
+journal-2026-11-05.jsonl
+journal-2026-11-06.jsonl
+journal-2026-11-07.jsonl
+journal-2026-11-08.jsonl
+journal-2026-11-09.jsonl
+journal-2026-11-10.jsonl
+journal-2026-11-11.jsonl
+journal-2026-11-12.jsonl
+journal-2026-11-13.jsonl
+journal-2026-11-14.jsonl
+journal-2026-11-15.jsonl
+== state
+['day', 'day_start_equity', 'handled_requests', 'intents', 'last_refusal', 'mirrored', 'month', 'month_start_equity', 'peak_equity', 'profiles', 'week', 'week_start_equity']

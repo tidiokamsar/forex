@@ -17,7 +17,7 @@ from typing import Any
 
 from flask import Flask, Response, g, jsonify, request
 
-from . import boardstats, indicators, learning, marketdata, mt5view, reports, riskmetrics
+from . import boardstats, indicators, learning, marketdata, mt5view, reports, riskmetrics, ticks
 from .auth import WebRole
 from .jobs import JobStore, worker_health
 from .marketdata import CandleStore, MarketDataError
@@ -32,7 +32,8 @@ def register_lab_routes(app: Flask, *, database: Path, import_dir: Path, require
     learn_store = learning.LearningStore(database)
     learn_store_h1 = learning.LearningStore(database, learning.H1_PROFILE)
     mt5_view = mt5view.Mt5View(database)
-    for store in (candles, lab, jobs, learn_store, learn_store_h1, mt5_view):
+    tick_store = ticks.TickStore.beside(database)
+    for store in (candles, lab, jobs, learn_store, learn_store_h1, mt5_view, tick_store):
         store.initialize()
 
     def answer(producer: Callable[[], Any], status: int = 200) -> Response:
@@ -379,12 +380,36 @@ def register_lab_routes(app: Flask, *, database: Path, import_dir: Path, require
             return error(403, "forbidden")
 
         def produce() -> dict[str, Any]:
+            payload = request.get_json(silent=True)
             try:
-                return mt5_view.record_instruments(request.get_json(silent=True))
+                result = mt5_view.record_instruments(payload)
             except mt5view.Mt5ViewError as exc:
+                raise MarketDataError(str(exc)) from exc
+            # validated above: the server is a verified one and the items are a list
+            result.update(tick_store.record_specs(payload["server"], payload["items"], payload.get("account"),
+                                                  datetime.now(UTC)))
+            return result
+
+        return answer(produce)
+
+    @app.post("/api/mt5/ticks")
+    @require(WebRole.OPERATOR)
+    def mt5_ticks() -> Response:
+        if g.get("agent") is None:
+            return error(403, "forbidden")
+
+        def produce() -> dict[str, Any]:
+            try:
+                return tick_store.record(request.get_json(silent=True), int(datetime.now(UTC).timestamp() * 1000))
+            except ticks.TickError as exc:
                 raise MarketDataError(str(exc)) from exc
 
         return answer(produce)
+
+    @app.get("/api/mt5/ticks/status")
+    @require(WebRole.READ_ONLY)
+    def mt5_ticks_status() -> Response:
+        return answer(lambda: tick_store.status(int(datetime.now(UTC).timestamp() * 1000)))
 
     @app.get("/api/mt5/instruments")
     @require(WebRole.READ_ONLY)

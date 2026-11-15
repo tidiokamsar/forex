@@ -30,6 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from .agent import AgentHalt, ApiError, AstraClient, http_transport
 from .brokers import mt5_demo
 from .brokers.mt5_demo import DEFAULT_TERMINAL, Mt5DemoError
@@ -44,6 +45,7 @@ from .brokers.mt5_demo_orders import (
 )
 from .marketdata import INSTRUMENTS, pip_size
 from .mt5_risk import AccountState, OrderRequest, RiskConfigError, RiskLimits, entries_state, evaluate_entry, load_limits
+from .ticks import MAX_TICKS_PER_POST
 
 DEFAULT_INTERVAL_SECONDS = 300
 CONTROLS_CACHE_SECONDS = 15
@@ -55,6 +57,8 @@ CATALOGUE_RETRY_SECONDS = 3600  # and again an hour later when sending failed
 HANDLED_KEPT = 50  # site requests remembered: a request is executed once, whatever happens to its answer
 BLOCKING_ALERTS = ("positions_multiples", "position_sans_stop")  # reconciliation alerts that freeze new entries
 PENDING = ("SOUMIS", "INCONNU")  # intention states that still block a new attempt on the same pair
+TICKS_SECONDS = 10          # raw bid/ask ticks of every instrument reach the server this often
+TICKS_PER_SYMBOL = 2000     # at most this many ticks per instrument and round (a backlog is caught up over rounds)
 STREAM_SECONDS = 5          # quotes, balance and open positions reach the dashboard this often
 FAST_CANDLES_SECONDS = 60   # M5 and M15: the last bars, every minute
 SLOW_CANDLES_SECONDS = 600  # H1, H4 and D1: the last bars, every ten minutes
@@ -155,6 +159,7 @@ class Bridge:
         self.state.setdefault("profiles", {})  # which feed (D1 or H1) each pair followed at the last good read
         self.state.setdefault("last_refusal", {})
         self.state.setdefault("intents", {})
+        self.state.setdefault("tick_cursor", {})  # last tick sent per instrument, server clock ms (survives a restart)
         self.targets: dict[str, dict[str, Any]] = {}
         self.last_error: dict[str, str] | None = None
         self.history_synced_at: str | None = None
@@ -567,9 +572,52 @@ class Bridge:
 
         items = self.trader.catalogue()
         server = self.trader.account["server"]
+        facts = {k: self.trader.account.get(k) for k in ("company", "margin_mode", "currency")}
         for start in range(0, len(items), ITEMS_PER_POST):
-            self.client.post("/api/mt5/instruments", {"server": server, "items": items[start:start + ITEMS_PER_POST]})
+            self.client.post("/api/mt5/instruments", {"server": server, "items": items[start:start + ITEMS_PER_POST],
+                                                      "account": facts})
         return {"instruments": len(items)}
+
+    def sync_ticks(self) -> dict[str, Any]:
+        """Raw ticks of every instrument since the last one sent, in posts under the proxy's limit. Read only.
+
+        An instrument the terminal cannot read is noted and skipped; the cursor of an instrument moves only after
+        the server accepted its ticks, so a failed post is sent again on the next round."""
+
+        server = self.trader.account["server"]
+        cursor = self.state["tick_cursor"]
+        pending: list[tuple[str, list[tuple[int, int, float, float, int]]]] = []
+        skipped = []
+        for symbol in INSTRUMENTS:
+            try:
+                ticks = self.trader.ticks_since(symbol, cursor.get(symbol), TICKS_PER_SYMBOL)
+            except Mt5DemoError as exc:
+                skipped.append(symbol)
+                self.note("ticks_unavailable", symbol=symbol, reason=str(exc)[:120])
+                continue
+            if ticks:
+                pending.append((symbol, ticks))
+        sent = 0
+        while pending:
+            batches, room = [], MAX_TICKS_PER_POST
+            while pending and room > 0:
+                symbol, ticks = pending[0]
+                part, rest = ticks[:room], ticks[room:]
+                batches.append((symbol, part))
+                room -= len(part)
+                if rest:
+                    pending[0] = (symbol, rest)
+                else:
+                    pending.pop(0)
+            self.client.post("/api/mt5/ticks", {
+                "server": server, "bridge_ms": int(self.clock().timestamp() * 1000), "bridge_version": __version__,
+                "batches": [{"symbol": symbol, "ticks": [[utc, bid, ask, flags] for _, utc, bid, ask, flags in part]}
+                            for symbol, part in batches]})
+            for symbol, part in batches:
+                cursor[symbol] = max(cursor.get(symbol, 0), part[-1][0])
+                sent += len(part)
+            self.save()
+        return {"ticks": sent, "skipped": len(skipped)}
 
     def stream(self) -> dict[str, int]:
         """Continuous flow: quotes, account figures and open positions, without trading."""
@@ -623,7 +671,7 @@ class Bridge:
         """One connection to the terminal, kept open: the stream every few seconds, the trading cycle every
         ``cycle_seconds``, candles every minute (fast timeframes) and ten minutes (slow ones)."""
 
-        next_cycle = next_fast = next_slow = next_history = next_catalogue = 0.0
+        next_cycle = next_fast = next_slow = next_history = next_catalogue = next_ticks = 0.0
         first = True
         with self.trader:
             done = 0
@@ -652,6 +700,12 @@ class Bridge:
                     except (ApiError, OSError, Mt5DemoError) as exc:
                         self.note("catalogue_failed", reason=str(exc)[:160])
                         next_catalogue = started + CATALOGUE_RETRY_SECONDS
+                if started >= next_ticks:
+                    try:  # the data recorder never stops the positions' management nor the risk gateway
+                        self.sync_ticks()
+                    except (ApiError, OSError, Mt5DemoError, ValueError, TypeError, KeyError) as exc:
+                        self.note("ticks_failed", reason=str(exc)[:160])
+                    next_ticks = started + TICKS_SECONDS
                 if started >= next_fast:
                     self.push_candles(("M5", "M15"), recent=True)
                     next_fast = started + FAST_CANDLES_SECONDS

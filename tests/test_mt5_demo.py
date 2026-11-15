@@ -56,6 +56,11 @@ class FakeMt5:
     def symbol_select(self, symbol, enable):
         return True
 
+    COPY_TICKS_ALL = 1
+
+    def copy_ticks_from(self, symbol, start, count, flags):
+        return ()  # no tick in the fake terminal unless a test adds some
+
     symbols = "default"
 
     def symbols_get(self, *args, **kwargs):

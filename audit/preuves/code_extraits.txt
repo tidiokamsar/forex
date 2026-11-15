@@ -1,0 +1,317 @@
+# Extraits de code au commit 591c5cf (git show / git grep)
+
+## src/astra/mt5_risk.py lignes 40-62
+    40	
+    41	
+    42	@dataclass(frozen=True, slots=True)
+    43	class RiskLimits:
+    44	    """Conservative DEMO profile, isolated from any LIVE configuration (LIVE does not exist in ASTRA)."""
+    45	
+    46	    risk_per_trade_pct: float = 0.5        # loss at the stop, % of equity
+    47	    risk_tolerance: float = 1.05           # volume rounding may exceed the target by this factor
+    48	    # A hourly champion a person put on the bridge before its prospective review confirmed it trades at this share of
+    49	    # the risk per trade (0.2: 0.1 % of equity): it is there to be measured, not trusted.
+    50	    unconfirmed_risk_scale: float = 0.2
+    51	    max_lots_per_position: float = 2.0
+    52	    max_positions: int = 7
+    53	    max_positions_per_symbol: int = 1
+    54	    max_total_lots: float = 8.0
+    55	    max_spread_pips: float = 3.0
+    56	    max_quote_age_seconds: float = 30.0
+    57	    daily_loss_limit_pct: float = 3.0
+    58	    # A bad week or month made of days each under the daily limit. Starting values: a little under two bad days a week,
+    59	    # and under the 10 % drawdown for a month, so the drawdown stop is not the first line hit. Policy values, to review.
+    60	    weekly_loss_limit_pct: float = 5.0
+    61	    monthly_loss_limit_pct: float = 8.0
+    62	    max_drawdown_pct: float = 10.0
+
+## src/astra/mt5_bridge.py lignes 46-58
+    46	from .mt5_risk import AccountState, OrderRequest, RiskConfigError, RiskLimits, entries_state, evaluate_entry, load_limits
+    47	
+    48	DEFAULT_INTERVAL_SECONDS = 300
+    49	CONTROLS_CACHE_SECONDS = 15
+    50	INTENT_GRACE_SECONDS = 120   # after an unknown outcome, look for the position this long before concluding "not executed"
+    51	INTENTS_KEPT = 40
+    52	EXTENDED_TIMEFRAMES = ("H1", "D1")  # the research instruments beyond the seven tradable pairs: only these bars
+    53	CATALOGUE_SECONDS = 24 * 3600   # the instrument catalogue is read once a day (it changes rarely)
+    54	CATALOGUE_RETRY_SECONDS = 3600  # and again an hour later when sending failed
+    55	HANDLED_KEPT = 50  # site requests remembered: a request is executed once, whatever happens to its answer
+    56	BLOCKING_ALERTS = ("positions_multiples", "position_sans_stop")  # reconciliation alerts that freeze new entries
+    57	PENDING = ("SOUMIS", "INCONNU")  # intention states that still block a new attempt on the same pair
+    58	STREAM_SECONDS = 5          # quotes, balance and open positions reach the dashboard this often
+
+## src/astra/mt5_bridge.py lignes 262-300
+   262	
+   263	    # -- order intentions (idempotence) ------------------------------------------------------------------
+   264	
+   265	    def _intent(self, symbol: str, side: str, lots: float, sl: float, entry_ts: str) -> str:
+   266	        """Record the intention on disk BEFORE the order leaves: a crash or a lost answer cannot cause a second order."""
+   267	
+   268	        key = hashlib.sha256(f"{symbol}|{side}|{entry_ts}|{self.clock().isoformat()}".encode()).hexdigest()[:8]
+   269	        self.state["intents"][key] = {"id": key, "symbol": symbol, "side": side, "lots": lots, "sl": sl, "entry_ts": entry_ts,
+   270	                                      "status": "SOUMIS", "at": self.clock().isoformat()}
+   271	        for old in sorted(self.state["intents"])[:-INTENTS_KEPT]:
+   272	            self.state["intents"].pop(old, None)
+   273	        self.save()
+   274	        return key
+   275	
+   276	    def _set_intent(self, key: str, status: str, **fields: Any) -> None:
+   277	        self.state["intents"][key].update(status=status, updated_at=self.clock().isoformat(), **fields)
+   278	        self.save()
+   279	
+   280	    def pending_intent(self, symbol: str) -> dict[str, Any] | None:
+   281	        return next((i for i in self.state["intents"].values() if i["symbol"] == symbol and i["status"] in PENDING), None)
+   282	
+   283	    def resolve_intents(self, positions: list[Any]) -> list[dict[str, Any]]:
+   284	        """Settle every intention left open (lost answer, crash, restart) from what the account really holds."""
+   285	
+   286	        settled = []
+   287	        for intent in list(self.state["intents"].values()):
+   288	            if intent["status"] not in PENDING:
+   289	                continue
+   290	            tag = f"{COMMENT}:{intent['id']}"
+   291	            found = next((p for p in positions if p.comment == tag and p.magic == MAGIC and p.symbol == intent["symbol"]), None)
+   292	            age = (self.clock() - datetime.fromisoformat(intent["at"])).total_seconds()
+   293	            if found:
+   294	                self.state["mirrored"][intent["symbol"]] = intent["entry_ts"]
+   295	                self._set_intent(intent["id"], "EXECUTE", ticket=found.ticket, lots_filled=found.volume,
+   296	                                 resolved="position retrouvée")
+   297	            elif age >= INTENT_GRACE_SECONDS:
+   298	                self._set_intent(intent["id"], "ABSENT", resolved="aucune position après le délai : ordre non exécuté")
+   299	            else:
+   300	                continue
+
+## src/astra/mt5_bridge.py lignes 310-360
+   310	               manual: bool = False, unconfirmed: bool = False) -> tuple[str, list[dict[str, Any]]]:
+   311	        """One opening order through the gateway, the written intention and the outcome handling. Automatic and manual
+   312	        orders share this path. The volume always comes from the risk limit. Returns (outcome, actions) with outcome
+   313	        OUVERT, REFUSE, REJETE or INCONNU."""
+   314	
+   315	        if manual and self.pending_intent(symbol) is not None:
+   316	            return "REFUSE", [{"kind": "refused", "symbol": symbol, "side": side, "lots": 0.0,
+   317	                               "reason": "un ordre précédent sur cette paire n'a pas de résultat connu : aucun nouvel envoi"}]
+   318	        state = self.account_state(trader.refresh_account(), trader.positions())
+   319	        limits = self.limits
+   320	        risk_pct = limits.risk_per_trade_pct if isinstance(limits, RiskLimits) else 0.0
+   321	        if unconfirmed and isinstance(limits, RiskLimits):
+   322	            risk_pct *= limits.unconfirmed_risk_scale  # an adopted, not yet confirmed champion: reduced size
+   323	        risk_usd = state.equity * risk_pct / 100
+   324	        entry = trader.prepare_entry(symbol, side, stop_distance, risk_usd)
+   325	        age = None
+   326	        if entry["tick_time"]:
+   327	            age = (self.clock() - datetime.fromisoformat(entry["tick_time"])).total_seconds()
+   328	        order = OrderRequest(symbol, side, entry["lots"], entry["loss_at_stop_usd"], entry["required_margin"], entry["bid"],
+   329	                             entry["ask"], age, entry["volume_min"], entry["volume_max"], entry["volume_step"], entry["has_stop"],
+   330	                             entry.get("contract_size"))
+   331	        decision = evaluate_entry(state, order, limits)
+   332	        if not decision.allowed:
+   333	            key = f"{entry_ts}|{'|'.join(decision.reasons)}"
+   334	            if manual or self.state["last_refusal"].get(symbol) != key:  # automatic: one line per change, not per cycle
+   335	                self.state["last_refusal"][symbol] = key
+   336	                return "REFUSE", [{"kind": "refused", "symbol": symbol, "side": side, "lots": entry["lots"],
+   337	                                   "reason": "; ".join(decision.reasons)[:190]}]
+   338	            return "REFUSE", []
+   339	        intent = self._intent(symbol, side, entry["lots"], entry["sl"], entry_ts)
+   340	        tag, magic = (COMMENT_MANUAL, MAGIC_MANUAL) if manual else (COMMENT, MAGIC)
+   341	        try:
+   342	            report = trader.open(symbol, side, entry["lots"], entry["sl"], comment=f"{tag}:{intent}", magic=magic)
+   343	        except Mt5OrderRejected as exc:
+   344	            self._set_intent(intent, "REJETE", retcode=exc.retcode, error=str(exc)[:160])
+   345	            key = f"{entry_ts}|rejet {exc.retcode}"
+   346	            if manual or self.state["last_refusal"].get(symbol) != key:
+   347	                self.state["last_refusal"][symbol] = key
+   348	                return "REJETE", [{"kind": "refused", "symbol": symbol, "side": side, "lots": entry["lots"],
+   349	                                   "reason": f"refus du courtier : {exc}"[:190]}]
+   350	            return "REJETE", []
+   351	        except Mt5OrderUnknown as exc:
+   352	            self._set_intent(intent, "INCONNU", error=str(exc)[:160])
+   353	            return "INCONNU", [{"kind": "order_unknown", "symbol": symbol, "side": side, "lots": entry["lots"],
+   354	                                "reason": f"{exc} : vérification du compte avant tout nouvel essai"[:190]}]
+   355	        filled = report["volume"]
+   356	        self._set_intent(intent, "PARTIEL" if report.get("partial") else "EXECUTE", ticket=report["order"], lots_filled=filled,
+   357	                         retcode=report["retcode"])
+   358	        if not manual:
+   359	            self.state["mirrored"][symbol] = entry_ts
+   360	            self.state["last_refusal"].pop(symbol, None)
+
+## src/astra/mt5_bridge.py lignes 715-725
+   715	        credentials = (int(login), password, os.environ.get("ASTRA_MT5_SERVER") or "MetaQuotes-Demo")
+   716	    trader = Mt5DemoTrader(os.environ.get("ASTRA_MT5_TERMINAL") or DEFAULT_TERMINAL, expected_login=int(login),
+   717	                           credentials=credentials)
+   718	    workdir = Path(_native(os.environ.get("ASTRA_MT5_DIR") or "var/mt5-bridge"))
+   719	    risk_file = os.environ.get("ASTRA_MT5_RISK_FILE", "").strip()
+   720	    try:
+   721	        limits: RiskLimits | RiskConfigError = load_limits(_native(risk_file) if risk_file else None)
+   722	    except RiskConfigError as exc:
+   723	        limits = exc  # an invalid profile refuses every entry; exits and the dashboard keep working
+   724	    interval = max(60, int(os.environ.get("ASTRA_MT5_INTERVAL_SECONDS") or DEFAULT_INTERVAL_SECONDS))
+   725	    return Bridge(client, trader, workdir, limits=limits).run(interval, once=once)
+
+## src/astra/learning.py lignes 50-56
+    50	
+    51	LEARNING_VERSION = "1.0.0"
+    52	SOURCE, TIMEFRAME = "ECB_EXR", "D1"
+    53	FINAL_CHECK_DAYS = 365
+    54	CANDIDATES_PER_RUN = 36  # about six per strategy family
+    55	MIN_TRADES = 20
+    56	MIN_SCORE_GAIN = 0.5
+
+## src/astra/learning.py lignes 88-96
+    88	    "stop_atr_multiple": (1.0, 1.5, 2.0, 3.0, 4.0),
+    89	    "regime": SPACE["regime"],
+    90	    "take_profit_r": (0.0, 1.0, 1.5, 2.5, 4.0),
+    91	}
+    92	H1_CANDIDATES_PER_RUN = 120  # a run of 36 takes about 11 s: the wider space is searched, every trial counts in the DSR
+    93	# Candidates a hourly run does not promote are still followed, without any order, on their own paper account: the
+    94	# independent evidence is the prospective record, not the selection. At most OBSERVED_MAX per instrument at a time.
+    95	OBSERVED_PER_RUN, OBSERVED_MAX = 2, 4
+    96	
+
+## src/astra/learning.py lignes 360-370
+   360	def _request(symbol: str, params: dict[str, Any], start: datetime, end: datetime, cost_factor: float = 1.0,
+   361	             profile: Profile = D1_PROFILE) -> dict[str, Any]:
+   362	    risk = replace(DEFAULT_RISK, stop_atr_multiple=float(params["stop_atr_multiple"]),
+   363	                   take_profit_r=float(params.get("take_profit_r", 0.0)))
+   364	    spec = INSTRUMENTS[symbol]  # the costs of the instrument (hypotheses, doubled in the stress test)
+   365	    costs = replace(DEFAULT_COSTS, spread_pips=spec.spread_pips * cost_factor, slippage_pips=spec.slippage_pips * cost_factor)
+   366	    strategy = _build(StrategyParams, params["strategy"])
+   367	    return {"symbol": symbol, "timeframe": profile.timeframe, "source": profile.source, "start": _iso(start), "end": _iso(end),
+   368	            "strategy": STRATEGY_NAME, "strategy_params": asdict(strategy), "risk": asdict(risk), "costs": asdict(costs)}
+   369	
+   370	
+
+## grep martingale|grid|averag (src)
+591c5cf:src/astra/agent.py:12:3. Research: queues backtests over the covered series and a small parameter grid, within a daily budget.
+591c5cf:src/astra/attempts.py:33:same plan does not inflate the count while the same grid on another dataset
+591c5cf:src/astra/attempts.py:449:    A grid explored on earlier or later data of the same instrument informs the
+591c5cf:src/astra/brokers/base.py:126:    average_fill_price: float | None
+591c5cf:src/astra/brokers/base.py:136:    average_price: float
+591c5cf:src/astra/brokers/binance_spot_demo.py:315:        average = float(quote_qty / executed) if executed > 0 else None
+591c5cf:src/astra/brokers/binance_spot_demo.py:319:            requested_units=requested, filled_units=float(filled), average_fill_price=average, sequence=moment,
+591c5cf:src/astra/brokers/ctrader.py:1002:                average_fill_price=float(price) if price is not None else None,
+591c5cf:src/astra/brokers/mt5_demo.py:17:the 42 days where the two rules differ, the European rule is 3.36 pips from the fix on average, the US rule
+591c5cf:src/astra/brokers/simulated.py:44:    average_price: float = 0.0
+591c5cf:src/astra/brokers/simulated.py:144:            price = report.average_fill_price or 0.0
+591c5cf:src/astra/brokers/simulated.py:170:                    average_fill_price=price,
+591c5cf:src/astra/brokers/simulated.py:211:                mark = (quote.bid + quote.ask) / 2 if quote else position.average_price
+591c5cf:src/astra/brokers/simulated.py:212:                unrealized += (mark - position.average_price) * position.units
+591c5cf:src/astra/brokers/simulated.py:272:                average_fill_price=None,
+591c5cf:src/astra/brokers/simulated.py:294:                        average_fill_price=price,
+591c5cf:src/astra/brokers/simulated.py:305:                    average_fill_price=price,
+591c5cf:src/astra/brokers/simulated.py:322:                BrokerPosition(instrument, position.units, position.average_price)
+591c5cf:src/astra/brokers/simulated.py:373:            position.average_price = (
+591c5cf:src/astra/brokers/simulated.py:374:                (position.average_price * position.units + price * signed_units) / total
+591c5cf:src/astra/brokers/simulated.py:382:        self._balance += (price - position.average_price) * closing * direction
+591c5cf:src/astra/brokers/simulated.py:386:            position.average_price = price
+591c5cf:src/astra/brokers/simulated.py:391:                position.average_price = 0.0
+591c5cf:src/astra/cli.py:1292:            average_fill_price=args.price,
+591c5cf:src/astra/demo_runner.py:115:            positions=[{"symbol": p.instrument, "net_units": p.net_units, "average_price": p.average_price}
+591c5cf:src/astra/demo_runner.py:211:                "average_price": report.average_fill_price if report else None}
+591c5cf:src/astra/execution/gateway.py:566:                "average_fill_price": report.average_fill_price,
+591c5cf:src/astra/execution/gateway.py:727:        average_fill_price: float | None = None,
+591c5cf:src/astra/execution/gateway.py:753:            average_fill_price=average_fill_price,
+591c5cf:src/astra/execution/orders.py:80:    average_fill_price: float | None
+591c5cf:src/astra/execution/orders.py:109:            "average_fill_price": self.average_fill_price,
+591c5cf:src/astra/execution/orders.py:155:                    average_fill_price REAL,
+591c5cf:src/astra/execution/orders.py:271:                "average_fill_price",
+591c5cf:src/astra/execution/orders.py:511:        average_fill_price=row["average_fill_price"],
+591c5cf:src/astra/execution/resolution.py:35:    average_fill_price: float | None = None,
+591c5cf:src/astra/execution/resolution.py:57:        if not _positive(average_fill_price):
+591c5cf:src/astra/execution/resolution.py:58:            raise ResolutionRefused("average_fill_price must be positive")
+591c5cf:src/astra/execution/resolution.py:62:            "average_fill_price": average_fill_price,
+591c5cf:src/astra/features.py:68:def average_true_range(bars: Iterable[MarketBar], window: int) -> list[float | None]:
+591c5cf:src/astra/features.py:112:    average_gain = 0.0
+591c5cf:src/astra/features.py:113:    average_loss = 0.0
+591c5cf:src/astra/features.py:119:            average_gain += gain / window
+591c5cf:src/astra/features.py:120:            average_loss += loss / window
+591c5cf:src/astra/features.py:122:            average_gain = (average_gain * (window - 1) + gain) / window
+591c5cf:src/astra/features.py:123:            average_loss = (average_loss * (window - 1) + loss) / window
+591c5cf:src/astra/features.py:125:            output[index] = _rsi_value(average_gain, average_loss)
+591c5cf:src/astra/features.py:323:        "atr": average_true_range(history, spec.atr_window),
+591c5cf:src/astra/features.py:480:def _rsi_value(average_gain: float, average_loss: float) -> float:
+591c5cf:src/astra/features.py:481:    if average_loss == 0:
+591c5cf:src/astra/features.py:482:        return 100.0 if average_gain > 0 else 50.0
+591c5cf:src/astra/features.py:483:    return 100.0 - 100.0 / (1.0 + average_gain / average_loss)
+591c5cf:src/astra/holdout_reuse.py:33:  which absorbs quantization grids and discrete moves), multiplied by the
+591c5cf:src/astra/indicators.py:26:    """Simple moving average of the last ``period`` values."""
+591c5cf:src/astra/indicators.py:41:    """Exponential moving average, seeded with the SMA of the first ``period`` values."""
+591c5cf:src/astra/learning.py:8:   is simulated with only earlier candles for the indicators. Score = average yearly net return (costs
+591c5cf:src/astra/markets/crypto_spot.py:10:anchor the tick grid on a minimum price need that offset added before use.
+591c5cf:src/astra/markets/crypto_spot.py:29:    """Significant digits needed to represent ``value / step`` and the result on the step grid exactly."""
+591c5cf:src/astra/markets/risk_policies.py:15:Martingale sizing, adding to a losing position, removing or widening a stop
+591c5cf:src/astra/markets/risk_policies.py:330:    average_entry_price: Decimal
+591c5cf:src/astra/markets/risk_policies.py:814:            # Martingale and loss-recovery sizing: size never grows after a loss. The caller must state the last
+591c5cf:src/astra/markets/risk_policies.py:835:            if not isinstance(position, SpotPosition) or not _is_decimal(position.average_entry_price):
+591c5cf:src/astra/markets/risk_policies.py:837:            elif book.bid_price < position.average_entry_price:
+591c5cf:src/astra/overfitting.py:38:  receive their average rank. ``w = rank / (N + 1)`` and
+591c5cf:src/astra/overfitting.py:212:    ties: average rank), ``w = rank / (N + 1)`` and ``lambda = ln(w / (1 - w))``.
+591c5cf:src/astra/papertrade.py:228:    """Strength of each currency against the average currency over ``before`` to ``now`` (log returns).
+591c5cf:src/astra/papertrade.py:231:    definition); a currency's strength is that move minus the average of the eight. ``None`` when too few pairs
+591c5cf:src/astra/papertrade.py:246:    average = sum(moves.values()) / (len(moves) + 1)  # the dollar counts as the eighth currency, at 0
+591c5cf:src/astra/papertrade.py:247:    return {currency: move - average for currency, move in moves.items()}
+591c5cf:src/astra/papertrade.py:396:    """Relative strength index of the last ``len(closes) - 1`` changes (plain averages, no smoothing)."""
+591c5cf:src/astra/papertrade.py:768:        "average_win": round(sum(wins) / len(wins), 2) if wins else None,
+591c5cf:src/astra/papertrade.py:769:        "average_loss": round(sum(losses) / len(losses), 2) if losses else None,
+591c5cf:src/astra/registry.py:485:            # The trial count must cover every relevant attempt in the store, not one plan's grid,
+591c5cf:src/astra/research.py:56:    moving-average windows, both of which end no later than bar ``i``. The
+591c5cf:src/astra/research.py:67:    # The previous slow average must exist, so the earliest comparison is at
+591c5cf:src/astra/research.py:68:    # index slow_window. The current averages then include the current close.
+591c5cf:src/astra/research_policy.py:40:    # match rate measured over every alignment of the pair (quantization grids, discrete moves),
+591c5cf:src/astra/research_policy.py:83:    min_pbo_trades_per_slice: int = 1  # each PBO variant needs this many trades per slice on average
+591c5cf:src/astra/signal_backtest.py:247:    average_win: float | None
+591c5cf:src/astra/signal_backtest.py:248:    average_loss: float | None
+591c5cf:src/astra/signal_backtest.py:307:        average_win=statistics.fmean(wins) if wins else None,
+591c5cf:src/astra/signal_backtest.py:308:        average_loss=statistics.fmean(losses) if losses else None,
+591c5cf:src/astra/static/board.js:134:    svgNode(svg, "line", { x1: padL, x2: W - padR, y1: sy1(v), y2: sy1(v), class: "candle-grid" });
+591c5cf:src/astra/static/board.js:370:    const grid = el("div", null, "position-grid");
+591c5cf:src/astra/static/board.js:373:      ["Billet", String(p.ticket)]]) { const cell = el("div"); cell.append(el("small", k), el("strong", v)); grid.append(cell); }
+591c5cf:src/astra/static/board.js:375:    item.append(head, grid, proof);
+591c5cf:src/astra/static/lab.js:264:    ["Gain moyen / perte moyenne", `${money(m.average_win)} / ${money(m.average_loss)}`]];
+591c5cf:src/astra/static/lab.js:415:    if (s.filled_units) text += ` · ${num(s.filled_units, true)} @ ${num(s.average_price, true)}`;
+591c5cf:src/astra/static/lab.js:425:      num(o.requested_units, true), num(o.filled_units, true), num(o.average_fill_price, true), o.state,
+591c5cf:src/astra/static/styles.css:20:.brand-mark { display: grid; place-items: center; width: 42px; height: 42px; border: 1px solid #5d7c46; border-radius: 13px; color: var(--accent); font: 800 22px var(--sans); box-shadow: inset 0 0 20px #baf36414; }
+591c5cf:src/astra/static/styles.css:34:.metric-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 13px; margin-bottom: 15px; }
+591c5cf:src/astra/static/styles.css:40:.content-grid { display: grid; grid-template-columns: 1.15fr .85fr; gap: 15px; margin-bottom: 15px; }
+591c5cf:src/astra/static/styles.css:54:.guard-list { display: grid; gap: 15px; padding: 1px 0 0; margin: 0; list-style: none; }
+591c5cf:src/astra/static/styles.css:56:.guard-list li > span:first-child { display: grid; place-items: center; flex: 0 0 20px; height: 20px; border-radius: 50%; background: #203626; color: var(--accent); font-size: 11px; }
+591c5cf:src/astra/static/styles.css:74:@media (max-width: 800px) { .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .content-grid { grid-template-columns: 1fr; } main { margin-top: 32px; } }
+591c5cf:src/astra/static/styles.css:89:.auth-form { display: grid; gap: 8px; margin-top: 14px; }
+591c5cf:src/astra/static/styles.css:99:.code-list { list-style: none; padding: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; font-family: var(--mono); font-size: 13px; }
+591c5cf:src/astra/static/styles.css:100:.data-label { grid-column: 1 / -1; margin: 0 0 4px; padding: 8px 12px; border: 1px dashed #594a2a; border-radius: 6px; color: var(--warning); font-size: 11px; }
+591c5cf:src/astra/static/styles.css:107:.lab-form { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; align-items: end; }
+591c5cf:src/astra/static/styles.css:108:.lab-form label { display: grid; gap: 5px; font-size: 11px; color: var(--muted); }
+591c5cf:src/astra/static/styles.css:115:.pair-checks { grid-column: 1 / -1; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; font-size: 11px; color: var(--muted); }
+591c5cf:src/astra/static/styles.css:125:.detail-list.compact { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 0 18px; margin-bottom: 12px; }
+591c5cf:src/astra/static/styles.css:140:.app-shell { display: grid; grid-template-columns: 224px minmax(0, 1fr); gap: 22px; align-items: start; }
+591c5cf:src/astra/static/styles.css:151:.kpi-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+591c5cf:src/astra/static/styles.css:152:.kpi-grid .metric-card { min-height: 104px; padding: 15px 16px; }
+591c5cf:src/astra/static/styles.css:153:.kpi-grid .metric-card strong { font-size: clamp(17px, 1.6vw, 24px); margin: 8px 0 3px; }
+591c5cf:src/astra/static/styles.css:162:.pair-chip { display: inline-grid; place-items: center; min-width: 30px; height: 22px; padding: 0 4px; border-radius: 6px; background: #1b2c52; color: #9fb8ee; font: 700 10px var(--mono); }
+591c5cf:src/astra/static/styles.css:163:.board-grid { display: grid; grid-template-columns: minmax(0, 2.4fr) minmax(0, 1fr) minmax(0, 1.05fr); gap: 14px; margin-bottom: 14px; }
+591c5cf:src/astra/static/styles.css:165:.board-bottom { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.35fr) minmax(0, 1fr); gap: 14px; }
+591c5cf:src/astra/static/styles.css:192:.candle-grid { stroke: #17243f; stroke-width: .7; }
+591c5cf:src/astra/static/styles.css:201:.kv { display: grid; grid-template-columns: auto 1fr; gap: 9px 14px; margin: 0; font-size: 12px; }
+591c5cf:src/astra/static/styles.css:223:.position-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 6px; }
+591c5cf:src/astra/static/styles.css:224:.position-grid small { display: block; color: var(--muted); font-size: 10px; }
+591c5cf:src/astra/static/styles.css:225:.position-grid strong { font: 12px var(--mono); }
+591c5cf:src/astra/static/styles.css:231:.perf-stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 8px; }
+591c5cf:src/astra/static/styles.css:235:@media (max-width: 1400px) { .board-grid { grid-template-columns: minmax(0, 1.8fr) minmax(0, 1fr); } .board-side { grid-column: 1 / -1; flex-direction: row; } .board-side > * { flex: 1; } .board-bottom { grid-template-columns: repeat(2, minmax(0, 1fr)); } .kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+591c5cf:src/astra/static/styles.css:236:@media (max-width: 1000px) { .app-shell { grid-template-columns: 1fr; } .sidebar { position: static; } .sidebar .tabs { flex-direction: row; flex-wrap: wrap; } .mode-card { display: none; } .board-grid, .board-bottom { grid-template-columns: 1fr; } .board-side { flex-direction: column; } .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+591c5cf:src/astra/static/styles.css:238:.actions-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px; margin-bottom: 8px; }
+591c5cf:src/astra/static/styles.css:243:@media (max-width: 1000px) { .actions-grid { grid-template-columns: 1fr; } }
+591c5cf:src/astra/static/styles.css:244:.board-audit { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 14px; margin-top: 14px; }
+591c5cf:src/astra/static/styles.css:245:@media (max-width: 1000px) { .board-audit { grid-template-columns: 1fr; } }
+591c5cf:src/astra/strategies.py:17:from .features import average_true_range, donchian_channel, rolling_zscore
+591c5cf:src/astra/strategies.py:213:    atr = average_true_range(history, config.atr_window)
+591c5cf:src/astra/strategies.py:252:    atr = average_true_range(history, config.atr_window)
+591c5cf:src/astra/strategies.py:293:    atr = average_true_range(history, config.atr_window)
+591c5cf:src/astra/strategy_validation.py:190:    """Illustrative, untuned grid across families; not a recommendation."""
+591c5cf:src/astra/templates/index.html:28:        <section class="metric-grid kpi-grid" id="board-kpis" aria-label="Chiffres du compte démo"></section>
+591c5cf:src/astra/templates/index.html:30:        <section class="board-grid">
+591c5cf:src/astra/templates/index.html:59:          <div class="actions-grid">
+591c5cf:src/astra/templates/index.html:105:      <section class="metric-grid" aria-label="État des données et du dernier backtest">
+591c5cf:src/astra/templates/index.html:113:      <section class="content-grid">
+591c5cf:src/astra/templates/index.html:155:      <section class="content-grid" aria-label="Exécution simulée (Order Gateway)">
+591c5cf:src/astra/templates/index.html:270:        <div class="metric-grid" id="bt-metrics"></div>
+591c5cf:src/astra/templates/index.html:310:        <div class="metric-grid" id="sim-metrics"></div>
+591c5cf:src/astra/templates/index.html:336:      <section class="metric-grid" id="demo-cards"></section>
