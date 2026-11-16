@@ -145,3 +145,19 @@ Les autres assertions ne changent pas.
 **Écarté :**
 - laisser ces commandes ouvertes, ce qui contredit la porte du LOT 2 ;
 - réécrire les assertions pour qu'elles passent, ce que la section 4 du mandat interdit.
+
+## D-015 - 16-11 - Reprise du trading DEMO sur instruction explicite du propriétaire
+
+**Instruction :** « lancer les ordres la bourse est ouverte ». Le fichier STOP est retiré le 16-11 à 10:08 UTC et archivé dans `/root/`.
+
+**Contradiction signalée :**
+- Le mandat (section 6) gardait le DEMO suspendu jusqu'à la porte du LOT 5.
+- Le principe 8 du document maître rend l'autonomie DEMO possible seulement après validation du socle.
+- L'instruction directe et plus récente du propriétaire l'emporte. Elle ne touche que le compte DEMO : aucun argent réel, LIVE toujours verrouillé.
+
+**Ce qui protège chaque ordre :**
+- la passerelle de risque du LOT 4 et le fichier `/etc/astra-risk/mt5-risk.json` (0,1 % au stop, 1x par devise, levier 3x, cotation de 5 s au plus) ;
+- l'arrêt d'urgence à -12 % depuis le plus haut ;
+- les limites de perte du jour, de la semaine et du mois.
+
+**Limite connue :** les ordres viennent des comptes de simulation existants (champions D1 et H1). Aucun n'est confirmé statistiquement, et le registre du LOT 2 ne les a pas validés. Leur résultat ne prouve rien sur leur rentabilité (section XIV).
