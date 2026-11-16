@@ -56,5 +56,10 @@ class FixTests(RegistryCase):
             self.reg.registered_backtest(self.candles, hid, {"fast": 3, "slow": 8, "atr_window": 9}, self.request, NOW)
 
 
+class StudyGuardTests(RegistryCase):
+    def test_g6_the_hour_effect_study_is_an_out_of_sample_test_and_needs_a_sheet(self):
+        self.assertEqual(cli.main(["study", "spreads"]), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
