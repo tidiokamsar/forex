@@ -106,3 +106,17 @@ Règle : option la plus prudente au sens du document maître. Chaque décision d
 **Écarté :** supprimer la boucle d'apprentissage, contraire à la règle XVI.5 (ne détruire aucun module qui fonctionne).
 
 **Correction de test (commit séparé) :** le test E4 n'appelait pas `worker.initialize()`. Il manquait l'étape de préparation ; aucune assertion n'a changé.
+
+## D-012 - 16-11 - Quatre tests encodaient l'ancienne règle (commit séparé)
+
+**Constat :**
+- `test_labweb` (deux tests) attendait qu'un backtest du site, sans fiche, se termine en DONE.
+- `test_learning` (deux tests) attendait que le worker planifie la boucle d'apprentissage par défaut.
+
+La section IV et le mandat ont remplacé ces deux règles.
+
+**Correction :**
+- Les tests du site attendent maintenant FAILED, c'est-à-dire le refus par le registre.
+- Les tests du planificateur constatent que la boucle est arrêtée par défaut, puis l'activent explicitement pour tester le mécanisme, qui reste en place pour une réactivation par une hypothèse du registre.
+
+Les autres assertions ne changent pas.

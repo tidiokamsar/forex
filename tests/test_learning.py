@@ -562,6 +562,8 @@ class HourlyProfileTests(unittest.TestCase):
         self.candles.store(hourly_series(bars=3000), "HISTORICAL", None)
         worker = Worker(self.db, Path(self.temp.name) / "imports", ecb_enabled=False, massive_enabled=False)
         worker.initialize()
+        self.assertFalse(worker.learning_enabled)  # LOT 2 (D-012): stopped by default; the scheduler itself is tested
+        worker.learning_enabled = True
         worker.maybe_schedule_learning()
         learn_jobs = [j for j in worker.jobs.jobs() if j["kind"] == "learn"]
         self.assertEqual([j["params"] for j in learn_jobs], [{"symbol": "EURUSD", "profile": "H1"}])
@@ -653,6 +655,7 @@ class WorkerTests(LearningCase):
         now = {"t": datetime(2026, 10, 28, 8, tzinfo=UTC)}
         worker = Worker(self.db, Path(self.temp.name) / "imports", ecb_enabled=False, clock=lambda: now["t"])
         worker.initialize()
+        worker.learning_enabled = True  # LOT 2 (D-012): stopped by default; the scheduler itself is tested here
         worker.tick()
         jobs = [j for j in worker.jobs.jobs() if j["kind"] == "learn"]
         self.assertEqual(len(jobs), 1)

@@ -170,8 +170,8 @@ class WorkerTests(unittest.TestCase):
         session_id = lab.create_session(simulation_request({"symbols": ["EURUSD"], "timeframe": "H1", "source": "fixture",
                                                             "start": "2026-01-01"}, worker.candles), "test")
         summary = worker.tick()
-        self.assertEqual(summary["job"]["status"], "DONE")
-        self.assertEqual(lab.backtest(backtest_id)["status"], "DONE")
+        # LOT 2 (D-012): no backtest without a sheet; the simulation step is unchanged
+        self.assertEqual(lab.backtest(backtest_id)["status"], "FAILED")
         self.assertEqual(summary["sessions"][session_id]["processed"], 120)
 
 
@@ -236,8 +236,8 @@ class LabRouteTests(WebAppCase):
         self.assertEqual(created.status_code, 202)
         worker.tick()
         detail = operator.get(f"/api/lab/backtests/{created.get_json()['backtest_id']}").get_json()
-        self.assertEqual(detail["status"], "DONE")
-        self.assertIn("equity", detail)
+        # LOT 2 (D-012): a site backtest without a sheet in the evidence registry is refused by the worker
+        self.assertEqual(detail["status"], "FAILED")
         session = self.call(operator, "POST", "/api/sim/sessions", json={
             "symbols": ["EURUSD"], "timeframe": "H1", "source": "fixture", "start": "2026-01-01"})
         self.assertEqual(session.status_code, 201)
