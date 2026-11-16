@@ -10,12 +10,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from _support import workspace_tempdir
-from astra import evidence, jobs
+from astra import __version__, evidence, jobs
 from astra.evidence import EvidenceError, EvidenceRegistry
 from astra.marketdata import Candle, CandleStore
 from astra.papertrade import backtest_request
 
 T0 = datetime(2026, 1, 5, tzinfo=UTC)
+DATA = {"sha256": "0" * 64}  # set by each test's setUp to the fingerprint of its candles (LOT 2 fix, D-013)
 NOW = datetime(2026, 11, 16, tzinfo=UTC)
 
 
@@ -26,7 +27,8 @@ def sheet(**kw):
             "sealed_test_period": [(T0 + timedelta(hours=200)).isoformat(), (T0 + timedelta(hours=300)).isoformat()],
             "parameters": {"fast": 3, "slow": 8}, "costs": "spread et glissement du modèle, doublés en test",
             "expected_result": "Sharpe net > 0", "abandon_criterion": "Sharpe net < 0,3 sur le jeu scellé",
-            "planned_variants": 3, "code_version": "test", "data_sha256": "0" * 64}
+            "abandon_rule": {"metric": "net_pnl", "op": "<", "threshold": -1e12},
+            "planned_variants": 3, "code_version": __version__, "data_sha256": DATA["sha256"]}
     base.update(kw)
     return base
 
@@ -45,6 +47,8 @@ class RegistryCase(unittest.TestCase):
             bars.append(Candle("EURUSD", "H1", T0 + timedelta(hours=i), price, price + 0.001, price - 0.001, price, None,
                                "test", "OHLC"))
         self.candles.store(bars, "HISTORICAL", None)
+        DATA["sha256"] = evidence.data_fingerprint(self.candles, "EURUSD", "H1", "test", T0.isoformat(),
+                                                   (T0 + timedelta(hours=300)).isoformat())
         self.request = backtest_request({"symbol": "EURUSD", "timeframe": "H1", "source": "test",
                                          "strategy_params": {"fast": 3, "slow": 8, "atr_window": 3, "min_atr_pct": 0}})
 

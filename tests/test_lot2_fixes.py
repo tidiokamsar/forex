@@ -24,8 +24,9 @@ class FixTests(RegistryCase):
             evidence.require_registration(forged)
 
     def test_g2_every_cli_research_command_refuses_without_a_sheet(self):
-        for argv in (["backtest", "--csv", "x.csv"], ["walk-forward", "--csv", "x.csv"], ["evaluate-strategies"],
-                     ["demo"]):
+        for argv in (["backtest", "--csv", "x.csv", "--source-type", "SYNTHETIC", "--exploratory"],
+                     ["walk-forward", "--csv", "x.csv", "--source-type", "SYNTHETIC", "--hypothesis", "h"],
+                     ["evaluate-strategies"], ["demo"]):
             self.assertEqual(cli.main(argv), 2, argv)
 
     def test_g3_the_numeric_abandon_rule_closes_the_hypothesis_on_the_final_test(self):
