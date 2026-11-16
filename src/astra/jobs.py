@@ -20,7 +20,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import learning, marketdata, massive
+from . import evidence, learning, marketdata, massive
 from .marketdata import CandleStore, MarketDataError
 from .papertrade import LabStore, SimulationError, run_backtest
 
@@ -175,7 +175,9 @@ class Worker:
         self.jobs = JobStore(self.database)
         self.learning = learning.LearningStore(self.database)
         self.learning_h1 = learning.LearningStore(self.database, learning.H1_PROFILE)
-        self.learning_enabled = True
+        # LOT 2 (section IV): the daily search of 120 variants per instrument is stopped. Research goes through the
+        # evidence registry (astra.evidence): a sheet before any test, a budget, a sealed final set.
+        self.learning_enabled = False
         self.ecb_fetch = ecb_fetch
         self.ecb_enabled = ecb_enabled
         self.massive_client = massive_client or (lambda: massive.MassiveClient(massive.load_key()))
@@ -220,6 +222,8 @@ class Worker:
                 raise MarketDataError(f"Massive : {report['failed']} ({report['not_attempted']} série(s) non tentée(s))")
             return report
         if job["kind"] == "learn":
+            if not self.learning_enabled:
+                raise evidence.EvidenceError("boucle d'apprentissage arrêtée (LOT 2) : passer par le registre des preuves")
             symbol = str(params["symbol"])
             store = self.learning_h1 if params.get("profile") == "H1" else self.learning
             result = learning.learn(self.candles, store, symbol, self.lab)
@@ -241,9 +245,10 @@ class Worker:
                 stored = self.lab.backtest(backtest_id, item_limit=0)
                 if stored is None:
                     raise SimulationError(f"backtest {backtest_id} introuvable")
+                evidence.require_registration(stored["params"])  # no backtest without a sheet (LOT 2)
                 result = run_backtest(self.candles, stored["params"])
                 self.lab.save_backtest_result(backtest_id, result)
-            except (SimulationError, MarketDataError) as exc:
+            except (SimulationError, MarketDataError, evidence.EvidenceError) as exc:
                 self.lab.set_backtest_status(backtest_id, "FAILED", str(exc))
                 raise
             except Exception:

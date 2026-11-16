@@ -378,6 +378,13 @@ def _lab_command(args: argparse.Namespace, config: AppConfig) -> int:
                                 "start": args.start, "end": args.end,
                                 "risk": {k: v for k, v in risk.items() if v is not None},
                                 "costs": {"spread_pips": args.spread_pips} if args.spread_pips is not None else {}})
+    from . import evidence
+
+    try:
+        evidence.require_registration(request)  # no backtest without a sheet (LOT 2)
+    except evidence.EvidenceError as exc:
+        _write_json({"status": "refused", "reason": str(exc)})
+        return 2
     backtest_id = lab.create_backtest(request, "cli")
     result = run_backtest(candles, request)
     lab.save_backtest_result(backtest_id, result)

@@ -93,3 +93,16 @@ Règle : option la plus prudente au sens du document maître. Chaque décision d
 **Constaté en production au premier déploiement :**
 - **Le veilleur ne pouvait pas lire `/etc/astra/mt5-risk.json`.** Le dossier est en 0750 root:astra et `astra-mt5` n'est pas dans ce groupe. Le fichier passe dans `/etc/astra-risk/` (dossier 0755 root, fichier 0644 root), sans toucher aux droits de `/etc/astra`, qui contient des secrets.
 - **Le terminal MT5 ne répondait pas au second processus** (`IPC timeout`). Le veilleur décide donc à partir des fonds propres que le pont enregistre toutes les 5 s, avec une fraîcheur de 180 s au plus. Il déclare l'urgence, et c'est le pont qui ferme les positions. Le veilleur ne ferme lui-même que s'il arrive à s'attacher au terminal.
+
+## D-011 - 16-11 - LOT 2 : où le registre s'impose
+
+**Choix :**
+- `evidence.require_registration` garde chaque point d'entrée : backtests du site (tâche `backtest` du worker), commande `astra backtest` et tâche `learn`.
+- La fonction de calcul `run_backtest` reste une fonction pure, appelée par le registre et par les tests unitaires.
+- La boucle quotidienne de 120 variantes est arrêtée : `Worker.learning_enabled` vaut `False`, et une tâche `learn` déjà en file est refusée.
+
+**Raison :** mettre le contrôle dans la fonction pure obligerait à faire passer un jeton par chaque test du moteur. Le garde sur les points d'entrée tient la même règle là où un backtest peut réellement être lancé.
+
+**Écarté :** supprimer la boucle d'apprentissage, contraire à la règle XVI.5 (ne détruire aucun module qui fonctionne).
+
+**Correction de test (commit séparé) :** le test E4 n'appelait pas `worker.initialize()`. Il manquait l'étape de préparation ; aucune assertion n'a changé.
