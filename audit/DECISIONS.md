@@ -161,3 +161,14 @@ Les autres assertions ne changent pas.
 - les limites de perte du jour, de la semaine et du mois.
 
 **Limite connue :** les ordres viennent des comptes de simulation existants (champions D1 et H1). Aucun n'est confirmé statistiquement, et le registre du LOT 2 ne les a pas validés. Leur résultat ne prouve rien sur leur rentabilité (section XIV).
+
+## D-016 - 16-11 - Règle levée par le propriétaire : « DEMO suspendu jusqu'à la porte du LOT 5 »
+
+**Instruction :** « levee cette decision : DEMO suspendu jusqu'à la porte du LOT 5 ». La règle de la section 6 du mandat est retirée.
+
+**Effet :** le trading DEMO reste actif pendant la construction des LOT 3 et 5 à 9. Il ne sera plus suspendu à la porte d'un lot. Un STOP ne sera posé que sur votre demande, par l'arrêt d'urgence (-12 %) ou par les limites de perte.
+
+**Inchangé :**
+- toute entrée passe par la passerelle de risque du LOT 4 ;
+- LIVE reste verrouillé ;
+- les ordres de test du LOT 5 passeront par la même passerelle.

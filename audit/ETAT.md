@@ -15,7 +15,7 @@
 ## Production
 
 - **Release :** 295dc35 pour tous les services, pont compris (redémarré le 16-11 vers 10:20 UTC ; le curseur des ticks évite tout trou).
-- **Trading :** le fichier STOP est posé et aucune position ASTRA n'est ouverte. Le DEMO reste suspendu jusqu'à la porte du LOT 5.
+- **Trading :** le DEMO est actif depuis le 16-11 à 10:08 UTC (D-015). La suspension jusqu'au LOT 5 a été levée par le propriétaire (D-016). Chaque entrée passe par les limites du LOT 4.
 - **Limites :** `/etc/astra-risk/mt5-risk.json`, empreinte SHA-256 `e5f5635f...`.
 - **Veilleur :** `astra-mt5-emergency` est actif. Il décide à partir des fonds propres enregistrés par le pont, car il reçoit un `IPC timeout` du terminal.
 - **Recherche :** la boucle de 120 variantes est arrêtée et tout backtest sans fiche est refusé.
