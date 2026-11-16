@@ -630,6 +630,10 @@ def _run(args: argparse.Namespace) -> int:
             return 0
 
         if args.command == "study":
+            # LOT 2: an out-of-sample hour effect is a test; it runs only as a registered hypothesis (LOT 3)
+            _write_json({"status": "refused", "command": "study spreads",
+                         "reason": "étude hors échantillon sans fiche au registre des preuves (LOT 2) : voir LOT 3"})
+            return 2
             from . import spreadstudy
             from .marketdata import CandleStore
             from .mt5view import Mt5View
