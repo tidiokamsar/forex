@@ -1,0 +1,13 @@
+tar_hash_ok
+current_release=/opt/astra/releases/6779d9f
+active
+active
+active
+active
+active
+astra 303
+app 200
+auth 302
+chantier360 200
+Ran 1406 tests in 341.695s
+OK (skipped=20, expected failures=15)
