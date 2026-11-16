@@ -87,6 +87,7 @@ class GateTests(RegistryCase):
         with self.assertRaises(EvidenceError):
             evidence.require_registration(self.request)
         worker = jobs.Worker(self.db, Path(self.temp.name) / "imports", ecb_enabled=False, massive_enabled=False)
+        worker.initialize()
         self.assertFalse(worker.learning_enabled)  # the daily 120-variant loop is stopped (section IV)
         from astra.papertrade import LabStore
 
