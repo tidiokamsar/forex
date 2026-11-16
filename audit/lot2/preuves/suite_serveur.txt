@@ -1,0 +1,3 @@
+Ran 1401 tests in 341.385s
+OK (skipped=1, expected failures=15)
+/opt/astra/releases/1fcaf89

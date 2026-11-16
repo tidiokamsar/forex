@@ -1,0 +1,1 @@
+{'prior': 19390, 'registered': 0, 'total': 19390}
