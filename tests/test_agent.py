@@ -26,7 +26,7 @@ EXPECTED_AGENT_ENDPOINTS = {
              "sim_sessions", "sim_session", "learn_overview", "system_jobs", "mt5_overview", "market_chart",
              "dashboard_overview", "mt5_instruments_summary", "mt5_ticks_status"},
     "lab": {"market_ingest", "lab_backtest_create", "sim_create", "sim_action"},
-    "mt5": {"mt5_snapshot", "mt5_quotes", "mt5_candles", "mt5_history", "mt5_instruments", "mt5_ticks", "mt5_requests_pending",
+    "mt5": {"mt5_snapshot", "mt5_quotes", "mt5_candles", "mt5_history", "mt5_instruments", "mt5_ticks", "mt5_hours", "mt5_requests_pending",
             "mt5_request_result"},
 }
 
