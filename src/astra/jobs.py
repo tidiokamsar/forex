@@ -298,6 +298,27 @@ class Worker:
             return  # no key on this host: nothing to schedule
         self.jobs.enqueue("ingest_massive", {"scheduled": True}, "worker:planification", dedupe_key="ingest_massive")
 
+    def maybe_reevaluate_rollover(self) -> dict[str, Any] | None:
+        """LOT 3: once a day, run the six-month rollover sheet if six months of hourly bid/ask rows exist (once)."""
+
+        today = self.clock().date().isoformat()
+        if getattr(self, "_rollover_checked", None) == today:
+            return None
+        self._rollover_checked = today
+        from . import rollover
+        from .evidence import EvidenceError, EvidenceRegistry
+        from .ticks import TickStore
+
+        try:
+            registry = EvidenceRegistry(self.database)
+            registry.initialize()
+            store = TickStore.beside(self.database)
+            store.initialize()
+            return rollover.maybe_reevaluate(registry, store.hours(), self.clock())
+        except (EvidenceError, OSError, ValueError) as exc:
+            LOG.warning("réévaluation du rollover impossible : %s", exc)
+            return None
+
     def maybe_schedule_learning(self) -> None:
         """Continuous improvement: managed paper accounts exist, and each pair is re-evaluated once a day."""
 
@@ -320,6 +341,7 @@ class Worker:
         """One loop: schedule, run at most one job, advance every running simulation."""
 
         summary: dict[str, Any] = {"job": None, "sessions": {}}
+        self.maybe_reevaluate_rollover()
         self.maybe_schedule_ecb()
         try:
             self.maybe_schedule_massive()

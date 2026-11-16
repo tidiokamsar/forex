@@ -41,6 +41,7 @@ from .marketdata import INSTRUMENTS
 
 SERVER_ZONES = {"MetaQuotes-Demo": "Europe/Athens"}  # same as brokers.mt5_demo.SERVER_ZONES (checked by a test)
 NON_REPRESENTATIVE_SERVERS = frozenset({"MetaQuotes-Demo"})  # a platform vendor's demo server, not a broker
+MAX_HOUR_ROWS = 500
 MAX_TICKS_PER_POST = 800      # about 45 KB of JSON: under the proxy's 64 KB body limit
 TICK_DB_DAYS = 14             # PRESET: raw ticks kept in the database this long; sealed daily files are kept
 STALE_SECONDS = 5             # PRESET: a quote older than this while the market is open is stale
@@ -72,6 +73,10 @@ CREATE TABLE IF NOT EXISTS account_facts (
     representative INTEGER NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
     PRIMARY KEY (server, company, margin_mode, currency));
 CREATE TABLE IF NOT EXISTS tick_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS tick_hours (
+    symbol TEXT NOT NULL, hour TEXT NOT NULL, first_bid REAL NOT NULL, first_ask REAL NOT NULL, last_bid REAL NOT NULL,
+    last_ask REAL NOT NULL, median_spread_pips REAL NOT NULL, p90_spread_pips REAL NOT NULL, ticks INTEGER NOT NULL,
+    PRIMARY KEY (symbol, hour)) WITHOUT ROWID;
 """
 
 MARGIN_MODES = {0: "NETTING", 1: "EXCHANGE", 2: "HEDGING"}  # MetaTrader 5 ACCOUNT_MARGIN_MODE_*
@@ -240,6 +245,42 @@ class TickStore:
         db.execute("INSERT INTO tick_rejects(day, symbol, reason, n) VALUES (?,?,?,1) "
                    "ON CONFLICT(day, symbol, reason) DO UPDATE SET n = n + 1", (day, symbol, reason))
 
+    def record_hours(self, payload: Any) -> dict[str, int]:
+        """Hourly bid/ask summaries (LOT 3): stored once per instrument and hour, never rewritten."""
+
+        if not isinstance(payload, dict) or payload.get("server") not in SERVER_ZONES:
+            raise TickError("heures : serveur non vérifié")
+        rows = payload.get("rows")
+        if not isinstance(rows, list) or not rows or len(rows) > MAX_HOUR_ROWS:
+            raise TickError(f"heures : liste de 1 à {MAX_HOUR_ROWS} lignes attendue")
+        clean = []
+        for r in rows:
+            prices = [r.get(k) for k in ("first_bid", "first_ask", "last_bid", "last_ask")] if isinstance(r, dict) else []
+            if (not isinstance(r, dict) or r.get("symbol") not in INSTRUMENTS or not isinstance(r.get("hour"), str)
+                    or len(prices) != 4 or not all(_finite(p) and p > 0 for p in prices)
+                    or prices[1] < prices[0] or prices[3] < prices[2]
+                    or not _finite(r.get("median_spread_pips")) or not _finite(r.get("p90_spread_pips"))
+                    or not isinstance(r.get("ticks"), int)):
+                raise TickError("heures : ligne illisible ou incohérente (ask inférieur au bid)")
+            try:
+                datetime.fromisoformat(r["hour"])
+            except ValueError as exc:
+                raise TickError("heures : heure illisible") from exc
+            clean.append((r["symbol"], r["hour"], *prices, r["median_spread_pips"], r["p90_spread_pips"], r["ticks"]))
+        with self._connect() as db:
+            before = db.total_changes
+            db.executemany("INSERT OR IGNORE INTO tick_hours VALUES (?,?,?,?,?,?,?,?,?)", clean)
+            stored = db.total_changes - before
+        return {"stored": stored}
+
+    def hours(self, symbol: str | None = None) -> list[dict[str, Any]]:
+        keys = ("symbol", "hour", "first_bid", "first_ask", "last_bid", "last_ask", "median_spread_pips",
+                "p90_spread_pips", "ticks")
+        with self._connect() as db:
+            sql = "SELECT * FROM tick_hours" + (" WHERE symbol = ?" if symbol else "") + " ORDER BY symbol, hour"
+            rows = db.execute(sql, (symbol,) if symbol else ()).fetchall()
+        return [dict(zip(keys, r, strict=True)) for r in rows]
+
     def ticks(self, symbol: str, day: str) -> list[tuple[int, float, float, int]]:
         start, end = _day_bounds(day)
         with self._connect() as db:
@@ -298,6 +339,12 @@ class TickStore:
             db.execute("INSERT INTO tick_seals(symbol, day, sha256, rows, path, provenance, sealed_at) VALUES (?,?,?,?,?,?,?)",
                        (symbol, day, digest, len(rows), str(target), json.dumps(provenance),
                         (now or datetime.now(UTC)).isoformat()))
+        if rows:  # LOT 3: the sealed day also feeds the hourly bid/ask summaries
+            from .rollover import hourly_from_ticks
+
+            hourly = hourly_from_ticks(symbol, [(0, t, bid, ask, flags) for t, bid, ask, flags in rows])
+            for start in range(0, len(hourly), MAX_HOUR_ROWS):
+                self.record_hours({"server": server, "rows": hourly[start:start + MAX_HOUR_ROWS]})
         return {"symbol": symbol, "day": day, "sha256": digest, "rows": len(rows), "path": str(target),
                 "already_sealed": False}
 

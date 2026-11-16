@@ -406,6 +406,20 @@ def register_lab_routes(app: Flask, *, database: Path, import_dir: Path, require
 
         return answer(produce)
 
+    @app.post("/api/mt5/hours")
+    @require(WebRole.OPERATOR)
+    def mt5_hours() -> Response:
+        if g.get("agent") is None:
+            return error(403, "forbidden")
+
+        def produce() -> dict[str, Any]:
+            try:
+                return tick_store.record_hours(request.get_json(silent=True))
+            except ticks.TickError as exc:
+                raise MarketDataError(str(exc)) from exc
+
+        return answer(produce)
+
     @app.get("/api/mt5/ticks/status")
     @require(WebRole.READ_ONLY)
     def mt5_ticks_status() -> Response:

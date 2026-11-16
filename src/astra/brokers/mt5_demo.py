@@ -187,6 +187,30 @@ class Mt5DemoFeed:
                         "margin_initial": float(getattr(s, "margin_initial", 0) or 0)})
         return out
 
+    def ticks_range(self, symbol: str, start_utc: datetime, end_utc: datetime) -> list[tuple[int, int, float, float, int]]:
+        """Raw ticks of a UTC interval from the terminal's history (LOT 3 backfill). The interval is asked in the
+        server clock, as ``ticks_since`` does, then the ticks are converted to UTC and kept inside the interval."""
+
+        mt5 = self.mt5
+        if not hasattr(mt5, "copy_ticks_range"):
+            raise Mt5DemoError("ce terminal ne fournit pas l'historique des ticks")
+        if not mt5.symbol_select(symbol, True):
+            raise Mt5DemoError(f"{symbol} indisponible")
+        zone = self._zone()
+        lo, hi = int(start_utc.timestamp() * 1000), int(end_utc.timestamp() * 1000)
+        offset = int(zone.utcoffset(start_utc.replace(tzinfo=None)).total_seconds())
+        rows = mt5.copy_ticks_range(symbol, lo // 1000 + offset - 3600, hi // 1000 + offset + 3600,
+                                    getattr(mt5, "COPY_TICKS_ALL", -1))
+        if rows is None:
+            raise Mt5DemoError(f"historique des ticks {symbol} indisponible : {mt5.last_error()}")
+        out = []
+        for row in rows:
+            raw = int(row["time_msc"])
+            utc = server_ms_to_utc_ms(raw, zone)
+            if lo <= utc < hi:
+                out.append((raw, utc, float(row["bid"]), float(row["ask"]), int(row["flags"])))
+        return out
+
     def ticks_since(self, symbol: str, after_raw_ms: int | None, count: int) -> list[tuple[int, int, float, float, int]]:
         """Raw ticks of ``symbol`` from ``after_raw_ms`` (server clock, milliseconds) on, at most ``count``.
 

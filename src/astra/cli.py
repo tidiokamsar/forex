@@ -110,6 +110,8 @@ def build_parser() -> argparse.ArgumentParser:
     costs_cmd = ticks_actions.add_parser("costs", help="Spread médian et 90e centile par heure UTC, depuis les ticks")
     costs_cmd.add_argument("--days", required=True, help="jours UTC séparés par des virgules")
     ticks_actions.add_parser("verify", help="Rejoue les empreintes des jours scellés")
+    rollover_cmd = commands.add_parser("rollover", help="LOT 3 : verdict rollover, expérience préenregistrée au registre")
+    rollover_cmd.add_argument("--label", default="provisoire")
     study_cmd = commands.add_parser("study", help="Études de recherche en lecture seule (aucun ordre)")
     study_actions = study_cmd.add_subparsers(dest="study_action", required=True)
     study_actions.add_parser("spreads", help="Écart réel par heure (cotations du pont) et effet horaire avec ces écarts")
@@ -627,6 +629,18 @@ def _run(args: argparse.Namespace) -> int:
                 _write_json({s: store.costs(s, days) for s in INSTRUMENTS})
             else:
                 _write_json(store.verify_seals())
+            return 0
+
+        if args.command == "rollover":
+            from . import rollover
+            from .evidence import EvidenceRegistry
+            from .ticks import TickStore
+
+            registry = EvidenceRegistry(config.database_path)
+            registry.initialize()
+            store = TickStore.beside(config.database_path)
+            store.initialize()
+            _write_json(rollover.run_experiment(registry, store.hours(), datetime.now(UTC), label=args.label))
             return 0
 
         if args.command == "study":

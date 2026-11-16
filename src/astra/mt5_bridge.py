@@ -26,7 +26,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -628,6 +628,47 @@ class Bridge:
                                                       "account": facts})
         return {"instruments": len(items)}
 
+    def backfill_hours_step(self) -> dict[str, Any] | None:
+        """LOT 3: read the terminal's tick history back, one instrument and UTC day per call, and send its hourly
+        bid/ask summaries. Asked by a ``BACKFILL_HOURS`` file holding the number of days; progress survives a restart."""
+
+        request = self.workdir / "BACKFILL_HOURS"
+        if not request.exists():
+            return None
+        try:
+            days = max(1, min(400, int(request.read_text(encoding="utf-8").strip() or "180")))
+        except ValueError:
+            days = 180
+        state = self.state.setdefault("hours_backfill", {})
+        if state.get("request") != str(days) or state.get("done"):
+            state.clear()
+            state.update(request=str(days), symbol=0, day=1, done=False, rows=0)
+        symbols = list(INSTRUMENTS)
+        symbol = symbols[state["symbol"]]
+        today = self.clock().replace(hour=0, minute=0, second=0, microsecond=0)
+        start = today - timedelta(days=state["day"])
+        from .rollover import hourly_from_ticks
+
+        try:
+            ticks = self.trader.ticks_range(symbol, start, start + timedelta(days=1))
+        except Mt5DemoError as exc:
+            self.note("hours_backfill_unavailable", symbol=symbol, reason=str(exc)[:120])
+            ticks = []
+        rows = hourly_from_ticks(symbol, ticks) if ticks else []
+        if rows:
+            self.client.post("/api/mt5/hours", {"server": self.trader.account["server"], "rows": rows})
+            state["rows"] += len(rows)
+        state["day"] += 1
+        if state["day"] > days:
+            state["symbol"] += 1
+            state["day"] = 1
+            if state["symbol"] >= len(symbols):
+                state["done"] = True
+                self.note("hours_backfill_done", rows=state["rows"], days=days)
+                request.unlink(missing_ok=True)
+        self.save()
+        return {"symbol": symbol, "day": start.date().isoformat(), "rows": len(rows)}
+
     def sync_ticks(self) -> dict[str, Any]:
         """Raw ticks of every instrument since the last one sent, in posts under the proxy's limit. Read only.
 
@@ -756,6 +797,10 @@ class Bridge:
                     except (ApiError, OSError, Mt5DemoError, ValueError, TypeError, KeyError) as exc:
                         self.note("ticks_failed", reason=str(exc)[:160])
                     next_ticks = started + TICKS_SECONDS
+                try:
+                    self.backfill_hours_step()
+                except (ApiError, OSError, Mt5DemoError, ValueError, TypeError, KeyError) as exc:
+                    self.note("hours_backfill_failed", reason=str(exc)[:160])
                 if started >= next_fast:
                     self.push_candles(("M5", "M15"), recent=True)
                     next_fast = started + FAST_CANDLES_SECONDS

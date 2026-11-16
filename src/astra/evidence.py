@@ -73,6 +73,10 @@ def require_registration(request: dict[str, Any]) -> None:
         raise EvidenceError("aucun backtest sans fiche au registre des preuves (LOT 2) : enregistrer une hypothèse")
 
 
+def sha_of(value: Any) -> str:
+    return _sha(value)
+
+
 def _sha(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
 
@@ -245,6 +249,57 @@ class EvidenceRegistry:
             self.close(hid, "REJETEE", f"critère d'abandon atteint : {rule['metric']} = {value} {rule['op']} "
                                        f"{rule['threshold']}", now)
         return {**run, "abandon": abandon, "metric_value": value}
+
+    def record_experiment(self, hid: int, kind: str, params: dict[str, Any], data_sha256: str,
+                          result: dict[str, Any], now: datetime) -> dict[str, Any]:
+        """A registered experiment that is not a candle backtest (LOT 3: hourly bid/ask rows). The caller computes on
+        the data whose fingerprint it gives; the same rules apply: open hypothesis, current code version, fixed
+        parameters, matching data fingerprint, variant budget for STUDY, one access and the abandon rule for FINAL."""
+
+        if kind not in ("STUDY", "FINAL"):
+            raise EvidenceError("type d'exécution : STUDY ou FINAL")
+        found = self._open(hid)
+        sheet = found["sheet"]
+        if sheet["code_version"] != __version__:
+            raise EvidenceError("version du code différente de la fiche : nouvelle fiche nécessaire")
+        unfixed = set(params) - set(sheet["parameters"])
+        if unfixed:
+            raise EvidenceError(f"paramètres non fixés par la fiche : {', '.join(sorted(unfixed))}")
+        if data_sha256 != sheet["data_sha256"]:
+            raise EvidenceError("empreinte des données différente de la fiche : données changées ou mauvaise série")
+        if kind == "STUDY":
+            self.add_variant(hid, params, now)
+        elif found["final_accesses"] >= 1:
+            raise EvidenceError("jeu final déjà ouvert pour cette hypothèse : un seul accès")
+        digest = _sha(result)
+        with self._connect() as db:
+            cursor = db.execute("INSERT INTO ev_runs(hypothesis_id, kind, params_json, request_json, result_json, "
+                                "result_sha256, ran_at) VALUES (?,?,?,?,?,?,?)",
+                                (hid, kind, json.dumps(params, sort_keys=True), json.dumps({"data_sha256": data_sha256}),
+                                 json.dumps(result, sort_keys=True, default=str), digest, now.isoformat()))
+        out = {"run_id": int(cursor.lastrowid), "result": result, "result_sha256": digest}
+        if kind == "FINAL":
+            rule = sheet["abandon_rule"]
+            value = result.get("metrics", {}).get(rule["metric"])
+            measurable = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+            abandon = not measurable or ABANDON_OPERATORS[rule["op"]](value, rule["threshold"])
+            if abandon:
+                self.close(hid, "REJETEE", f"critère d'abandon atteint : {rule['metric']} = {value} {rule['op']} "
+                                           f"{rule['threshold']}", now)
+            out.update(abandon=abandon, metric_value=value)
+        return out
+
+    def recorded_sha(self, run_id: int) -> str:
+        with self._connect() as db:
+            row = db.execute("SELECT result_sha256 FROM ev_runs WHERE id = ?", (run_id,)).fetchone()
+        if row is None:
+            raise EvidenceError(f"exécution {run_id} inconnue")
+        return str(row["result_sha256"])
+
+    def find(self, title: str) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute("SELECT id FROM ev_hypotheses ORDER BY id").fetchall()
+        return [h for h in (self.hypothesis(r["id"]) for r in rows) if h["sheet"].get("title") == title]
 
     def replay(self, candles: Any, run_id: int) -> dict[str, Any]:
         with self._connect() as db:
