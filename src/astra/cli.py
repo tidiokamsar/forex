@@ -684,6 +684,13 @@ def _run(args: argparse.Namespace) -> int:
         if args.command in defaultable and args.csv is not None and args.source_type is None:
             raise ValueError("--source-type is required with --csv")
 
+        if args.command in ("demo", "backtest", "walk-forward", "evaluate-strategies", "paper-replay", "ml-baseline"):
+            # LOT 2: no backtest without a sheet; research goes through the evidence registry (astra.evidence)
+
+            _write_json({"status": "refused", "command": args.command,
+                         "reason": "aucun backtest sans fiche au registre des preuves (LOT 2)"})
+            return 2
+
         if args.command == "demo" or (args.command in defaultable and args.csv is None):
             csv_path = PROJECT_ROOT / "data" / "synthetic_eurusd_m15.csv"
             if hashlib.sha256(csv_path.read_bytes()).hexdigest() != DEMO_FIXTURE_SHA256:

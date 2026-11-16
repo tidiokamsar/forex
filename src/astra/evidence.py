@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import secrets
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -27,15 +29,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from .papertrade import run_backtest
 
 HYPOTHESES_PER_YEAR = 20
 VARIANTS_PER_HYPOTHESIS = 5
 REQUIRED_FIELDS = ("title", "economic_reason", "source", "universe", "horizon", "study_period", "sealed_test_period",
-                   "parameters", "costs", "expected_result", "abandon_criterion", "planned_variants", "code_version",
-                   "data_sha256")
+                   "parameters", "costs", "expected_result", "abandon_criterion", "abandon_rule", "planned_variants",
+                   "code_version", "data_sha256")
+ABANDON_OPERATORS = {"<": lambda a, b: a < b, "<=": lambda a, b: a <= b, ">": lambda a, b: a > b,
+                     ">=": lambda a, b: a >= b}
 CLOSED = ("REJETEE", "ABANDONNEE", "RETENUE")
-_TOKEN = "evidence-registry"
+# A secret drawn by each process: a request stored by another process (the site, a CLI call) can never carry it.
+_TOKEN = secrets.token_hex(16)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ev_hypotheses (
@@ -94,10 +100,23 @@ def check_sheet(sheet: Any) -> dict[str, Any]:
     s0, s1, t0, t1 = (_when(x) for x in (*study, *sealed))
     if not (s0 < s1 <= t0 < t1):
         raise EvidenceError("la période scellée doit suivre la période d'étude, sans recouvrement")
+    rule = sheet["abandon_rule"]
+    if not (isinstance(rule, dict) and isinstance(rule.get("metric"), str) and rule.get("op") in ABANDON_OPERATORS
+            and isinstance(rule.get("threshold"), (int, float)) and not isinstance(rule.get("threshold"), bool)
+            and math.isfinite(rule["threshold"])):
+        raise EvidenceError("critère d'abandon chiffré attendu : {metric, op (<, <=, >, >=), threshold}")
     variants = sheet["planned_variants"]
     if not isinstance(variants, int) or isinstance(variants, bool) or not 1 <= variants <= VARIANTS_PER_HYPOTHESIS:
         raise EvidenceError(f"variantes prévues : de 1 à {VARIANTS_PER_HYPOTHESIS}")
     return sheet
+
+
+def data_fingerprint(candles: Any, symbol: str, timeframe: str, source: str, start: str, end: str) -> str:
+    """SHA-256 of the exact candles of a series between two dates (study period start to sealed period end)."""
+
+    lo, hi = _when(start), _when(end)
+    rows = [c for c in candles.candles(symbol, timeframe, source) if lo <= c.timestamp < hi]
+    return candles.fingerprint(rows)
 
 
 class EvidenceRegistry:
@@ -173,8 +192,21 @@ class EvidenceRegistry:
 
     # -- runs ----------------------------------------------------------------------------------------------
 
+    def _check_run(self, candles: Any, sheet: dict[str, Any], params: dict[str, Any], request: dict[str, Any]) -> None:
+        if sheet["code_version"] != __version__:
+            raise EvidenceError(f"version du code {__version__} différente de la fiche ({sheet['code_version']}) : "
+                                "nouvelle fiche nécessaire")
+        unfixed = set(params) - set(sheet["parameters"])
+        if unfixed:
+            raise EvidenceError(f"paramètres non fixés par la fiche : {', '.join(sorted(unfixed))}")
+        digest = data_fingerprint(candles, request["symbol"], request["timeframe"], request["source"],
+                                  sheet["study_period"][0], sheet["sealed_test_period"][1])
+        if digest != sheet["data_sha256"]:
+            raise EvidenceError("empreinte des données différente de la fiche : données changées ou mauvaise série")
+
     def _run(self, candles: Any, hid: int, kind: str, params: dict[str, Any], request: dict[str, Any],
              start: str, end: str, now: datetime) -> dict[str, Any]:
+        self._check_run(candles, self.hypothesis(hid)["sheet"], params, request)
         prepared = {**request, "strategy_params": {**request.get("strategy_params", {}), **params},
                     "start": start, "end": end, "_evidence": _TOKEN}
         result = run_backtest(candles, prepared)
@@ -204,7 +236,15 @@ class EvidenceRegistry:
         if found["final_accesses"] >= 1:
             raise EvidenceError("jeu final déjà ouvert pour cette hypothèse : un seul accès")
         start, end = found["sheet"]["sealed_test_period"]
-        return self._run(candles, hid, "FINAL", params, request, start, end, now)
+        run = self._run(candles, hid, "FINAL", params, request, start, end, now)
+        rule = found["sheet"]["abandon_rule"]
+        value = run["result"].get("metrics", {}).get(rule["metric"])
+        measurable = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+        abandon = not measurable or ABANDON_OPERATORS[rule["op"]](value, rule["threshold"])
+        if abandon:  # the criterion written before the test decides, not a reading of the result
+            self.close(hid, "REJETEE", f"critère d'abandon atteint : {rule['metric']} = {value} {rule['op']} "
+                                       f"{rule['threshold']}", now)
+        return {**run, "abandon": abandon, "metric_value": value}
 
     def replay(self, candles: Any, run_id: int) -> dict[str, Any]:
         with self._connect() as db:

@@ -120,3 +120,18 @@ La section IV et le mandat ont remplacé ces deux règles.
 - Les tests du planificateur constatent que la boucle est arrêtée par défaut, puis l'activent explicitement pour tester le mécanisme, qui reste en place pour une réactivation par une hypothèse du registre.
 
 Les autres assertions ne changent pas.
+
+## D-013 - 16-11 - LOT 2, deuxième tentative : corrections après la vérification n° 1
+
+**Corrections :**
+1. **Jeton :** le jeton du registre est tiré au hasard dans chaque processus (`secrets.token_hex`). Une demande stockée par le site ou fabriquée à la main ne peut donc jamais le porter.
+2. **Commandes CLI :** `demo`, `backtest`, `walk-forward`, `evaluate-strategies`, `paper-replay` et `ml-baseline` refusent toutes sans fiche.
+3. **Critère d'abandon :** la fiche exige un critère chiffré, `abandon_rule` = {metric, op, threshold}. Il est appliqué au test final, et l'hypothèse est close en REJETEE s'il est atteint. Une mesure manquante compte comme atteinte.
+4. **Empreinte et version :** l'empreinte des données de la fiche est recalculée sur la série, du début de l'étude à la fin de la période scellée, avant chaque exécution. La version du code doit être égale à `astra.__version__`. Une variante ne peut utiliser que des paramètres fixés par la fiche.
+
+**Corrections de données de test (commit séparé) :**
+- Les arguments du test G2 étaient incomplets : l'analyseur refusait avant même la garde.
+- Le gabarit de fiche des tests E reçoit le critère chiffré, la version courante et l'empreinte réelle des bougies du test.
+- Aucune assertion n'a changé.
+
+**Limite connue :** la fonction pure `run_backtest` reste appelable par du code Python. Le langage ne permet pas de rendre un tel appel impossible ; la règle tient aux points d'entrée.
