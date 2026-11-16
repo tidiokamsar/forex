@@ -134,6 +134,11 @@ def build_parser() -> argparse.ArgumentParser:
     learn_adopt.add_argument("--symbol", help="un instrument ; sans lui, tous ceux qui ont un candidat suivi")
     learn_adopt.add_argument("--operator", required=True)
     learn_adopt.add_argument("--reason", required=True)
+    learn_capital = learn_actions.add_parser(
+        "demo-capital", help="H1 : recréer le compte DEMO d'un instrument avec le capital du compte DEMO (action humaine)")
+    learn_capital.add_argument("--symbol", required=True)
+    learn_capital.add_argument("--operator", required=True)
+    learn_capital.add_argument("--reason", required=True)
     learn_revoke = learn_actions.add_parser("revoke", help="Reprendre une paire au flux H1 DEMO : le flux quotidien reprend")
     learn_revoke.add_argument("--symbol", required=True)
     learn_revoke.add_argument("--operator", required=True)
@@ -447,6 +452,7 @@ def _massive(args: argparse.Namespace, config: AppConfig) -> int:
 
 def _learn(args: argparse.Namespace, config: AppConfig) -> int:
     from . import learning
+    from .marketdata import CandleStore
     from .papertrade import LabStore, SimulationError
 
     profile = learning.PROFILES[getattr(args, "profile", "D1")]
@@ -458,6 +464,14 @@ def _learn(args: argparse.Namespace, config: AppConfig) -> int:
     lab = LabStore(config.database_path)
     lab.initialize()
     try:
+        if args.learn_action == "demo-capital":
+            store_h1 = learning.LearningStore(config.database_path, learning.H1_PROFILE)
+            store_h1.initialize()
+            bars = CandleStore(config.database_path)
+            bars.initialize()
+            new = learning.rebase_demo_capital(store_h1, lab, bars, args.symbol.upper(), args.operator, args.reason)
+            _write_json({"symbol": args.symbol, "session_id": new, "capital": learning.DEMO_PAPER_CAPITAL})
+            return 0
         if args.learn_action == "revoke":
             h1 = learning.LearningStore(config.database_path, learning.H1_PROFILE)
             h1.initialize()

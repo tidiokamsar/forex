@@ -550,6 +550,43 @@ def review_live(store: LearningStore, lab: LabStore, symbol: str) -> str | None:
     return None
 
 
+# A DEMO paper account only gives the bridge its signals; the bridge sizes every order from the real DEMO equity
+# through the risk gateway. A 10 000 USD paper account refused the metals signals on their minimum size (16-11-2026),
+# so the bridge never saw them: DEMO accounts start with the size of the DEMO account (D-017).
+DEMO_PAPER_CAPITAL = 100_000.0
+
+
+def rebase_demo_capital(store: LearningStore, lab: LabStore, candles: CandleStore, symbol: str, operator: str,
+                        reason: str, capital: float = DEMO_PAPER_CAPITAL) -> int:
+    """A person replaces the DEMO account of ``symbol`` by a new one with the same strategy and ``capital``. The old
+    account is stopped (its history stays). Refused while the old account holds a position."""
+
+    if not operator.strip():
+        raise SimulationError("une personne doit être nommée (--operator)")
+    old = store.demo_session(symbol)
+    if old is None:
+        raise SimulationError(f"aucun compte DEMO pour {symbol}")
+    session = lab.session(old, item_limit=0)
+    if session is None:
+        raise SimulationError("compte DEMO introuvable")
+    if session["account"]["positions"]:
+        raise SimulationError("le compte DEMO porte une position : attendre sa fermeture")
+    params = session["params"]
+    begin = _now().replace(minute=0, second=0, microsecond=0)
+    request = simulation_request({"name": session["name"], "symbols": [symbol], "timeframe": session["timeframe"],
+                                  "source": session["source"], "start": begin.isoformat(),
+                                  "strategy_params": params["strategy"],
+                                  "risk": {**params["risk"], "initial_capital": float(capital)}}, candles)
+    new = lab.create_session(request, f"cli:{operator}")
+    with store._connect() as db:
+        version = db.execute(f"SELECT champion_version FROM {store._p}learn_demo WHERE symbol = ?", (symbol,)).fetchone()[0]
+    store.set_demo_session(symbol, new, version)
+    lab.set_session_status(old, "STOPPED", f"cli:{operator}")
+    store.record_event(symbol, "CAPITAL_DEMO", {"operator": operator, "reason": reason, "old_session": old,
+                                                "new_session": new, "capital": float(capital)}, None)
+    return new
+
+
 def authorize_demo(store: LearningStore, lab: LabStore, symbol: str, operator: str, reason: str, *,
                    candles: CandleStore | None = None, accept_unconfirmed: bool = False) -> bool:
     """A person gives the DEMO bridge the current champion of ``symbol``. No automatic process calls this function.
@@ -595,7 +632,7 @@ def authorize_demo(store: LearningStore, lab: LabStore, symbol: str, operator: s
                                           "start": begin.isoformat(), "strategy_params": params["strategy"],
                                           "risk": {"stop_atr_multiple": params["stop_atr_multiple"],
                                                    "take_profit_r": params.get("take_profit_r", 0.0),
-                                                   "max_positions": 1}}, candles)
+                                                   "max_positions": 1, "initial_capital": DEMO_PAPER_CAPITAL}}, candles)
             store.set_demo_session(symbol, lab.create_session(request, f"cli:{operator}"), champion["version"])
             changed = True
     store.record_event(symbol, "AUTORISATION_DEMO", {

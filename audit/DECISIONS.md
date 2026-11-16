@@ -172,3 +172,13 @@ Les autres assertions ne changent pas.
 - toute entrée passe par la passerelle de risque du LOT 4 ;
 - LIVE reste verrouillé ;
 - les ordres de test du LOT 5 passeront par la même passerelle.
+
+## D-017 - 16-11 - Comptes DEMO de simulation au capital du compte DEMO (métaux)
+
+**Constat :** du 15 au 16-11, les seuls signaux d'entrée des 19 comptes H1 portaient sur les métaux. Les comptes de simulation de 10 000 USD les ont refusés sur la taille minimale (« taille calculée 30 unités < minimum 50 »), et le pont ne les a donc jamais vus.
+
+**Correction, à la demande du propriétaire (« corrige les métaux ») :**
+- les nouveaux comptes DEMO de simulation démarrent à 100 000 USD (`DEMO_PAPER_CAPITAL`) ;
+- la commande `astra learn demo-capital` recrée le compte d'un instrument avec la même stratégie et arrête l'ancien, dont l'historique est gardé. Elle est appliquée à XAUUSD et XAGUSD.
+
+**Inchangé :** la taille réelle de chaque ordre DEMO reste calculée par le pont sur les fonds propres réels, avec 0,1 % au stop et les limites du LOT 4.
