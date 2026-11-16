@@ -1,19 +1,24 @@
-# ÉTAT - mis à jour le 15-11-2026 vers 23:10 UTC
+# ÉTAT - mis à jour le 16-11-2026 vers 00:30 UTC
 
 ## Lots
 
-| Lot | État | Prochaine action |
-|---|---|---|
-| 0 | FERMÉ | - |
-| 1 | En fenêtre de 5 jours (16 au 20-11), déployé en 03c9a35 | Samedi 21-11 après 01:00 UTC : `astra ticks gaps`, `verify` et `costs`, puis vérification par un agent distinct |
-| 4 | Code et tests commités sur la branche `lot4-risque` (68f3893). Suite serveur : 1 388 tests OK, 1 en quarantaine. **Non déployé** (D-007) | 1) Relancer la vérification indépendante : l'agent a été interrompu, aucun verdict n'est écrit. 2) Le 21-11 : installer `/etc/astra/mt5-risk.json`, le drop-in `ASTRA_MT5_RISK_FILE` et l'unité `astra-mt5-emergency`, déployer, puis tester l'arrêt d'urgence depuis le processus séparé |
-| 2 | Non commencé | Écrire et commiter ses tests ; registre, budget d'essais, arrêt de la boucle de 120 variantes |
-| 3, 5 à 9 | Non commencés | Selon l'ordre de marche du mandat |
+| Lot | État | Preuve | Prochaine action |
+|---|---|---|---|
+| 0 | FERMÉ | `audit/RAPPORT_LOT0.md` | - |
+| 1 | Fenêtre de 5 jours en cours (16 au 20-11) | `audit/RAPPORT_LOT1.md` | Samedi 21-11 après 01:00 UTC : `astra ticks gaps`, `verify` et `costs`, puis vérification par un agent distinct |
+| 4 | **FERMÉ**, avec une réserve | `audit/lot4/VERIFICATION_2.md`, `audit/lot4/preuves/production.txt` | Réserve : fermer une vraie position par l'arrêt d'urgence, au LOT 5 |
+| 2 | Code déployé (1fcaf89). Suite serveur : 1 401 tests OK, 1 en quarantaine. Compteur global : 19 390 essais antérieurs | `audit/lot2/preuves/` | Attendre `audit/lot2/VERIFICATION.md` (vérificateur en cours) |
+| 3 | Non commencé | - | Hypothèse « rollover » enregistrée au registre ; historique de ticks lu dans le terminal par le pont ; verdict provisoire ; réévaluation à 6 mois |
+| 5 | Non commencé | - | Passerelle par positions cibles, rapprochement des deals (défaut H du LOT 0), 10 pannes simulées, ordres de test minimaux, levée de la réserve du LOT 4 |
+| 6 à 9 | Non commencés | - | Selon l'ordre de marche du mandat |
 
-## État de la production
+## Production
 
-- Release 03c9a35. Le fichier STOP est posé depuis le 15-11 à 22:35 UTC : le DEMO est suspendu jusqu'à la porte du LOT 5.
-- Aucune position ASTRA n'est ouverte.
+- **Release :** 1fcaf89 pour le web, le worker et l'agent. Le pont tourne encore le code chargé au redémarrage de 23:39 UTC, en f31d65c ; il prendra la nouvelle release à son prochain redémarrage.
+- **Trading :** le fichier STOP est posé et aucune position ASTRA n'est ouverte. Le DEMO reste suspendu jusqu'à la porte du LOT 5.
+- **Limites :** `/etc/astra-risk/mt5-risk.json`, empreinte SHA-256 `e5f5635f...`.
+- **Veilleur :** `astra-mt5-emergency` est actif. Il décide à partir des fonds propres enregistrés par le pont, car il reçoit un `IPC timeout` du terminal.
+- **Recherche :** la boucle de 120 variantes est arrêtée et tout backtest sans fiche est refusé.
 
 ## Blocages
 
