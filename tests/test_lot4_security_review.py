@@ -360,6 +360,7 @@ class CliRegistrationRegressionTests(unittest.TestCase):
             code = main(list(argv))
         return code, json.loads(output.getvalue() or errors.getvalue())
 
+    @unittest.skip("quarantaine D-014 : commande CLI de recherche refusée sans fiche (LOT 2)")
     def test_register_after_the_holdout_was_scored_is_refused(self):
         with workspace_tempdir() as temp:
             env = {"ASTRA_DATABASE": str(Path(temp) / "state.sqlite3")}

@@ -135,3 +135,13 @@ Les autres assertions ne changent pas.
 - Aucune assertion n'a changé.
 
 **Limite connue :** la fonction pure `run_backtest` reste appelable par du code Python. Le langage ne permet pas de rendre un tel appel impossible ; la règle tient aux points d'entrée.
+
+## D-014 - 16-11 - 19 tests de l'ancien circuit CLI de recherche mis en quarantaine
+
+**Constat :** après D-013, 19 tests échouent, dans `test_cli`, `test_cli_operations`, `test_lot4_adversarial` et `test_lot4_security_review`. Ils exercent des commandes de recherche qui tournaient sans fiche : `demo`, `backtest`, `walk-forward`, `evaluate-strategies`, `paper-replay`, `ml-baseline`, et l'enregistrement après holdout. Le LOT 2 refuse désormais ces commandes.
+
+**Choix :** `@unittest.skip` avec cette raison, pour chacun d'eux. Le code de ces commandes n'est pas supprimé (règle XVI.5). Il sera rebranché, commande par commande, sur une hypothèse ouverte du registre quand une fiche en aura besoin, et les tests concernés sortiront alors de quarantaine.
+
+**Écarté :**
+- laisser ces commandes ouvertes, ce qui contredit la porte du LOT 2 ;
+- réécrire les assertions pour qu'elles passent, ce que la section 4 du mandat interdit.
